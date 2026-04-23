@@ -33,3 +33,9 @@ mesh-mem status
 ```
 
 For MCP integration, see the "MCP登録設定" section in `plan.md`.
+
+## Requirements
+
+- Python >= 3.10
+- Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router)
+- `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.

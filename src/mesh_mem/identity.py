@@ -8,6 +8,15 @@ Order of precedence per identity:
 ``pc_id`` and ``session_id`` MUST be stable for the lifetime of the process.
 Re-generating ``session_id`` per call would fragment the mesh-mem key
 space across Observation/Heartbeat emissions and break searchability.
+
+Filesystem requirement:
+    ``MESH_MEM_STATE_DIR`` must reside on a filesystem that supports POSIX
+    hard links (ext4 / btrfs / xfs / tmpfs / NFSv3+). FAT / exFAT / certain
+    older SMB mounts do NOT and will cause ``get_pc_id()`` to raise
+    ``OSError`` on first run. mesh-mem targets Linux dev hosts where the
+    default location (``~/.local/share/mesh-mem``) sits on such a
+    filesystem out of the box; point the env var at a non-hardlink mount
+    at your own risk.
 """
 
 from datetime import datetime
