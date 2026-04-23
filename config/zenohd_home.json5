@@ -1,0 +1,62 @@
+// zenoh-mem: home ロール用 zenohd 設定
+//
+// 対向ロールとの対称形で、storage の key_expr / strip_prefix / replication ブロックは
+// 両側で完全一致させること。timestamping は replication の前提なので全レベルで有効。
+//
+// 起動前に export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/zenoh-mem" を設定し、
+// RocksDB 格納先の親ディレクトリが存在することを確認する。
+//
+// IP の置換:
+//   192.168.3.x: 自機 (home) の LAN IP
+//   192.168.3.y: 対向 (office) の LAN IP
+
+{
+  mode: "router",
+
+  // loopback は MCP クライアント用、LAN IP は対向 router 用。0.0.0.0 は使わない。
+  listen: {
+    endpoints: [
+      "tcp/127.0.0.1:7447",
+      "tcp/192.168.3.x:7447",
+    ],
+  },
+
+  connect: {
+    endpoints: ["tcp/192.168.3.y:7447"],
+  },
+
+  // replication / storage_manager は timestamping が有効でないと動作しない。
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        rocksdb: {},
+      },
+      storages: {
+        agent_mem: {
+          key_expr: "mem/**",
+          strip_prefix: "mem",
+
+          // 両側で完全一致させること。digest 比較がズレて同期が走らなくなる。
+          replication: {
+            interval: 10.0,          // 秒 (float 可)
+            sub_intervals: 5,
+            hot: 6,
+            warm: 30,
+            propagation_delay: 250,  // ミリ秒
+          },
+
+          volume: {
+            id: "rocksdb",
+            // 実パス: ${ZENOH_BACKEND_ROCKSDB_ROOT}/agent_mem
+            dir: "agent_mem",
+            create_db: true,
+          },
+        },
+      },
+    },
+  },
+}

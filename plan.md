@@ -15,7 +15,7 @@ Zenoh の分散 pub/sub/storage を活用し、複数PCに分散したzenohd + R
 
 ## ゴール（PoC）
 
-1. 2台のPC（hwatahome-jazzy, hwata-jazzy）で zenohd + RocksDB を起動し、router間自動同期を確認
+1. 2台のPC（`home` / `office` の2ロール）で zenohd + RocksDB を起動し、router間自動同期を確認
 2. Python製 MCP サーバーで `save_observation` / `search_memory` / `delete_memory` / `get_memory_status` を公開
 3. Claude Code からMCP経由でobservationをsave → もう1台から search で見えることを確認
 4. **オフライン中の差分同期と split-brain 競合挙動を自動/半自動テストで検証**
@@ -26,7 +26,7 @@ Zenoh の分散 pub/sub/storage を活用し、複数PCに分散したzenohd + R
 ## ネットワーク構成
 
 ```
-hwatahome-jazzy (192.168.3.x)          hwata-jazzy (192.168.3.y)
+home (192.168.3.x)                     office (192.168.3.y)
 ┌────────────────────────┐            ┌────────────────────────┐
 │ Claude Code / Desktop  │            │ Gemini CLI / Codex CLI │
 │   ↓ MCP (stdio)        │            │   ↓ MCP (stdio)        │
@@ -57,8 +57,8 @@ zenoh-mem/
 ├── README.md
 ├── pyproject.toml
 ├── config/
-│   ├── zenohd_hwatahome.json5     # hwatahome-jazzy 用 zenohd設定
-│   └── zenohd_hwata.json5         # hwata-jazzy 用 zenohd設定
+│   ├── zenohd_home.json5          # home ロール用 zenohd 設定
+│   └── zenohd_office.json5        # office ロール用 zenohd 設定
 ├── src/
 │   └── zenoh_mem/
 │       ├── __init__.py
@@ -78,7 +78,9 @@ zenoh-mem/
 
 ## zenohd設定
 
-### hwatahome-jazzy用: `config/zenohd_hwatahome.json5`
+### home 用: `config/zenohd_home.json5`
+
+> ロール名 `home` / `office` は plan.md 上の抽象ラベル。実機ホスト名との対応は各自の環境に合わせて README で記載する（例: `home` = 自宅デスクトップ、`office` = 職場ノート）。
 
 ```json5
 {
@@ -90,7 +92,7 @@ zenoh-mem/
       "tcp/192.168.3.x:7447",   // 自PCのLAN側IPに置換
     ],
   },
-  connect: { endpoints: ["tcp/192.168.3.y:7447"] }, // hwata-jazzy のIPに置換
+  connect: { endpoints: ["tcp/192.168.3.y:7447"] }, // office 側のIPに置換
   timestamping: {
     enabled: { router: true, peer: true, client: true },
   },
@@ -122,9 +124,9 @@ zenoh-mem/
 }
 ```
 
-### hwata-jazzy用: `config/zenohd_hwata.json5`
+### office 用: `config/zenohd_office.json5`
 
-hwatahome とIP入れ替えの対称形。`listen` は `tcp/127.0.0.1:7447` と `tcp/192.168.3.y:7447`、`connect` は `tcp/192.168.3.x:7447`。**storage と replication のブロックは完全同一**。
+`home` とIP入れ替えの対称形。`listen` は `tcp/127.0.0.1:7447` と `tcp/192.168.3.y:7447`、`connect` は `tcp/192.168.3.x:7447`。**storage と replication のブロックは完全同一**。
 
 **注意**:
 - `timestamping.enabled` を有効にしないと storage_manager / replication が動作しない。
@@ -791,10 +793,10 @@ export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/zenoh-mem"
 mkdir -p "$ZENOH_BACKEND_ROCKSDB_ROOT"
 
 # 片側を先に起動
-zenohd -c config/zenohd_hwatahome.json5
+zenohd -c config/zenohd_home.json5
 
 # 数秒後に対向側を起動
-zenohd -c config/zenohd_hwata.json5
+zenohd -c config/zenohd_office.json5
 ```
 
 > systemd で常駐させる場合は unit の `Environment=ZENOH_BACKEND_ROCKSDB_ROOT=...` で同等の設定を行う。
@@ -814,11 +816,11 @@ python3 -m venv ~/.venv/zenoh-mem
 export ZENOH_MEM_AGENT_FAMILY=claude
 export ZENOH_MEM_CLIENT_ID=claude-code
 
-# hwatahome-jazzy で保存
+# home PC で保存
 zenoh-mem save "Fleet Adapter のKachaka統合でget_positionのレスポンス遅延を発見" \
   --project robo-hi --tags fleet-adapter,kachaka
 
-# hwata-jazzy で検索（同期確認）
+# office PC で検索（同期確認）
 zenoh-mem search "kachaka"
 
 zenoh-mem status
@@ -838,7 +840,7 @@ zenoh-mem save "while B is down 1" --project poc --tags offline-test
 zenoh-mem save "while B is down 2" --project poc --tags offline-test
 
 # 3. PC-B の zenohd を再起動
-zenohd -c config/zenohd_hwata.json5
+zenohd -c config/zenohd_office.json5
 
 # 4. interval (10s) + propagation_delay (250ms) + 余裕 = 15〜30 秒待つ
 
