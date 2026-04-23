@@ -35,26 +35,65 @@ def state_dir() -> pathlib.Path:
 def get_pc_id() -> str:
     """Return the per-host stable UUID, generating+persisting it on first call.
 
-    The create-if-absent path uses ``O_CREAT | O_EXCL`` so two mesh-mem
-    processes starting concurrently on a fresh host cannot write divergent
-    UUIDs and end up with different cached pc_ids for their lifetimes.
+    The create-if-absent path uses a **temp-file + ``os.link`` atomic publish**
+    so two mesh-mem processes racing on a fresh host cannot observe a
+    half-written ``pc_id``:
+
+        1. write the candidate UUID to a uniquely-named temp file
+        2. atomically ``os.link(tmp, pc_id)`` — either wins (pc_id now holds
+           our content in full) or raises FileExistsError (someone else
+           already published a fully-written value)
+        3. on loss, read the winner's value from ``pc_id``
+
+    The earlier ``O_CREAT|O_EXCL`` variant left a window where the loser
+    could read ``pc_id`` between create and write and cache an empty string.
+    ``os.link`` closes that window because the target only appears with the
+    source's complete content.
     """
     global _pc_id_cache
     if _pc_id_cache is not None:
         return _pc_id_cache
-    p = state_dir() / 'pc_id'
+    dir_ = state_dir()
+    p = dir_ / 'pc_id'
+
+    existing = _read_pc_id_file(p)
+    if existing is not None:
+        _pc_id_cache = existing
+        return existing
+
     pid = uuid.uuid4().hex
+    tmp = dir_ / f'.pc_id.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}'
+    tmp.write_text(pid + '\n')
     try:
-        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.link(tmp, p)
+        won = True
     except FileExistsError:
-        _pc_id_cache = p.read_text().strip()
-        return _pc_id_cache
-    try:
-        os.write(fd, (pid + '\n').encode())
+        won = False
     finally:
-        os.close(fd)
-    _pc_id_cache = pid
-    return pid
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+    if won:
+        _pc_id_cache = pid
+        return pid
+
+    existing = _read_pc_id_file(p)
+    if existing is None:
+        # pc_id exists but is unreadable/empty — a previous process likely
+        # crashed between create and write. Surface it rather than caching ''.
+        raise RuntimeError(f'pc_id at {p} exists but has no content')
+    _pc_id_cache = existing
+    return existing
+
+
+def _read_pc_id_file(p: pathlib.Path) -> str | None:
+    """Return the stored pc_id if the file exists with non-empty content."""
+    if not p.exists():
+        return None
+    value = p.read_text().strip()
+    return value or None
 
 
 def get_agent_family() -> str:
