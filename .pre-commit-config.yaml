@@ -1,0 +1,41 @@
+# 個人プロジェクト zenoh-mem 用の pre-commit 設定。
+# 親の ~/.pre-commit-config.yaml は会社向け ROS2 フックを多数含むため、
+# 本プロジェクトでは Python のみに絞り、style は自リポの pyproject.toml を参照する。
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--disable-plugin', 'KeywordDetector']
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=512']
+      - id: pretty-format-json
+        args: ['--autofix', '--indent', '4']
+        types_or: [json]
+
+  # Run ruff-format BEFORE ruff --fix so line-length issues are resolved
+  # before the linter checks them. yapf is intentionally excluded: ruff-format
+  # replaces it and mixing both causes cycles.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.8
+    hooks:
+      - id: ruff-format
+        args: ['--config', 'pyproject.toml']
+      - id: ruff
+        args: ['--config', 'pyproject.toml', '--fix']
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        name: isort (python)
+        args: ['--sp', 'pyproject.toml', '--src', 'src']

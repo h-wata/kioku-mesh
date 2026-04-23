@@ -1,0 +1,89 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mesh-mem"
+version = "0.1.0"
+description = "Cross-agent distributed memory over a mesh transport (currently Zenoh)"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "eclipse-zenoh>=1.9.0",
+    "fastmcp>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.6",
+    "yapf>=0.40",
+]
+
+[project.scripts]
+mesh-mem = "mesh_mem.__main__:main"
+mesh-mem-mcp = "mesh_mem.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mesh_mem"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/mesh_mem", "tests", "config", "plan.md", "README.md"]
+
+# Style: 親の ~/work/.github/pyproject.toml をベースに、本プロジェクトで CPY (copyright) を除外。
+# 他は google style / 119 桁 / single quotes / LF で揃える。
+[tool.isort]
+profile = "google"
+line_length = 119
+
+[tool.yapf]
+based_on_style = "google"
+column_limit = 119
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+preview = true
+select = ["A", "ANN", "C4", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
+ignore = [
+    "ANN002",
+    "ANN003",
+    "ANN1",
+    "ANN401",  # Generic decorator wrappers legitimately use Any.
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+    "D203",
+    "D212",
+    "D404",
+    "N818",  # QueryErrorReply keeps its name by design (exception-as-marker).
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately reach into module-private helpers and mock internals.
+"tests/**" = ["SLF001"]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-annotations]
+suppress-dummy-args = true
+
+[tool.ruff.format]
+quote-style = "single"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 60
