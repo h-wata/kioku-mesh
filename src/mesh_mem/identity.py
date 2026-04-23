@@ -33,16 +33,26 @@ def state_dir() -> pathlib.Path:
 
 
 def get_pc_id() -> str:
-    """Return the per-host stable UUID, generating+persisting it on first call."""
+    """Return the per-host stable UUID, generating+persisting it on first call.
+
+    The create-if-absent path uses ``O_CREAT | O_EXCL`` so two mesh-mem
+    processes starting concurrently on a fresh host cannot write divergent
+    UUIDs and end up with different cached pc_ids for their lifetimes.
+    """
     global _pc_id_cache
     if _pc_id_cache is not None:
         return _pc_id_cache
     p = state_dir() / 'pc_id'
-    if p.exists():
+    pid = uuid.uuid4().hex
+    try:
+        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
         _pc_id_cache = p.read_text().strip()
         return _pc_id_cache
-    pid = uuid.uuid4().hex
-    p.write_text(pid + '\n')
+    try:
+        os.write(fd, (pid + '\n').encode())
+    finally:
+        os.close(fd)
     _pc_id_cache = pid
     return pid
 

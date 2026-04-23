@@ -86,4 +86,6 @@ line-ending = "lf"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# src/ layout: editable install なしでも `pytest` から import できるようにする。
+pythonpath = ["src"]
 timeout = 60
