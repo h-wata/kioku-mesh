@@ -8,6 +8,12 @@ version = "0.1.0"
 description = "Cross-agent distributed memory over a mesh transport (currently Zenoh)"
 requires-python = ">=3.10"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "h-wata" },
+]
+keywords = ["mesh", "distributed-memory", "zenoh", "mcp", "agent", "memory"]
 dependencies = [
     "eclipse-zenoh>=1.9.0",
     "fastmcp>=0.1.0",

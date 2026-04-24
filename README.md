@@ -175,3 +175,12 @@ mesh-mem gc --force-id <32-char observation_id>
 ```
 
 `gc --force-id` always exits 0 once the broadcast has been sent — even when the local replica never held the record — because a reachable peer may have completed the purge.
+
+## Acknowledgments
+
+mesh-mem は先行する "AI エージェント向け永続メモリ" プロジェクトから大きなインスピレーションを受けています。設計思想・API 形状のアイデアを参考にさせてもらった各プロジェクトに感謝します。
+
+- **[engram](https://github.com/Gentleman-Programming/engram)** by Gentleman-Programming — MCP ベースのクロスセッションメモリ (MIT)。`save_observation` / `search_memory` のツール分割と "observation" という単位の切り出しは engram の設計を参考にしています。
+- **[claude-mem](https://github.com/thedotmack/claude-mem)** by Alex Newman ([@thedotmack](https://github.com/thedotmack)) — Claude Code プラグイン、セッションの自動キャプチャ & 圧縮 (AGPL-3.0)。"エージェントの長期記憶を別プロセスに切り出す" という発想の先例として大きく影響を受けました。
+
+両プロジェクトからはコードを引いていません（いずれも参考・インスピレーション）。差別化ポイントは Zenoh メッシュによる **マルチホスト・マルチエージェント共有** です。
