@@ -43,7 +43,26 @@ mesh-mem status
 
 Register the installed `mesh-mem-mcp` console script. Use the **absolute path** inside the venv — the PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
 
-### Claude Code — `~/.claude/settings.json`
+### Claude Code
+
+Use `claude mcp add` — it writes to `~/.claude.json`, which is the only location the CLI actually reads. Entries placed under `mcpServers` in `~/.claude/settings.json` are silently ignored by `claude mcp list`, so do not hand-edit that file for MCP registration.
+
+```bash
+claude mcp add mesh_mem -s user \
+  -e ZENOH_CONNECT=tcp/127.0.0.1:7447 \
+  -e MESH_MEM_AGENT_FAMILY=claude \
+  -e MESH_MEM_CLIENT_ID=claude-code \
+  -- /home/USER/.venv/mesh-mem/bin/mesh-mem-mcp
+
+claude mcp list   # expect: mesh_mem: ... - ✓ Connected
+```
+
+### Claude Desktop
+
+- Linux: `~/.config/Claude/claude_desktop_config.json`
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Claude Desktop does read `mcpServers` from its own config file:
 
 ```json
 {
@@ -53,19 +72,12 @@ Register the installed `mesh-mem-mcp` console script. Use the **absolute path** 
       "env": {
         "ZENOH_CONNECT": "tcp/localhost:7447",
         "MESH_MEM_AGENT_FAMILY": "claude",
-        "MESH_MEM_CLIENT_ID": "claude-code"
+        "MESH_MEM_CLIENT_ID": "claude-desktop"
       }
     }
   }
 }
 ```
-
-### Claude Desktop
-
-- Linux: `~/.config/Claude/claude_desktop_config.json`
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Same block as above but with `"MESH_MEM_CLIENT_ID": "claude-desktop"`.
 
 ### Gemini CLI — `~/.gemini/settings.json`
 
