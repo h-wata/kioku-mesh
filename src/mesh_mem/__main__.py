@@ -97,15 +97,22 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             print('--force-id は 32 文字の完全一致 observation_id が必要です。', file=sys.stderr)
             return 2
         obs_removed, tomb_removed = physical_delete_observation(args.force_id)
-        if not obs_removed and not tomb_removed:
-            print(f'observation_id {args.force_id} に該当する obs / tomb が見つかりませんでした。', file=sys.stderr)
-            return 1
         parts = []
         if obs_removed:
             parts.append('obs')
         if tomb_removed:
             parts.append('tomb')
-        print(f'物理削除完了 ({", ".join(parts)}): {args.force_id}')
+        if parts:
+            print(f'物理削除完了 ({", ".join(parts)}) + broadcast purge: {args.force_id}')
+        else:
+            # No local match, but the broadcast wildcard delete may still have
+            # purged a reachable peer's copy — treat as success so scripts do
+            # not retry or misinterpret a completed emergency purge as failure.
+            print(
+                f'observation_id {args.force_id} はこの replica では未所持でした。'
+                'broadcast purge は送信済み (ベストエフォート)。'
+                '完全を期すなら他 PC でも同コマンドを実行してください。',
+            )
         return 0
     purged = gc_expired_tombstones(retention_days=args.retention_days)
     print(f'retention {args.retention_days} 日超の tombstone: {purged} 件を物理削除しました')

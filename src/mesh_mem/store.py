@@ -265,6 +265,31 @@ def delete_key(key_expr: str) -> None:
     get_session().delete(key_expr)
 
 
+def _broadcast_delete_best_effort(key_expr: str) -> bool:
+    """Send a wildcard ``session.delete`` as a best-effort broadcast.
+
+    Unlike :func:`delete_key`, this helper accepts a wildcard key_expr and
+    **does not raise** when the underlying backend rejects the pattern.
+    Wildcard delete support varies by Zenoh version and storage plugin, so
+    relying on it for correctness would regress the emergency-purge path
+    on backends that refuse it. Failures are logged and swallowed; callers
+    should treat the broadcast as additive insurance on top of exact-key
+    deletes, not as a guaranteed purge.
+
+    Returns ``True`` when the delete was issued without raising,
+    ``False`` otherwise.
+    """
+    try:
+        get_session().delete(key_expr)
+    except _RETRYABLE_EXC as e:
+        log.warning('broadcast delete %s failed (retryable, ignored): %s', key_expr, e)
+        return False
+    except Exception as e:  # noqa: BLE001 — wildcard support varies; never crash the purge
+        log.warning('broadcast delete %s failed (non-retryable, ignored): %s', key_expr, e)
+        return False
+    return True
+
+
 @with_retry
 def _list_tombstones() -> list[tuple[str, Tombstone]]:
     """Return ``(tomb_key_expr, tombstone)`` for every tombstone in the mesh.
@@ -294,9 +319,23 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
     a tomb arrived on this router via replication but the obs never did,
     so the forensic trail is cleaned up as well.
 
+    After the per-key deletes we additionally broadcast a wildcard-pattern
+    ``session.delete`` for both ``mem/obs/*/*/*/*/{id}`` and
+    ``mem/tomb/*/*/*/*/{id}`` via :func:`_broadcast_delete_best_effort`.
+    This belt-and-suspenders step reaches any currently-connected storage
+    replica whose copy we did not see via the live query (e.g. a peer
+    whose replication lag meant our initial enumeration missed it). The
+    broadcast is **best-effort** — wildcard delete support varies by
+    Zenoh version and backend, so failures are logged and swallowed; we
+    must not turn the emergency purge into a hard error on a backend that
+    refuses the pattern.
+
     Returns:
-        ``(obs_removed, tomb_removed)``. Either may be False if the key
-        was not present on this router.
+        ``(obs_removed, tomb_removed)``. Reports what this router observed
+        locally. A ``False`` return after broadcast still represents a
+        best-effort purge across the mesh; callers should run the same
+        command on every replica that might hold the key when a full
+        split-brain guarantee is needed.
     """
     obs = find_observation_by_id(observation_id)
     obs_removed = False
@@ -311,6 +350,15 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
             tomb_keys.append(tomb_key)
     for k in tomb_keys:
         delete_key(k)
+
+    # Broadcast wildcard deletes so reachable peers that didn't surface
+    # via the live query above still drop matching keys. Key layout is
+    # ``mem/{obs|tomb}/{agent}/{client}/{pc}/{session}/{observation_id}``,
+    # so ``*/*/*/*`` matches the four identity segments below the prefix.
+    # Best-effort: wildcard delete support varies by backend.
+    _broadcast_delete_best_effort(f'mem/obs/*/*/*/*/{observation_id}')
+    _broadcast_delete_best_effort(f'mem/tomb/*/*/*/*/{observation_id}')
+
     return (obs_removed, bool(tomb_keys))
 
 
@@ -339,6 +387,18 @@ def gc_expired_tombstones(
             log.warning('skip tomb with unparseable deleted_at: %s', tomb_key)
             continue
         if deleted_dt >= cutoff:
+            continue
+        # Defense against a misrouted / corrupted tombstone whose key suffix
+        # disagrees with its body ``observation_id``: mirroring ``tomb_key``
+        # to ``mem/obs/...`` would otherwise delete an unrelated obs. Skip
+        # conservatively — the tomb stays, no obs is touched.
+        key_suffix = tomb_key.rsplit('/', 1)[-1]
+        if key_suffix != tomb.observation_id:
+            log.warning(
+                'skip tomb with key-suffix/body mismatch: key=%s body_id=%s',
+                tomb_key,
+                tomb.observation_id,
+            )
             continue
         obs_key = tomb_key.replace('mem/tomb/', 'mem/obs/', 1)
         delete_key(tomb_key)

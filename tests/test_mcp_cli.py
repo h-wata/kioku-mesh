@@ -19,11 +19,16 @@ import sys
 import time
 from typing import Any
 
-from fastmcp import Client
-from fastmcp.client.transports import StdioTransport
 import pytest
 
-from mesh_mem import store
+# Skip this whole module when fastmcp is missing rather than failing
+# collection with ``ModuleNotFoundError`` on the top-level import.
+pytest.importorskip('fastmcp')
+
+from fastmcp import Client  # noqa: E402 — must follow importorskip
+from fastmcp.client.transports import StdioTransport  # noqa: E402
+
+from mesh_mem import store  # noqa: E402
 
 _INGEST_SETTLE = 0.25
 
@@ -46,8 +51,14 @@ MESH_MEM_MCP = _find_mesh_mem_mcp()
     MESH_MEM_MCP is None,
     reason='mesh-mem-mcp console script not installed — run `pip install -e .[dev]` to enable',
 )
-def test_subprocess_list_tools(single_zenohd: Any) -> None:  # noqa: ARG001
-    """``mesh-mem-mcp`` spawns cleanly and exposes the four tool definitions."""
+def test_subprocess_list_tools() -> None:
+    """``mesh-mem-mcp`` spawns cleanly and exposes the four tool definitions.
+
+    Deliberately does NOT depend on ``single_zenohd`` — ``list_tools`` only
+    exercises MCP startup and the decorator-based tool registry, never
+    opening a Zenoh session. Skipping this on unit-only hosts (no zenohd
+    binary) would needlessly weaken the console-script coverage.
+    """
 
     async def _go() -> list[str]:
         env = os.environ.copy()

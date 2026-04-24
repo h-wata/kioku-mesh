@@ -16,11 +16,18 @@ import asyncio
 import time
 from typing import Any
 
-from fastmcp import Client
+import pytest
 
-from mesh_mem import store
-from mesh_mem.mcp_server import mcp
-from mesh_mem.models import Observation
+# Skip this whole module — and every collected test in it — when fastmcp is
+# not installed, instead of letting pytest's collection abort with
+# ``ModuleNotFoundError`` on the top-level import.
+pytest.importorskip('fastmcp')
+
+from fastmcp import Client  # noqa: E402 — must follow importorskip
+
+from mesh_mem import store  # noqa: E402
+from mesh_mem.mcp_server import mcp  # noqa: E402
+from mesh_mem.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
 

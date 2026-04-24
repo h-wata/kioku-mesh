@@ -8,6 +8,8 @@ from datetime import timezone
 import time
 from typing import Any
 
+import pytest
+
 from mesh_mem import store
 from mesh_mem.models import Observation
 from mesh_mem.models import Tombstone
@@ -160,3 +162,122 @@ def test_retention_skips_unparseable_deleted_at(single_zenohd: Any) -> None:  # 
     # Both still present — bad timestamp should not unlock purge.
     assert _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) != []
+
+
+def test_force_id_broadcast_reaches_unlocatable_key(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Wildcard broadcast purges an obs key that ``find_observation_by_id`` cannot locate.
+
+    Simulates the split-brain edge case codex flagged on b09b82c: a key is
+    present on the mesh but the live query cannot materialize it as an
+    :class:`Observation` (here: malformed JSON). The per-key delete path is
+    therefore skipped, and only the wildcard broadcast stops the key from
+    surviving the emergency purge.
+    """
+    obs_id = '0' * 32
+    malformed_key = f'mem/obs/claude/claude-code/xxx/sess/{obs_id}'
+    store.get_session().put(malformed_key, '{ not valid json')
+    time.sleep(_INGEST_SETTLE)
+
+    # Sanity: key is present but unparseable, so find_observation_by_id misses it.
+    assert store.find_observation_by_id(obs_id) is None
+    sess = store.get_session()
+    pre = [str(r.ok.key_expr) for r in sess.get('mem/obs/**', timeout=2.0) if r.ok]
+    assert malformed_key in pre
+
+    obs_removed, tomb_removed = store.physical_delete_observation(obs_id)
+    # Local find missed → obs_removed stays False even though broadcast fires.
+    assert obs_removed is False
+    assert tomb_removed is False
+
+    time.sleep(_INGEST_SETTLE)
+    post = [str(r.ok.key_expr) for r in sess.get('mem/obs/**', timeout=2.0) if r.ok]
+    assert (
+        malformed_key not in post
+    ), f'wildcard broadcast should have swept {malformed_key}, but still present in {post}'
+
+
+def test_gc_skips_tomb_with_key_body_id_mismatch(single_zenohd: Any) -> None:  # noqa: ARG001
+    """An aged tomb whose key-suffix disagrees with its body id must not purge an unrelated obs.
+
+    Guards against the destructive path codex flagged on b09b82c: mirroring
+    ``tomb_key`` → ``obs_key`` blindly would let a corrupted/misrouted
+    tombstone delete an innocent observation. The gc sweep must refuse to
+    act on such a mismatch.
+    """
+    protected = _mk_obs('must survive mismatched-tomb gc')
+    store.put_observation(protected)
+
+    # Bogus tomb: stored at a key ending with ``protected.observation_id`` but
+    # whose body claims a different observation_id. Aged so retention would
+    # otherwise purge it.
+    aged = datetime.now(timezone.utc) - timedelta(days=60)
+    bogus_tomb = Tombstone(
+        observation_id='f' * 32,  # disagrees with the key suffix
+        reason='bogus',
+        deleted_at=aged.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+    )
+    store.get_session().put(protected.tombstone_key_expr(), bogus_tomb.to_json())
+    time.sleep(_INGEST_SETTLE)
+
+    purged = store.gc_expired_tombstones(retention_days=30)
+    # Mismatch must veto the purge for both the tomb and the mirrored obs.
+    assert purged == 0
+    time.sleep(_INGEST_SETTLE)
+    assert _obs_present(protected.observation_id), 'protected obs was purged by a mismatched-body tombstone'
+
+
+class _RaisingDeleteSession:
+    """Session fake that raises on every ``delete`` call.
+
+    Simulates a Zenoh backend that rejects wildcard ``session.delete``
+    patterns, which the code must tolerate under :func:`store.physical_delete_observation`.
+    ``get`` returns no replies so the per-key enumeration paths stay inert.
+    """
+
+    def __init__(self) -> None:
+        self.delete_calls: list[str] = []
+
+    def delete(self, key_expr: Any, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        self.delete_calls.append(str(key_expr))
+        raise RuntimeError(f'backend refuses wildcard delete: {key_expr}')
+
+    def get(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ARG002
+        return iter([])
+
+    def put(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_broadcast_delete_best_effort_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_broadcast_delete_best_effort must swallow backend-level refusals.
+
+    Guards the regression codex flagged on the first fix pass: an
+    unconditional wildcard delete would crash every ``gc --force-id`` on a
+    backend that rejects the pattern. The helper must log + return False
+    instead of propagating.
+    """
+    fake = _RaisingDeleteSession()
+    monkeypatch.setattr(store, '_session', fake)
+    ok = store._broadcast_delete_best_effort('mem/obs/*/*/*/*/abc')
+    assert ok is False
+    assert fake.delete_calls == ['mem/obs/*/*/*/*/abc']
+
+
+def test_physical_delete_survives_wildcard_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """physical_delete_observation must not raise when the broadcast step fails.
+
+    Asserts that the per-key path short-circuits cleanly (no local data in
+    this fake) and the wildcard broadcast exceptions are swallowed — the
+    emergency purge must stay callable on any backend.
+    """
+    fake = _RaisingDeleteSession()
+    monkeypatch.setattr(store, '_session', fake)
+    obs_removed, tomb_removed = store.physical_delete_observation('0' * 32)
+    assert obs_removed is False
+    assert tomb_removed is False
+    # Both wildcard patterns were attempted despite raising each time.
+    assert any(k.startswith('mem/obs/') for k in fake.delete_calls), fake.delete_calls
+    assert any(k.startswith('mem/tomb/') for k in fake.delete_calls), fake.delete_calls

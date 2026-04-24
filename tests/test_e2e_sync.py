@@ -68,7 +68,13 @@ def _mk_obs(content: str, project: str) -> Observation:
 
 @pytest.fixture(autouse=True)
 def _dual_fresh_state(dual_zenohd: Any) -> Iterator[None]:
-    """Restart both routers between tests so memory-volume state is clean."""
+    """Restart both routers between tests so memory-volume state is clean.
+
+    Also snapshots and restores ``ZENOH_CONNECT`` so the dual-router endpoint
+    does not leak into later test modules (``test_mcp_server`` /
+    ``test_mcp_cli`` request ``single_zenohd`` and expect its endpoint).
+    """
+    orig_connect = os.environ.get('ZENOH_CONNECT')
     a, b = dual_zenohd.a, dual_zenohd.b
     # Stopping both then starting both is the only reliable reset: a lone
     # restart would immediately be re-populated by the still-running peer
@@ -79,12 +85,23 @@ def _dual_fresh_state(dual_zenohd: Any) -> Iterator[None]:
     b.start()
     # Small settle for the peer link to re-establish before the test begins.
     time.sleep(0.5)
-    yield
-    # Post-test: make sure both are running for the next test's reset cycle.
-    if not a.running:
-        a.start()
-    if not b.running:
-        b.start()
+    try:
+        yield
+    finally:
+        # Post-test: make sure both are running for the next test's reset cycle.
+        if not a.running:
+            a.start()
+        if not b.running:
+            b.start()
+        # Restore ZENOH_CONNECT to whatever was set before this test so the
+        # next test module (e.g. single_zenohd-backed tests) doesn't inherit
+        # the dual endpoint. The cached store session is also reset so the
+        # next call reopens against the restored endpoint.
+        if orig_connect is None:
+            os.environ.pop('ZENOH_CONNECT', None)
+        else:
+            os.environ['ZENOH_CONNECT'] = orig_connect
+        store._reset_session()
 
 
 def test_offline_diff_sync(dual_zenohd: Any) -> None:
