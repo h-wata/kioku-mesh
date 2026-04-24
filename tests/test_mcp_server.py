@@ -1,0 +1,178 @@
+"""Smoke tests for the FastMCP server exposed by :mod:`mesh_mem.mcp_server`.
+
+Uses FastMCP's in-process ``Client(FastMCP)`` pattern so we exercise tool
+registration + argument binding + return-value marshalling without spawning
+a subprocess. The subprocess launch path is covered separately in
+``test_mcp_cli.py``.
+
+Each test body is sync; we wrap the async MCP client in ``asyncio.run``.
+``_INGEST_SETTLE`` matches the sibling store / gc tests and absorbs the
+async ingest lag between a put and the next query.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any
+
+from fastmcp import Client
+
+from mesh_mem import store
+from mesh_mem.mcp_server import mcp
+from mesh_mem.models import Observation
+
+_INGEST_SETTLE = 0.25
+
+
+def _mk_obs(content: str, project: str = 'mcp-test') -> Observation:
+    return Observation(
+        content=content,
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id='mcp-pc',
+        session_id='mcp-sess',
+        project=project,
+    )
+
+
+def _run(coro: Any) -> Any:
+    return asyncio.run(coro)
+
+
+def test_list_tools_registers_all_four(single_zenohd: Any) -> None:  # noqa: ARG001
+    async def _go() -> list[str]:
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+            return [t.name for t in tools]
+
+    names = _run(_go())
+    assert set(names) >= {'save_observation', 'search_memory', 'delete_memory', 'get_memory_status'}
+
+
+def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa: ARG001
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {'content': 'hello from mcp smoke', 'project': 'mcp-smoke', 'tags': ['a', 'b']},
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = _run(_go())
+    assert '保存完了' in msg
+    # Extract the 32-char id (last whitespace-separated token of the success message).
+    obs_id = msg.split()[-1]
+    assert len(obs_id) == 32
+
+    time.sleep(_INGEST_SETTLE)
+    found = store.find_observation_by_id(obs_id)
+    assert found is not None
+    assert found.content == 'hello from mcp smoke'
+    assert found.project == 'mcp-smoke'
+    assert set(found.tags) == {'a', 'b'}
+
+
+def test_search_memory_finds_saved_entry(single_zenohd: Any) -> None:  # noqa: ARG001
+    obs = _mk_obs('needle for mcp search', project='mcp-search')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'needle', 'project': 'mcp-search', 'limit': 20},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+    assert 'needle for mcp search' in text
+
+
+def test_search_memory_empty_reports_none(single_zenohd: Any) -> None:  # noqa: ARG001
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'project': 'project-that-has-nothing'},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert '該当するメモリはありません' in text
+
+
+def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG001
+    obs = _mk_obs('soon to be tombstoned via mcp', project='mcp-delete')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'delete_memory',
+                {'observation_id': obs.observation_id, 'reason': 'smoke'},
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = _run(_go())
+    assert '削除' in msg
+    assert obs.observation_id in msg
+
+    time.sleep(_INGEST_SETTLE)
+    remaining = store.search_observations(project='mcp-delete')
+    assert obs.observation_id not in [r.observation_id for r in remaining]
+
+
+def test_delete_memory_rejects_short_id(single_zenohd: Any) -> None:  # noqa: ARG001
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'delete_memory',
+                {'observation_id': 'deadbeef'},  # 8 chars — rejected before any scan
+            )
+            # Tool returns an error string in data (not is_error) to stay LLM-friendly.
+            return result.data
+
+    msg = _run(_go())
+    assert '32 文字の完全一致' in msg
+
+
+def test_delete_memory_reports_missing_id(single_zenohd: Any) -> None:  # noqa: ARG001
+    phantom_id = 'a' * 32
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'delete_memory',
+                {'observation_id': phantom_id},
+            )
+            return result.data
+
+    msg = _run(_go())
+    assert '見つかりませんでした' in msg
+    assert phantom_id in msg
+
+
+def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> None:  # noqa: ARG001
+    store.put_observation(_mk_obs('status obs 1', project='mcp-status'))
+    store.put_observation(_mk_obs('status obs 2', project='mcp-status'))
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'mesh-mem version' in text
+    assert 'pc_id' in text
+    assert 'session_id' in text
+    # At least the 2 we put show up in the count summary.
+    assert '件数' in text
