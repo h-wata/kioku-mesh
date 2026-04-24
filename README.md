@@ -176,6 +176,17 @@ mesh-mem gc --force-id <32-char observation_id>
 
 `gc --force-id` always exits 0 once the broadcast has been sent — even when the local replica never held the record — because a reachable peer may have completed the purge.
 
+## Status & known limitations
+
+mesh-mem is an **experimental / early preview**. API and on-disk storage schema may change between `0.x` releases without migration tooling.
+
+- **No transport-level auth or encryption.** `mem/**` and `mem/tomb/**` are open to anyone reaching port 7447. LAN-only — never expose to the internet or to an untrusted LAN segment.
+- **stdio MCP only.** Works with Claude Code, Claude Desktop, Gemini CLI, and Codex CLI. Web apps (`claude.ai`, `chatgpt.com`) are not supported — they require HTTP/SSE transport + tunnel + auth, which this PoC does not ship.
+- **Multi-host (Home↔Office) field test pending.** E2E tests cover split-brain / sync via two zenohd routers on the same machine (different ports). The real two-PC LAN configuration is documented but unverified as of `v0.1.0`.
+- **Logical vs physical delete.** `mesh-mem delete` / `delete_memory` write a tombstone; the observation is hidden from `search` but still stored. `mesh-mem gc --retention-days N` (default 30) physically removes expired tombstones plus their observations. `mesh-mem gc --force-id <obs_id>` broadcasts a best-effort immediate purge to every replica.
+- **No full-text search.** Search scans up to `MAX_SEARCH=10000` observations per query and filters in Python. This is a return-size cap, not a scan budget — datasets much larger than that will need a real FTS index (tracked for a later phase).
+- **gc broadcast is best-effort.** A replica that was unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.
+
 ## Acknowledgments
 
 mesh-mem は先行する "AI エージェント向け永続メモリ" プロジェクトから大きなインスピレーションを受けています。設計思想・API 形状のアイデアを参考にさせてもらった各プロジェクトに感謝します。
