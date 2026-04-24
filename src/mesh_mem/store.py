@@ -202,7 +202,7 @@ def search_observations(
 
     tombs: set[str] = set()
     for ok in _iter_ok_replies(session, tomb_expr):
-        tombs.add(ok.key_expr.as_str().rsplit('/', 1)[-1])
+        tombs.add(str(ok.key_expr).rsplit('/', 1)[-1])
 
     q = query.lower()
     results: list[Observation] = []
@@ -210,7 +210,7 @@ def search_observations(
         try:
             obs = Observation.from_json(ok.payload.to_string())
         except Exception as e:  # noqa: BLE001
-            log.warning('skip malformed payload at %s: %s', ok.key_expr.as_str(), e)
+            log.warning('skip malformed payload at %s: %s', ok.key_expr, e)
             continue
         if obs.observation_id in tombs:
             continue
