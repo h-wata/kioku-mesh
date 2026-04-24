@@ -7,14 +7,18 @@ on PATH; the ``single_zenohd`` fixture handles spawn / teardown.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 import time
 from typing import Any
 
-import pytest
-
 from mesh_mem import store
 from mesh_mem.models import Observation
+
+# Zenoh put / delete is asynchronous — ingestion by the storage plugin happens
+# on its own thread. We settle briefly after any write before querying so
+# read-your-writes consistency is honored. 250ms is well below the 5s GET
+# timeout and empirically enough to soak up the queue even when other session
+# fixtures (dual_zenohd) run in parallel.
+_INGEST_SETTLE = 0.25
 
 
 def _mk_obs(
@@ -42,6 +46,7 @@ def _mk_obs(
 def test_save_then_search_roundtrip(single_zenohd: Any) -> None:  # noqa: ARG001 — fixture side-effect
     obs = _mk_obs('hello mesh', project='demo', tags=['a', 'b'])
     store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
 
     results = store.search_observations(query='hello', project='demo')
     ids = [r.observation_id for r in results]
@@ -55,12 +60,14 @@ def test_save_then_search_roundtrip(single_zenohd: Any) -> None:  # noqa: ARG001
 def test_tombstone_hides_observation(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('about to be tombstoned', project='tomb-demo')
     store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
 
     # Sanity: visible before tombstone.
     pre = store.search_observations(project='tomb-demo')
     assert obs.observation_id in [r.observation_id for r in pre]
 
     store.put_tombstone(obs, reason='test')
+    time.sleep(_INGEST_SETTLE)
 
     post = store.search_observations(project='tomb-demo')
     assert obs.observation_id not in [r.observation_id for r in post]
@@ -82,9 +89,7 @@ def test_reconnect_after_session_reset(single_zenohd: Any) -> None:  # noqa: ARG
 
     obs2 = _mk_obs('after reset', project='reconnect')
     store.put_observation(obs2)
-
-    # Give the storage a moment to absorb the second put before querying.
-    time.sleep(0.1)
+    time.sleep(_INGEST_SETTLE)
 
     results = store.search_observations(project='reconnect')
     ids = {r.observation_id for r in results}
@@ -97,6 +102,7 @@ def test_search_respects_project_filter(single_zenohd: Any) -> None:  # noqa: AR
     drop = _mk_obs('project drop', project='beta')
     store.put_observation(keep)
     store.put_observation(drop)
+    time.sleep(_INGEST_SETTLE)
 
     results = store.search_observations(project='alpha')
     ids = {r.observation_id for r in results}
@@ -108,27 +114,3 @@ def test_search_empty_returns_empty_not_error(single_zenohd: Any) -> None:  # no
     # A project nobody has written to should yield [] without raising.
     results = store.search_observations(project='project-that-does-not-exist')
     assert results == []
-
-
-@pytest.fixture(autouse=True)
-def _purge_router_state(single_zenohd: Any) -> Iterator[None]:  # noqa: ARG001
-    """Wipe ``mem/**`` between tests so memory-volume state does not bleed across tests.
-
-    The ``single_zenohd`` fixture is session-scoped (expensive to restart), so
-    test isolation must happen at the data layer. We enumerate every key under
-    ``mem/obs/**`` and ``mem/tomb/**`` and delete them individually — wildcard
-    ``session.delete`` semantics vary by storage backend, per-key delete is
-    portable.
-    """
-    sess = store.get_session()
-    for prefix in ('mem/obs/**', 'mem/tomb/**'):
-        keys: list[str] = []
-        for reply in sess.get(prefix, timeout=2.0):
-            if reply.ok:
-                keys.append(str(reply.ok.key_expr))
-        for k in keys:
-            sess.delete(k)
-    # Storage absorbs deletes asynchronously — give it a beat before the test
-    # starts reading. 150ms is well under the 5s GET timeout.
-    time.sleep(0.15)
-    yield

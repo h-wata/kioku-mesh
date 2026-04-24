@@ -51,6 +51,37 @@ def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     store._reset_session()
 
 
+def _purge_mem_keys() -> None:
+    """Delete every key under ``mem/obs/**`` and ``mem/tomb/**`` on the current store.
+
+    Enumerate-then-delete rather than wildcard-delete: storage-backend support
+    for wildcard delete varies by Zenoh version, per-key delete is portable.
+    """
+    import time as _time
+
+    sess = store.get_session()
+    for prefix in ('mem/obs/**', 'mem/tomb/**'):
+        keys = [str(r.ok.key_expr) for r in sess.get(prefix, timeout=2.0) if r.ok]
+        for k in keys:
+            sess.delete(k)
+    # Storage absorbs deletes asynchronously — give it a beat before the
+    # next test reads.
+    _time.sleep(0.15)
+
+
+@pytest.fixture(autouse=True)
+def _mem_keys_clean_between_tests(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Purge ``mem/**`` before any test that exercises a live zenohd router.
+
+    Opt-in via ``single_zenohd`` being in the test's fixture closure. Tests
+    that do not touch a router (pure unit tests) are untouched — opening a
+    store session without a live endpoint would just raise.
+    """
+    if 'single_zenohd' in request.fixturenames:
+        _purge_mem_keys()
+    yield
+
+
 def _zenohd_available() -> bool:
     return shutil.which('zenohd') is not None
 

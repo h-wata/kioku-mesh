@@ -16,6 +16,7 @@ bugs are not hidden by a retry loop.
 from collections.abc import Callable
 from collections.abc import Iterator
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 import functools
 import logging
@@ -251,3 +252,96 @@ def find_observation_by_id(observation_id: str) -> Observation | None:
         if obs.observation_id == observation_id:
             return obs
     return None
+
+
+@with_retry
+def delete_key(key_expr: str) -> None:
+    """Physically remove a key from the mesh via ``session.delete``.
+
+    Callers pass an exact key expression, not a wildcard — storage-backend
+    support for wildcard delete is inconsistent across Zenoh versions, so
+    the gc paths enumerate first and then delete one key at a time.
+    """
+    get_session().delete(key_expr)
+
+
+@with_retry
+def _list_tombstones() -> list[tuple[str, Tombstone]]:
+    """Return ``(tomb_key_expr, tombstone)`` for every tombstone in the mesh.
+
+    Used by gc only; the normal search path does not materialize tomb bodies.
+    Malformed tomb payloads are logged and skipped so one bad record cannot
+    block the whole sweep.
+    """
+    session = get_session()
+    out: list[tuple[str, Tombstone]] = []
+    for ok in _iter_ok_replies(session, 'mem/tomb/**'):
+        try:
+            tomb = Tombstone.from_json(ok.payload.to_string())
+        except Exception as e:  # noqa: BLE001
+            log.warning('skip malformed tombstone at %s: %s', ok.key_expr, e)
+            continue
+        out.append((str(ok.key_expr), tomb))
+    return out
+
+
+def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
+    """Physically purge an observation and any matching tombstones from the mesh.
+
+    Locates the observation by full-id scan so the caller does not need to
+    supply the identity fragments. Always sweeps ``mem/tomb/**`` for any
+    tombstone carrying the same ``observation_id`` — covers the case where
+    a tomb arrived on this router via replication but the obs never did,
+    so the forensic trail is cleaned up as well.
+
+    Returns:
+        ``(obs_removed, tomb_removed)``. Either may be False if the key
+        was not present on this router.
+    """
+    obs = find_observation_by_id(observation_id)
+    obs_removed = False
+    if obs is not None:
+        delete_key(obs.key_expr)
+        obs_removed = True
+
+    # Enumerate-then-delete across tombs so we catch the orphan-tomb case.
+    tomb_keys: list[str] = []
+    for tomb_key, tomb in _list_tombstones():
+        if tomb.observation_id == observation_id:
+            tomb_keys.append(tomb_key)
+    for k in tomb_keys:
+        delete_key(k)
+    return (obs_removed, bool(tomb_keys))
+
+
+def gc_expired_tombstones(
+    retention_days: int = 30,
+    now: datetime | None = None,
+) -> int:
+    """Physically purge tombstones older than ``retention_days`` along with their observations.
+
+    Tombstones whose ``deleted_at`` cannot be parsed are left in place
+    (conservative — never delete on ambiguity).
+
+    Returns:
+        Count of tombstones purged. The matching observation key is also
+        deleted when present, but the return value counts tomb sweeps only.
+    """
+    if retention_days < 0:
+        raise ValueError(f'retention_days must be >= 0, got {retention_days}')
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=retention_days)
+    purged = 0
+    for tomb_key, tomb in _list_tombstones():
+        deleted_dt = _parse_iso(tomb.deleted_at)
+        if deleted_dt is None:
+            log.warning('skip tomb with unparseable deleted_at: %s', tomb_key)
+            continue
+        if deleted_dt >= cutoff:
+            continue
+        obs_key = tomb_key.replace('mem/tomb/', 'mem/obs/', 1)
+        delete_key(tomb_key)
+        delete_key(obs_key)
+        purged += 1
+    return purged

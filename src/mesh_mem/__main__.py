@@ -1,8 +1,9 @@
 """Command-line interface for mesh-mem.
 
 Thin wrapper over the same store primitives the MCP server uses.
-``gc`` is provided as a scaffold only — physical deletion from RocksDB
-needs per-backend work and is deferred to a later milestone.
+``gc`` performs physical delete via ``session.delete`` — the Zenoh storage
+backend is expected to propagate the removal through replication so both
+sides converge.
 """
 
 import argparse
@@ -13,7 +14,9 @@ from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
 from .store import find_observation_by_id
+from .store import gc_expired_tombstones
 from .store import MAX_SEARCH
+from .store import physical_delete_observation
 from .store import put_observation
 from .store import put_tombstone
 from .store import search_observations
@@ -88,9 +91,25 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
-def _cmd_gc(args: argparse.Namespace) -> int:  # noqa: ARG001
-    print('gc: 物理削除 (RocksDB レベル) は未実装。次マイルストーンで対応予定。', file=sys.stderr)
-    return 2
+def _cmd_gc(args: argparse.Namespace) -> int:
+    if args.force_id:
+        if len(args.force_id) != 32:
+            print('--force-id は 32 文字の完全一致 observation_id が必要です。', file=sys.stderr)
+            return 2
+        obs_removed, tomb_removed = physical_delete_observation(args.force_id)
+        if not obs_removed and not tomb_removed:
+            print(f'observation_id {args.force_id} に該当する obs / tomb が見つかりませんでした。', file=sys.stderr)
+            return 1
+        parts = []
+        if obs_removed:
+            parts.append('obs')
+        if tomb_removed:
+            parts.append('tomb')
+        print(f'物理削除完了 ({", ".join(parts)}): {args.force_id}')
+        return 0
+    purged = gc_expired_tombstones(retention_days=args.retention_days)
+    print(f'retention {args.retention_days} 日超の tombstone: {purged} 件を物理削除しました')
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -123,8 +142,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser('status', help='メモリ状態を表示')
     p_status.set_defaults(func=_cmd_status)
 
-    p_gc = sub.add_parser('gc', help='tombstone 対象の物理削除 (未実装)')
-    p_gc.add_argument('--force-id', dest='force_id', default='')
+    p_gc = sub.add_parser('gc', help='tombstone 対象の物理削除 (retention or --force-id)')
+    p_gc.add_argument(
+        '--force-id',
+        dest='force_id',
+        default='',
+        help='32文字の observation_id を完全一致で物理削除 (機微情報緊急手順用)',
+    )
+    p_gc.add_argument(
+        '--retention-days',
+        dest='retention_days',
+        type=int,
+        default=30,
+        help='retention 日数 (default 30)。この日数より古い tombstone と対応 obs を物理削除',
+    )
     p_gc.set_defaults(func=_cmd_gc)
 
     return parser
