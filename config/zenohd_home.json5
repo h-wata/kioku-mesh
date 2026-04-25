@@ -6,9 +6,9 @@
 // 起動前に export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/zenoh-mem" を設定し、
 // RocksDB 格納先の親ディレクトリが存在することを確認する。
 //
-// IP の置換:
-//   192.168.3.x: 自機 (home) の LAN IP
-//   192.168.3.y: 対向 (office) の LAN IP
+// IP:
+//   192.168.134.28: 自機 (home) の LAN IP
+//   192.168.128.12: 対向 (office) の LAN IP
 
 {
   mode: "router",
@@ -17,12 +17,12 @@
   listen: {
     endpoints: [
       "tcp/127.0.0.1:7447",
-      "tcp/192.168.3.x:7447",
+      "tcp/192.168.134.28:7447",
     ],
   },
 
   connect: {
-    endpoints: ["tcp/192.168.3.y:7447"],
+    endpoints: ["tcp/192.168.128.12:7447"],
   },
 
   // replication / storage_manager は timestamping が有効でないと動作しない。
