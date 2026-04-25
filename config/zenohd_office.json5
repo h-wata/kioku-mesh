@@ -7,8 +7,8 @@
 // RocksDB 格納先の親ディレクトリが存在することを確認する。
 //
 // IP:
-//   192.168.128.12: 自機 (office) の LAN IP
-//   192.168.134.28: 対向 (home) の LAN IP
+//   192.168.3.y: 自機 (office) の LAN IP — 実 IP に置換すること
+//   192.168.3.x: 対向 (home) の LAN IP — 実 IP に置換すること
 
 {
   mode: "router",
@@ -17,12 +17,12 @@
   listen: {
     endpoints: [
       "tcp/127.0.0.1:7447",
-      "tcp/192.168.128.12:7447",
+      "tcp/192.168.3.y:7447",
     ],
   },
 
   connect: {
-    endpoints: ["tcp/192.168.134.28:7447"],
+    endpoints: ["tcp/192.168.3.x:7447"],
   },
 
   // replication / storage_manager は timestamping が有効でないと動作しない。

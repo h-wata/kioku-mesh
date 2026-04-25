@@ -38,6 +38,12 @@ Initial tagged release. Experimental / early preview.
   single zenohd: an `observation` saved by one client is visible to
   `search_memory` from the other.
 
+### Security
+- Replaced hardcoded LAN IPs in `config/zenohd_home.json5` and
+  `config/zenohd_office.json5` with placeholders (`192.168.3.x` /
+  `192.168.3.y`) to align with README guidance and avoid leaking
+  deployment-specific addresses.
+
 ### Known limitations
 - No transport-level authentication or encryption; LAN-only.
 - MCP transport is stdio only — web apps (`claude.ai`, `chatgpt.com`) are
