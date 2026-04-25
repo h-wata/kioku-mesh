@@ -183,6 +183,7 @@ def search_observations(
 ) -> list[Observation]:
     """Search observations, narrowing by key_expr then filtering in Python.
 
+    ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``).
     Tombstone keys for the same observation_id cause the entry to be hidden.
     """
     limit = max(1, min(limit, MAX_SEARCH))

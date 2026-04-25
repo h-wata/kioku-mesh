@@ -57,12 +57,13 @@ def search_memory(
     session_id: str = '',
     project: str = '',
     since_iso: str = '',
-    limit: int = 20,
+    limit: int = 50,
 ) -> str:
     """Search the shared mesh memory, narrowing by key_expr and filtering in Python.
 
-    ``limit`` is internally clamped to ``MAX_SEARCH``. Returned observation ids
-    are full 32-char strings so ``delete_memory`` can be called directly.
+    ``limit`` defaults to 50 and is internally clamped to ``MAX_SEARCH``.
+    Returned observation ids are full 32-char strings so ``delete_memory``
+    can be called directly.
     """
     results = search_observations(
         query=query,

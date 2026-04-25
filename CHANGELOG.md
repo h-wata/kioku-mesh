@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 mesh-mem is in `0.x`: APIs and on-disk storage schema may change between minor
 versions without a migration path until `1.0.0`.
 
+## [Unreleased]
+
+### Fixed
+- Unify default search `limit` to 50 across CLI/MCP/API (#1)
+
 ## [0.1.0] — 2026-04-24
 
 Initial tagged release. Experimental / early preview.

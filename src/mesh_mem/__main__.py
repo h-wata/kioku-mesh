@@ -138,7 +138,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument('--session-id', dest='session_id', default='')
     p_search.add_argument('-p', '--project', default='')
     p_search.add_argument('--since', default='', help='ISO8601 時刻以降に限定')
-    p_search.add_argument('-n', '--limit', type=int, default=20)
+    p_search.add_argument('-n', '--limit', type=int, default=50, help='最大件数 (default: 50)')
     p_search.set_defaults(func=_cmd_search)
 
     p_delete = sub.add_parser('delete', help='Observation を論理削除 (tombstone)')
