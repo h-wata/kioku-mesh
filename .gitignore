@@ -28,3 +28,6 @@ Thumbs.db
 
 # mesh-mem local state
 .local-state/
+
+# generated survey summaries (re-creatable via /survey)
+pdf_summary_*.md
