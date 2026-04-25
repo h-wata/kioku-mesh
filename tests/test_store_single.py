@@ -7,6 +7,7 @@ on PATH; the ``single_zenohd`` fixture handles spawn / teardown.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from typing import Any
 
@@ -114,3 +115,32 @@ def test_search_empty_returns_empty_not_error(single_zenohd: Any) -> None:  # no
     # A project nobody has written to should yield [] without raising.
     results = store.search_observations(project='project-that-does-not-exist')
     assert results == []
+
+
+def test_search_respects_session_id_filter(single_zenohd: Any) -> None:  # noqa: ARG001
+    keep = _mk_obs('session keep', session_id='session-alpha')
+    drop = _mk_obs('session drop', session_id='session-beta')
+    store.put_observation(keep)
+    store.put_observation(drop)
+    time.sleep(_INGEST_SETTLE)
+
+    results = store.search_observations(session_id='session-alpha')
+    ids = {r.observation_id for r in results}
+    assert keep.observation_id in ids
+    assert drop.observation_id not in ids
+
+
+def test_search_respects_since_iso_filter(single_zenohd: Any) -> None:  # noqa: ARG001
+    old = dataclasses.replace(
+        _mk_obs('old observation', project='since-test'),
+        created_at='2020-01-01T00:00:00.000000Z',
+    )
+    recent = _mk_obs('recent observation', project='since-test')
+    store.put_observation(old)
+    store.put_observation(recent)
+    time.sleep(_INGEST_SETTLE)
+
+    results = store.search_observations(project='since-test', since_iso='2024-01-01T00:00:00Z')
+    ids = {r.observation_id for r in results}
+    assert recent.observation_id in ids
+    assert old.observation_id not in ids

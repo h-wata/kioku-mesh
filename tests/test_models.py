@@ -58,3 +58,16 @@ def test_tombstone_json_round_trip() -> None:
 def test_observation_id_uniqueness_across_10000() -> None:
     ids = {Observation(content='').observation_id for _ in range(10000)}
     assert len(ids) == 10000
+
+
+def test_key_expr_reflects_explicit_identity_fields() -> None:
+    obs = Observation(
+        content='test',
+        agent_family='gemini',
+        client_id='gemini-cli',
+        pc_id='testpc123',
+        session_id='sess456',
+    )
+    expected = f'mem/obs/gemini/gemini-cli/testpc123/sess456/{obs.observation_id}'
+    assert obs.key_expr == expected
+    assert obs.tombstone_key_expr() == expected.replace('mem/obs/', 'mem/tomb/', 1)
