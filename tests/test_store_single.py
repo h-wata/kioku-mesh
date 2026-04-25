@@ -135,7 +135,10 @@ def test_search_respects_since_iso_filter(single_zenohd: Any) -> None:  # noqa: 
         _mk_obs('old observation', project='since-test'),
         created_at='2020-01-01T00:00:00.000000Z',
     )
-    recent = _mk_obs('recent observation', project='since-test')
+    recent = dataclasses.replace(
+        _mk_obs('recent observation', project='since-test'),
+        created_at='2025-06-01T00:00:00.000000Z',
+    )
     store.put_observation(old)
     store.put_observation(recent)
     time.sleep(_INGEST_SETTLE)
