@@ -129,6 +129,35 @@ WantedBy=default.target
 
 Swap `zenohd_home.json5` for `zenohd_office.json5` on the office host. For system-scope, move to `/etc/systemd/system/` and replace `%h` with an absolute home path too.
 
+## Auto-start with systemd (system-wide drop-in)
+
+If `zenohd` was installed via apt, it ships a base unit at
+`/usr/lib/systemd/system/zenohd.service` whose `ExecStart` targets
+`/etc/zenohd/zenohd.json5` — not the mesh-mem config. Use a drop-in
+override to redirect it without modifying the base unit.
+
+```bash
+# 1. Create the drop-in directory
+sudo mkdir -p /etc/systemd/system/zenohd.service.d/
+
+# 2. Copy the example
+sudo cp docs/systemd-zenohd-override.example.conf \
+    /etc/systemd/system/zenohd.service.d/override.conf
+
+# 3. Edit User= and ExecStart= for your environment
+sudo $EDITOR /etc/systemd/system/zenohd.service.d/override.conf
+
+# 4. Reload and enable
+sudo systemctl daemon-reload
+sudo systemctl enable --now zenohd.service
+sudo systemctl status zenohd.service
+```
+
+- **Home node**: use `config/zenohd_home.json5`
+- **Office node**: change `ExecStart=` to `config/zenohd_office.json5`
+- `%h` in the example expands to the home directory of `User=`; no
+  absolute paths needed except for the config file itself.
+
 ## Firewall
 
 7447/tcp must be reachable **only** between the two peer PCs on the LAN.
