@@ -26,6 +26,9 @@ dev = [
     "ruff>=0.6",
     "yapf>=0.40",
 ]
+test = [
+    "fastmcp>=0.2",
+]
 
 [project.scripts]
 mesh-mem = "mesh_mem.__main__:main"

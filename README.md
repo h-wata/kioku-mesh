@@ -32,6 +32,19 @@ mesh-mem search "note"
 mesh-mem status
 ```
 
+## Development
+
+```bash
+# Install with test dependencies (required to run MCP smoke tests)
+pip install -e '.[dev,test]'
+
+# Run all tests
+pytest tests/ -q
+
+# Run only MCP smoke tests
+pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
+```
+
 ## Requirements
 
 - Python >= 3.10
