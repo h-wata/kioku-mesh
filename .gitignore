@@ -31,3 +31,8 @@ Thumbs.db
 
 # generated survey summaries (re-creatable via /survey)
 pdf_summary_*.md
+
+# benchmark output files (scripts themselves are tracked)
+scripts/*.csv
+scripts/*.log
+scripts/*.json
