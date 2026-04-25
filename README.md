@@ -187,6 +187,22 @@ mesh-mem is an **experimental / early preview**. API and on-disk storage schema 
 - **No full-text search.** Search scans up to `MAX_SEARCH=10000` observations per query and filters in Python. This is a return-size cap, not a scan budget — datasets much larger than that will need a real FTS index (tracked for a later phase).
 - **gc broadcast is best-effort.** A replica that was unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.
 
+## Migration
+
+### `zenoh-mem` → `mesh-mem` (v0.1.x)
+
+`ZENOH_BACKEND_ROCKSDB_ROOT` のデフォルトパスが `~/.local/share/zenoh-mem` から
+`~/.local/share/mesh-mem` に変更されました。既存データを引き継ぐ場合は手動で移行してください。
+
+```bash
+# 既存データを移行する場合（オプション）
+mv ~/.local/share/zenoh-mem ~/.local/share/mesh-mem
+```
+
+`~/.config/systemd/user/mesh-mem-zenohd.service` を使っている場合は、
+`Environment=ZENOH_BACKEND_ROCKSDB_ROOT` の値も `mesh-mem` に更新して
+`systemctl --user daemon-reload` を実行してください。
+
 ## Acknowledgments
 
 mesh-mem は先行する "AI エージェント向け永続メモリ" プロジェクトから大きなインスピレーションを受けています。設計思想・API 形状のアイデアを参考にさせてもらった各プロジェクトに感謝します。

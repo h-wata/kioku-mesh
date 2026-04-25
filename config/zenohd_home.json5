@@ -3,7 +3,7 @@
 // 対向ロールとの対称形で、storage の key_expr / strip_prefix / replication ブロックは
 // 両側で完全一致させること。timestamping は replication の前提なので全レベルで有効。
 //
-// 起動前に export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/zenoh-mem" を設定し、
+// 起動前に export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem" を設定し、
 // RocksDB 格納先の親ディレクトリが存在することを確認する。
 //
 // IP:
