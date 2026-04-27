@@ -54,7 +54,7 @@ def test_list_tools_registers_all_four(single_zenohd: Any) -> None:  # noqa: ARG
             return [t.name for t in tools]
 
     names = _run(_go())
-    assert set(names) >= {'save_observation', 'search_memory', 'delete_memory', 'get_memory_status'}
+    assert set(names) >= {'save_observation', 'search_memory', 'delete_memory', 'get_memory_status', 'get_memory'}
 
 
 def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -183,3 +183,122 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'session_id' in text
     # At least the 2 we put show up in the count summary.
     assert '件数' in text
+
+
+def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # noqa: ARG001
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'full field observation',
+                    'project': 'mcp-phase2',
+                    'tags': ['phase2'],
+                    'memory_type': 'decision',
+                    'importance': 4,
+                    'subject': 'test subject',
+                    'summary': 'test summary line',
+                    'source_files': ['src/mesh_mem/mcp_server.py'],
+                    'supersedes': [],
+                },
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = _run(_go())
+    assert '保存完了' in msg
+    obs_id = msg.split()[-1]
+    time.sleep(_INGEST_SETTLE)
+    found = store.find_observation_by_id(obs_id)
+    assert found is not None
+    assert found.memory_type == 'decision'
+    assert found.importance == 4
+    assert found.subject == 'test subject'
+    assert found.summary == 'test summary line'
+    assert found.source_files == ['src/mesh_mem/mcp_server.py']
+
+
+def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: ARG001
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {'content': 'backward compat obs', 'project': 'mcp-compat'},
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = _run(_go())
+    assert '保存完了' in msg
+    obs_id = msg.split()[-1]
+    time.sleep(_INGEST_SETTLE)
+    found = store.find_observation_by_id(obs_id)
+    assert found is not None
+    assert found.memory_type == 'note'
+    assert found.importance == 2
+    assert found.subject == ''
+    assert found.summary == ''
+
+
+def test_search_memory_summary_priority(single_zenohd: Any) -> None:  # noqa: ARG001
+    obs = Observation(
+        content='long content that should be truncated in display',
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id='mcp-pc',
+        session_id='mcp-sess',
+        project='mcp-summary',
+        memory_type='decision',
+        importance=3,
+        summary='short summary wins',
+    )
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'project': 'mcp-summary', 'limit': 5},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'short summary wins' in text
+    assert '[decision][3]' in text
+    assert obs.observation_id in text
+
+
+def test_get_memory_returns_full_metadata(single_zenohd: Any) -> None:  # noqa: ARG001
+    obs = Observation(
+        content='full content for get_memory test',
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id='mcp-pc',
+        session_id='mcp-sess',
+        project='mcp-get',
+        memory_type='bug',
+        importance=5,
+        subject='critical bug',
+        summary='bug summary',
+        source_files=['src/store.py'],
+        supersedes=['a' * 32],
+    )
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+    assert 'memory_type: bug' in text
+    assert 'importance: 5' in text
+    assert 'subject: critical bug' in text
+    assert 'summary: bug summary' in text
+    assert 'source_files: src/store.py' in text
+    assert 'full content for get_memory test' in text

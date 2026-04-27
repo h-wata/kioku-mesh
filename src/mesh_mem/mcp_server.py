@@ -28,22 +28,50 @@ def save_observation(
     content: str,
     project: str = '',
     tags: list[str] | None = None,
+    memory_type: str = 'note',
+    importance: int = 2,
+    subject: str = '',
+    summary: str = '',
+    source_files: list[str] | None = None,
+    supersedes: list[str] | None = None,
 ) -> str:
     """Persist a work note / decision / discovery into the shared mesh memory.
+
+    **Save when**: design decision, non-obvious bug root cause, reusable
+    pattern, config change with rationale, session summary.
+    **Skip**: status check, transient note, file listing, routine task
+    with no new learning.
 
     Identity (agent_family / client_id / pc_id / session_id) is resolved from
     environment, not from tool arguments. This prevents LLMs from corrupting
     the identity namespace by passing wrong values.
 
     Args:
-        content: free-text body of the observation.
+        content: full-text body of the observation.
         project: optional project tag to scope the entry.
         tags: optional list of keyword tags.
+        memory_type: category — one of "note", "decision", "bug", "pattern",
+            "config", "summary" (default "note").
+        importance: 1 (trivial) to 5 (critical), clamped automatically.
+        subject: short topic / symbol name (e.g. "get_position latency").
+        summary: one-line abstract shown in search results (fallback: content).
+        source_files: related file paths for traceability.
+        supersedes: list of observation_ids this entry replaces.
 
     Returns:
         The generated ``observation_id``.
     """
-    obs = Observation(content=content, project=project, tags=tags or [])
+    obs = Observation(
+        content=content,
+        project=project,
+        tags=tags or [],
+        memory_type=memory_type,
+        importance=importance,
+        subject=subject,
+        summary=summary,
+        source_files=source_files or [],
+        supersedes=supersedes or [],
+    )
     put_observation(obs)
     return f'保存完了: {obs.observation_id}'
 
@@ -79,15 +107,47 @@ def search_memory(
         return '該当するメモリはありません。'
     lines = []
     for obs in results:
-        tags_str = ', '.join(obs.tags) if obs.tags else ''
+        body = obs.summary if obs.summary else obs.content[:80]
+        subject_part = f' {obs.subject}' if obs.subject else ''
+        project_part = f' ({obs.project})' if obs.project else ''
         lines.append(
-            f'[{obs.agent_family}/{obs.client_id}] {obs.created_at[:19]} '
-            f'({obs.project or "no-project"}) '
-            f'{obs.content[:200]}'
-            f'{f" #{tags_str}" if tags_str else ""} '
-            f'<id={obs.observation_id}>'
+            f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
+            f'{project_part}{subject_part}\n'
+            f'{body} <id={obs.observation_id}>'
         )
     return '\n---\n'.join(lines)
+
+
+@mcp.tool()
+def get_memory(observation_id: str) -> str:
+    """Get full content and metadata for a single observation by ID.
+
+    Use this after ``search_memory`` to retrieve the complete record for a
+    result that looks relevant. Returns all fields including the extended
+    schema fields added in Phase 2 (memory_type, importance, subject,
+    summary, source_files, supersedes).
+    """
+    if len(observation_id) != 32:
+        return 'observation_id は 32 文字の完全一致が必要です。'
+    obs = find_observation_by_id(observation_id)
+    if obs is None:
+        return f'observation_id {observation_id} は見つかりませんでした。'
+    lines = [
+        f'id: {obs.observation_id}',
+        f'memory_type: {obs.memory_type}',
+        f'importance: {obs.importance}',
+        f'created_at: {obs.created_at}',
+        f'project: {obs.project or "-"}',
+        f'subject: {obs.subject or "-"}',
+        f'summary: {obs.summary or "-"}',
+        f'agent: {obs.agent_family}/{obs.client_id}',
+        f'tags: {", ".join(obs.tags) if obs.tags else "-"}',
+        f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
+        f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
+        '---',
+        obs.content,
+    ]
+    return '\n'.join(lines)
 
 
 @mcp.tool()
