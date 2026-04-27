@@ -366,8 +366,18 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
 def gc_expired_tombstones(
     retention_days: int = 30,
     now: datetime | None = None,
+    project: str = '',
 ) -> int:
     """Physically purge tombstones older than ``retention_days`` along with their observations.
+
+    When ``project`` is non-empty, only tombstones whose corresponding
+    observation has ``project == project`` are purged. Orphan tombstones
+    (observation absent) are skipped conservatively when a project filter is
+    active because the project cannot be determined. When ``project`` is empty
+    (default) all expired tombstones are swept regardless of project.
+
+    ``--force-id`` callers use :func:`physical_delete_observation` directly
+    and are not affected by this filter.
 
     Tombstones whose ``deleted_at`` cannot be parsed are left in place
     (conservative — never delete on ambiguity).
@@ -401,6 +411,13 @@ def gc_expired_tombstones(
                 tomb.observation_id,
             )
             continue
+        if project:
+            obs = find_observation_by_id(tomb.observation_id)
+            if obs is None:
+                log.warning('skip orphan tomb (no obs found) under project filter: %s', tomb_key)
+                continue
+            if obs.project != project:
+                continue
         obs_key = tomb_key.replace('mem/tomb/', 'mem/obs/', 1)
         delete_key(tomb_key)
         delete_key(obs_key)

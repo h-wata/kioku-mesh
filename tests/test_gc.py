@@ -281,3 +281,86 @@ def test_physical_delete_survives_wildcard_rejection(monkeypatch: pytest.MonkeyP
     # Both wildcard patterns were attempted despite raising each time.
     assert any(k.startswith('mem/obs/') for k in fake.delete_calls), fake.delete_calls
     assert any(k.startswith('mem/tomb/') for k in fake.delete_calls), fake.delete_calls
+
+
+# ---------------------------------------------------------------------------
+# --project filter tests
+# ---------------------------------------------------------------------------
+
+
+def _mk_aged_tombstone(obs: Observation, days_ago: int = 60) -> None:
+    """Emit a back-dated tombstone for *obs* so retention would sweep it."""
+    aged = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    tomb = Tombstone(
+        observation_id=obs.observation_id,
+        reason='aged',
+        deleted_at=aged.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
+    )
+    store.get_session().put(obs.tombstone_key_expr(), tomb.to_json())
+
+
+def test_gc_project_filter_isolates(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Gc --project B must NOT remove tombstones whose observation has project=A."""
+    obs_a = _mk_obs('project-A obs', project='proj-a')
+    store.put_observation(obs_a)
+    _mk_aged_tombstone(obs_a)
+    time.sleep(_INGEST_SETTLE)
+
+    purged = store.gc_expired_tombstones(retention_days=30, project='proj-b')
+    assert purged == 0
+    time.sleep(_INGEST_SETTLE)
+    assert _obs_present(obs_a.observation_id), 'proj-a obs must survive gc --project proj-b'
+    assert _tomb_keys_for(obs_a.observation_id) != [], 'proj-a tomb must survive gc --project proj-b'
+
+
+def test_gc_project_filter_targets(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Gc --project A removes tombstones whose observation has project=A."""
+    obs_a = _mk_obs('project-A obs to purge', project='proj-a')
+    store.put_observation(obs_a)
+    _mk_aged_tombstone(obs_a)
+    time.sleep(_INGEST_SETTLE)
+
+    purged = store.gc_expired_tombstones(retention_days=30, project='proj-a')
+    assert purged >= 1
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(obs_a.observation_id)
+    assert _tomb_keys_for(obs_a.observation_id) == []
+
+
+def test_gc_no_project_unchanged(single_zenohd: Any) -> None:  # noqa: ARG001
+    """--project omitted sweeps all projects (existing behaviour unchanged)."""
+    obs_a = _mk_obs('multi-proj gc test A', project='proj-x')
+    obs_b = _mk_obs('multi-proj gc test B', project='proj-y')
+    store.put_observation(obs_a)
+    store.put_observation(obs_b)
+    _mk_aged_tombstone(obs_a)
+    _mk_aged_tombstone(obs_b)
+    time.sleep(_INGEST_SETTLE)
+
+    purged = store.gc_expired_tombstones(retention_days=30)
+    assert purged >= 2
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(obs_a.observation_id)
+    assert not _obs_present(obs_b.observation_id)
+
+
+def test_gc_force_id_with_project_ignores_project(single_zenohd: Any) -> None:  # noqa: ARG001
+    """--force-id takes precedence; --project is irrelevant to the ID-based path.
+
+    When both --force-id and --project are supplied, physical_delete_observation
+    is called for the given ID without any project check. This preserves the
+    single-ID emergency-purge semantics.
+    """
+    obs = _mk_obs('force-id-project-combo', project='proj-z')
+    store.put_observation(obs)
+    store.put_tombstone(obs, reason='combo-test')
+    time.sleep(_INGEST_SETTLE)
+
+    # Simulates: mesh-mem gc --force-id <id> --project other-proj
+    # _cmd_gc short-circuits to physical_delete_observation when force_id is set.
+    obs_removed, tomb_removed = store.physical_delete_observation(obs.observation_id)
+    assert obs_removed is True
+    assert tomb_removed is True
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(obs.observation_id)
+    assert _tomb_keys_for(obs.observation_id) == []
