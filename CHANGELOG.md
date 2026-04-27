@@ -10,6 +10,10 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- Observation schema extended with `memory_type`, `importance`, `subject`,
+  `summary`, `source_files`, `supersedes` fields (Refs #9)
+
 ### Fixed
 - Unify default search `limit` to 50 across CLI/MCP/API (#1)
 

@@ -47,6 +47,18 @@ class Observation:
     tags: list[str] = field(default_factory=list)
     observation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: str = field(default_factory=_utc_now_iso)
+    memory_type: str = 'note'
+    importance: int = 2
+    subject: str = ''
+    summary: str = ''
+    source_files: list[str] = field(default_factory=list)
+    supersedes: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.importance < 1:
+            self.importance = 1
+        elif self.importance > 5:
+            self.importance = 5
 
     @property
     def key_expr(self) -> str:

@@ -71,3 +71,88 @@ def test_key_expr_reflects_explicit_identity_fields() -> None:
     expected = f'mem/obs/gemini/gemini-cli/testpc123/sess456/{obs.observation_id}'
     assert obs.key_expr == expected
     assert obs.tombstone_key_expr() == expected.replace('mem/obs/', 'mem/tomb/', 1)
+
+
+def test_observation_default_values() -> None:
+    obs = Observation(content='hello')
+    assert obs.memory_type == 'note'
+    assert obs.importance == 2
+    assert obs.subject == ''
+    assert obs.summary == ''
+    assert obs.source_files == []
+    assert obs.supersedes == []
+
+
+def test_observation_with_all_fields() -> None:
+    obs = Observation(
+        content='decision about X',
+        memory_type='decision',
+        importance=5,
+        subject='architecture',
+        summary='use Zenoh for transport',
+        source_files=['src/mesh_mem/store.py'],
+        supersedes=['abc123'],
+    )
+    d = json.loads(obs.to_json())
+    assert d['memory_type'] == 'decision'
+    assert d['importance'] == 5
+    assert d['subject'] == 'architecture'
+    assert d['summary'] == 'use Zenoh for transport'
+    assert d['source_files'] == ['src/mesh_mem/store.py']
+    assert d['supersedes'] == ['abc123']
+    restored = Observation.from_json(obs.to_json())
+    assert restored.memory_type == obs.memory_type
+    assert restored.importance == obs.importance
+    assert restored.source_files == obs.source_files
+    assert restored.supersedes == obs.supersedes
+
+
+def test_observation_importance_clamp() -> None:
+    assert Observation(content='x', importance=0).importance == 1
+    assert Observation(content='x', importance=10).importance == 5
+    assert Observation(content='x', importance=1).importance == 1
+    assert Observation(content='x', importance=5).importance == 5
+    assert Observation(content='x', importance=3).importance == 3
+
+
+def test_observation_old_json_compat() -> None:
+    old_json = json.dumps(
+        {
+            'content': 'old obs',
+            'agent_family': 'claude',
+            'client_id': 'claude-code',
+            'pc_id': 'pc1',
+            'session_id': 'sess1',
+            'project': 'test',
+            'tags': [],
+            'observation_id': 'a' * 32,
+            'created_at': '2026-01-01T00:00:00.000000Z',
+        }
+    )
+    obs = Observation.from_json(old_json)
+    assert obs.content == 'old obs'
+    assert obs.memory_type == 'note'
+    assert obs.importance == 2
+    assert obs.subject == ''
+    assert obs.summary == ''
+    assert obs.source_files == []
+    assert obs.supersedes == []
+
+
+def test_observation_new_json_old_code_compat() -> None:
+    obs = Observation(
+        content='new obs',
+        memory_type='decision',
+        importance=4,
+        subject='test subject',
+        summary='test summary',
+        source_files=['a.py'],
+        supersedes=['b' * 32],
+    )
+    new_json = obs.to_json()
+    raw = json.loads(new_json)
+    raw['unknown_future_field'] = 'ignored'
+    restored = Observation.from_json(json.dumps(raw))
+    assert restored.content == 'new obs'
+    assert restored.memory_type == 'decision'
+    assert restored.importance == 4
