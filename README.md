@@ -192,16 +192,71 @@ Do NOT open 7447 to the whole LAN or the internet. The PoC has no transport-leve
 
 ## Time sync
 
+mesh-mem depends on the host wall clock in three places:
+
+- **`created_at`** — set at save time by `models.py:_utc_now_iso()`; appears in `search_memory` output and in `--since-iso` comparisons.
+- **`--since-iso` filter** — `search_observations` parses and compares timestamps from both hosts; silent clock skew shifts the effective cutoff by the drift amount.
+- **`gc --retention-days`** — tombstone expiry is evaluated using `deleted_at` from each replica's local clock; skewed clocks cause asymmetric expiry.
+
+### Install chrony (recommended)
+
+`chrony` is the recommended NTP client. It supports `makestep` for immediate large-offset correction, which `systemd-timesyncd` (the default on Ubuntu) does not.
+
 ```bash
 # Debian / Ubuntu
 sudo apt install chrony
 sudo systemctl enable --now chrony
-
-# Verify offset is within ~100ms on both hosts
-chronyc tracking | grep -E 'Stratum|Last offset|RMS offset|System time'
 ```
 
-If you see `Last offset` > 1s, replication's digest comparison may fail to converge even on a stable LAN; address the clock source before troubleshooting mesh-mem itself.
+### Verify alignment — both hosts
+
+```bash
+# Per-host offset (run on each node)
+chronyc tracking | grep -E 'Stratum|Last offset|RMS offset|System time'
+
+# Upstream source quality
+chronyc sources -v
+
+# Cross-host sanity check — run simultaneously on both nodes and compare
+date -u
+```
+
+Recommended thresholds:
+- Each node `Last offset` < 100 ms
+- Observed inter-host drift (`date -u` difference) < 100 ms
+
+> **⚠ `timedatectl status` alone is not a reliable indicator of inter-host alignment.**
+>
+> During NTP skew testing (TASK-122) both Home and Office reported
+> `NTP service: active / synchronized: yes` via `timedatectl`, yet the actual
+> wall-clock difference between the two hosts was **12.75 seconds**. This happened
+> because `synchronized: yes` only means the host has reached its own NTP server —
+> it says nothing about whether two hosts share the same time reference or have
+> converged to within a useful tolerance of each other.
+>
+> Always cross-check with `date -u` on both nodes, or use `chronyc tracking` and
+> compare `System time` offsets.
+
+### Drift recovery
+
+If you detect a large offset after the fact:
+
+```bash
+# timedatectl set-ntp true only slews the clock slowly — may take minutes/hours
+# for large offsets. Use chronyc makestep for immediate correction:
+sudo chronyc makestep
+
+# Confirm
+chronyc tracking | grep 'Last offset'
+```
+
+### PoC verification
+
+See [docs/poc-reports/raw/TASK-122-ntp-skew-result.yaml](docs/poc-reports/raw/TASK-122-ntp-skew-result.yaml)
+and [docs/poc-reports/SUMMARY.md §8.4](docs/poc-reports/SUMMARY.md#84-ntp-skew-境界テスト-部分実施結果task-122)
+for the full skew boundary test results. Key findings: replication integrity held at ±10 s skew,
+but `--since-iso` filter cutoffs shifted proportionally and `timedatectl` proved unreliable as
+an inter-host alignment signal.
 
 ## Retention / gc
 

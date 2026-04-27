@@ -18,6 +18,7 @@ versions without a migration path until `1.0.0`.
 - MCP tool `get_memory` added for retrieving full observation by ID (Refs #9)
 - `search_memory` display now prefers `summary` over full content (Refs #9)
 - CLI `mesh-mem gc --project <name>` filters retention sweep by project (#11)
+- docs: NTP advisory section recommending chrony for sub-second alignment (#10)
 
 ### Fixed
 - Unify default search `limit` to 50 across CLI/MCP/API (#1)
