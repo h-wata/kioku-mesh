@@ -8,7 +8,9 @@ See [plan.md](./plan.md) for the full design.
 
 ## Status
 
-PoC / design complete, implementation in progress. See `src/mesh_mem/`.
+PoC implementation complete; LAN replication / DR / split-brain verified end-to-end on a 2-host setup.
+See [plan.md](./plan.md) (sections **実機検証結果サマリ** and **既知制約 / Open issues**) for the
+verified scenarios and the remaining tracking issues, and `gh issue list --state open` for live status.
 
 ## Quick start (PoC)
 
@@ -27,8 +29,17 @@ python3 -m venv ~/.venv/mesh-mem
 # 5. exercise from the CLI
 export MESH_MEM_AGENT_FAMILY=claude
 export MESH_MEM_CLIENT_ID=claude-code
+
+# basic save
 mesh-mem save "note content" --project demo --tags a,b
-mesh-mem search "note"
+
+# structured save (memory_type / importance / subject / summary; all optional)
+mesh-mem save "store oidc tokens server-side, never in client cookies" \
+    --project demo --memory-type decision --importance 4 \
+    --subject "auth flow" --summary "pick OIDC over session cookies"
+
+mesh-mem search "note"               # default --limit 50, summary-first display
+mesh-mem get-memory <observation_id> # full record (32-char id) — extended fields included
 mesh-mem status
 ```
 
@@ -224,7 +235,7 @@ mesh-mem is an **experimental / early preview**. API and on-disk storage schema 
 
 - **No transport-level auth or encryption.** `mem/**` and `mem/tomb/**` are open to anyone reaching port 7447. LAN-only — never expose to the internet or to an untrusted LAN segment.
 - **stdio MCP only.** Works with Claude Code, Claude Desktop, Gemini CLI, and Codex CLI. Web apps (`claude.ai`, `chatgpt.com`) are not supported — they require HTTP/SSE transport + tunnel + auth, which this PoC does not ship.
-- **Multi-host (Home↔Office) field test pending.** E2E tests cover split-brain / sync via two zenohd routers on the same machine (different ports). The real two-PC LAN configuration is documented but unverified as of `v0.1.0`.
+- **Multi-host (Home↔Office) field-tested on LAN (post-`v0.1.0`).** Smoke / split-brain (TASK-094), Tier-1/2/3 benchmarks (TASK-097/113/115), and a 24-hour disconnect-recovery (DR) run (TASK-119, 1,192 writes, ~24.45 h partition) all pass for data integrity (G3 / G4 / Tombstone). One known caveat: cold-era resync is **step-function** rather than incremental — Office stayed at 0 obs for 97–282 s after re-link, then jumped to the full count. Hot/warm-era reconvergence stays at ~5 s as designed. See `plan.md` §実機検証結果サマリ.
 - **Logical vs physical delete.** `mesh-mem delete` / `delete_memory` write a tombstone; the observation is hidden from `search` but still stored. `mesh-mem gc --retention-days N` (default 30) physically removes expired tombstones plus their observations. `mesh-mem gc --force-id <obs_id>` broadcasts a best-effort immediate purge to every replica.
 - **No full-text search.** Search scans up to `MAX_SEARCH=10000` observations per query and filters in Python. This is a return-size cap, not a scan budget — datasets much larger than that will need a real FTS index (tracked for a later phase).
 - **gc broadcast is best-effort.** A replica that was unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.

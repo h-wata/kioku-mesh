@@ -1,5 +1,11 @@
 # mesh-mem: マルチエージェント分散メモリ PoC設計書
 
+> **ドキュメント状態**: 本書は 2026-04-23 に書き起こした **as-designed** な設計書を、
+> 2026-04-27 時点の実装・運用・PoC 検証結果に突き合わせて **as-built** に同期した版である。
+> 設計意図（PoC 制約、識別子設計、key expression、tombstone モデル等）はそのまま残し、
+> 実装が確定した部分は「**実装ステータス**」ブロックで現状を併記している。
+> 実機検証結果は末尾の **実機検証結果サマリ** と **既知制約 / Open issues** を参照。
+
 ## 概要
 
 複数のAIコーディングエージェント（Claude Code, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop）が共有するクロスエージェントメモリシステム。
@@ -322,6 +328,24 @@ class Tombstone:
 ```
 
 > `Heartbeat` は **PoC スコープ外**（将来の拡張参照）。送信主体・周期・停止判定を定義しないまま model だけ置くと中途半端な実装を誘発するため。
+
+> **実装ステータス (2026-04-27) — Status: implemented (extended)**
+>
+> Issue #9 で `Observation` を長記憶向けに拡張済み。実装は `src/mesh_mem/models.py`。
+> Phase 1（commit `7a5ccd3`）で dataclass を拡張、Phase 2（commit `469a516`）で MCP ツール経由の書き込みも対応。
+> 上記設計コードに対して以下 6 フィールドが追加されている（既存 8 フィールドはそのまま）:
+>
+> | フィールド | 型 | 既定値 | 用途 |
+> |---|---|---|---|
+> | `memory_type` | `str` | `"note"` | 種別（`note`/`decision`/`bugfix`/`discovery`/`config`/`pattern`/`fact`/`status`/`learning`） |
+> | `importance` | `int` | `2` | 1〜5、`__post_init__` で範囲外を clamp |
+> | `subject` | `str` | `""` | 短いトピック名（検索結果の見出し） |
+> | `summary` | `str` | `""` | 1行サマリー（検索結果は `summary` を優先表示、無ければ `content[:80]`） |
+> | `source_files` | `list[str]` | `[]` | 関連ファイルパス（トレーサビリティ用） |
+> | `supersedes` | `list[str]` | `[]` | 置き換える `observation_id` のリスト |
+>
+> 既存読み込み側の互換性は `from_json` の `_from_dict_compat`（未知フィールド drop）で確保済みのため、
+> 旧スキーマで保存された obs は新コードでもそのまま読める（追加フィールドは既定値で埋まる）。
 
 ---
 
@@ -700,19 +724,47 @@ if __name__ == "__main__":
 
 `agent_family` / `client_id` / `pc_id` / `session_id` は **MCP の `save_observation` 引数からは意図的に除外**し、env と永続化ファイルでのみ解決する。LLM が誤った値を渡して識別空間が壊れることを防ぐため。検索側では絞り込みに使えるよう引数として公開する。
 
+> **実装ステータス (2026-04-27) — Status: implemented (extended)**
+>
+> 実装は `src/mesh_mem/mcp_server.py`。設計上のコードに対する as-built の差分:
+>
+> - `save_observation` に Phase 2（commit `469a516`、Refs #9）で 6 引数追加:
+>   `memory_type`、`importance`、`subject`、`summary`、`source_files`、`supersedes`。
+>   いずれも省略可、デフォルトは `Observation` の field default に揃う。
+> - **新ツール `get_memory(observation_id)`** を追加（Phase 2、commit `469a516`）。
+>   `search_memory` でヒットした単一エントリの全メタデータ（拡張フィールド含む）を取得する。
+> - `search_memory` の表示は `summary` 優先（無ければ `content[:80]`）に変更。
+>   1行目に `[memory_type][importance] {created_at} ({project}) {subject}`、2行目に本文＋`<id=...>`。
+> - **search のデフォルト `limit` を 50 に統一**（Issue #1、commit `c0f5194`）。
+>   設計時の `limit=20` は CLI/MCP/API でバラついていたため 50 に揃え、`MAX_SEARCH=10000` clamp も従来どおり。
+> - `delete_memory`、`get_memory_status` のセマンティクスは設計どおり（変更なし）。
+
 ---
 
 ## CLI
 
-`__main__.py` は MCP と同じ内部 API を使う薄いラッパー。`save` / `search` / `delete` / `status` / `gc` を提供。
+`__main__.py` は MCP と同じ内部 API を使う薄いラッパー。`save` / `search` / `get-memory` / `delete` / `status` / `gc` を提供。
 
-- `mesh-mem save "..."` → env から identity を解決して保存（`--project`, `--tags`）
-- `mesh-mem search "..."` → `--agent-family` / `--client-id` / `--pc-id` / `--session-id` / `--project` / `--since` / `--limit`（limit は MAX_SEARCH=10000 に clamp）
+- `mesh-mem save "..."` → env から identity を解決して保存。基本オプション `--project`, `--tags` に加え、Issue #9 Phase 3 で構造化フィールドを取り込む（下記ステータス参照）。
+- `mesh-mem search "..."` → `--agent-family` / `--client-id` / `--pc-id` / `--session-id` / `--project` / `--since` / `--limit`（limit は MAX_SEARCH=10000 に clamp、default 50）
+- `mesh-mem get-memory <observation_id>` → 32文字完全一致で単一レコードの全フィールドを取得
 - `mesh-mem delete <observation_id>` → tombstone（32文字完全一致）
-- `mesh-mem gc [--force-id <id>]` → tombstone 対象の物理削除（retention policy に基づく）
+- `mesh-mem gc [--force-id <id>] [--retention-days N]` → tombstone 対象の物理削除（retention policy に基づく）
 - `mesh-mem status` → 状態表示（MAX_SEARCH 件以内の集計）
 
-（詳細コードは実装時に詰める）
+> **実装ステータス (2026-04-27) — Status: in flight (Phase 3) + partial (#11)**
+>
+> 実装は `src/mesh_mem/__main__.py`。設計に対する as-built の差分:
+>
+> - `mesh-mem save` に Issue #9 Phase 3（TASK-128, PR/commit pending）で構造化フィールドを追加:
+>   `--memory-type {note|decision|bugfix|discovery|config|pattern|fact|status|learning}`、
+>   `--importance 1-5`（既定 2、`__post_init__` で clamp）、
+>   `--subject`、`--summary`、`--source-files`（カンマ区切り）、`--supersedes`（カンマ区切り 32hex）。
+> - **新サブコマンド `mesh-mem get-memory <id>`**（Phase 3、TASK-128）— MCP `get_memory` と同等。
+> - `mesh-mem search` 出力フォーマットは MCP `search_memory` と揃え、`summary` 優先表示。
+> - **default `--limit` を 50 に統一**（Issue #1、commit `c0f5194`）。設計時の 20 から変更。
+> - `mesh-mem gc --project <name>` フィルタを追加予定（Issue #11、TASK-129、PR/commit pending）。
+>   GC 検証 (TASK-125) で `--retention-days N` が全 project の tombstone を一括削除する挙動が確認されたため、project スコープを切れるようにする。実装ファイルは `__main__.py` の `_cmd_gc` と `store.py` の `gc_expired_tombstones`。
 
 ---
 
@@ -802,6 +854,16 @@ zenohd -c config/zenohd_office.json5
 > systemd で常駐させる場合は unit の `Environment=ZENOH_BACKEND_ROCKSDB_ROOT=...` で同等の設定を行う。
 > ホスト firewall で 7447 を対向PCのIPに限定する設定も同時に入れる。
 
+> **実装ステータス (2026-04-27) — Status: implemented**
+>
+> - `ZENOH_BACKEND_ROCKSDB_ROOT` の推奨パスを `$HOME/.local/share/mesh-mem` に統一済み（Issue #2、commit `2a39ff5`）。
+>   旧 `~/.local/share/zenoh-mem` を使っているノードは README の「Migration」セクション参照。
+> - `config/zenohd_home.json5` / `zenohd_office.json5` は **`192.168.3.x` / `192.168.3.y` の placeholder に戻し済み**
+>   （Codex BLOCKER 対応、commit `36c12b7`）。実機 IP は各環境で書き換える（README 案内どおり）。
+>   単一ホストでの開発用に `config/zenohd_localhost.json5` を別途追加（commit `844f1a3`）。
+> - **systemd auto-start 用 override テンプレ**を `docs/systemd-zenohd-override.example.conf` に同梱済み
+>   （Issue #3、commit `c4cfaee`）。apt 配布の `zenohd.service` を mesh-mem 設定に向け直す drop-in。
+
 ### Step 2: mesh-mem のインストール
 
 ```bash
@@ -887,8 +949,14 @@ mesh-mem search ""
 - 「過去のメモリを検索して」 → `search_memory`
 - 「この observation を消して」 → `delete_memory`
 - 「メモリ状態を見せて」 → `get_memory_status`（version と実行パスが出ること）
+- 「この id の中身を見せて」 → `get_memory`（Phase 2 で追加、構造化フィールド全件返却）
 
 が動くことを確認。
+
+> **実施結果 (実機検証)**: 上記 Step 1〜6 に対応する 2-host 実機検証は Tier-1/2/3 ベンチ・
+> split-brain 復旧・DR 24h 分断・GC retention・NTP skew まで実施済み。
+> 詳細は **`docs/poc-reports/SUMMARY.md` §3, §6, §8**（dispatcher 配下に保存）を参照。
+> 本書末尾の **実機検証結果サマリ** にハイライトを抜粋している。
 
 ---
 
@@ -922,6 +990,15 @@ mesh-mem search ""
 
 合格基準を `tests/test_e2e_sync.py` の docstring に明記し、CI 相当で常時実行できる構成にする。
 
+> **実装ステータス (2026-04-27) — Status: implemented**
+>
+> 実装は `tests/` 配下に配置済み:
+> `test_models.py` / `test_identity.py` / `test_store_single.py` / `test_store_errors.py` /
+> `test_gc.py` / `test_e2e_sync.py` / `test_mcp_server.py` / `test_mcp_cli.py`。
+> MCP の in-process / subprocess smoke テストを追加するため `fastmcp` を test extras に組み込んだ
+> （Issue #4、commit `e5768c4`）。`pip install -e '.[dev,test]'` で導入可。
+> `test_search_respects_since_iso_filter` の date-dependent 問題は CI clock 非依存に修正済み（commit `40b1fe9`）。
+
 ---
 
 ## 運用ポリシー
@@ -948,3 +1025,51 @@ mesh-mem search ""
 - **QUIC mixed reliability**: observation はReliable、heartbeatはBestEffort
 - **Tailscale 経由のリモート同期**: 出先ノートPCを3台目の router として追加
 - **削除の分散合意**: 現在の tombstone + last-writer-wins から、より堅牢な CRDT ベース設計への移行検討
+
+---
+
+## 実機検証結果サマリ (2026-04-27 時点)
+
+設計手順（§PoC手順）に対する実機検証は dispatcher 配下
+`docs/poc-reports/SUMMARY.md`（および `docs/poc-reports/raw/TASK-*.yaml`）にまとまっている。
+本書では主要結果のみハイライトする。
+
+| 区分 | 内容 | 結果 | 出典 |
+|---|---|---|---|
+| Goal 4 | オフライン差分同期 | **PASS** — Office→Home に 25 秒以内に伝播 | TASK-094 Scenario A |
+| Goal 5 | split-brain + tombstone 伝播 | **PASS** — 3 秒以内に収束、existence-based deletion 確認 | TASK-094 Scenario C |
+| Tier-1 ベンチ (100 件) | save throughput / search latency | **PASS** — 31,805 ops/sec、search@100 = 20.8 ms | TASK-097 |
+| Tier-2 ベンチ (1,000 件) | スケール耐性 | **PASS** — save 37,053 ops/sec、search 全 limit 50–87 ms | TASK-113 |
+| Tier-3 ベンチ (10,000 件) | 大規模時の挙動 | 完了（詳細は SUMMARY.md §3） | TASK-115 |
+| Short / Mid-hot / Mid-warm 分断 | 30 秒〜65 秒 + 30 件 | **PASS** — いずれも ESTAB+5 秒で収束 | TASK-098/099/100、F1 |
+| DR 24h 分断 (1,192 件 save) | 長期分断後の cold-era 同期 | **PARTIAL** — G2 cold-era は step-function 収束 (97–282 秒)、データ整合性 (G3/G4) と Tombstone は PASS | TASK-119 |
+| NTP skew 境界 | Case 1–3 部分実施 | G2/G3 PASS、G1 NOT_VERIFIABLE、G4/G5 DEFERRED。`timedatectl synchronized: yes` でも 12.75s drift を観測 | TASK-122 |
+| GC retention / force-id | 物理削除 + broadcast purge | **PASS** — `--retention-days 0` は全 project の tombstone を一括対象にすることを確認 (#11 で改善予定) | TASK-125 |
+
+主要発見（詳細は `SUMMARY.md` §5、§8 参照）:
+
+1. **収束は分断時間に依存しない**。zenohd 起動直後の `initial_alignment()` が ~0.5 秒で Discovery を発行するため、hot/warm tier 内のデータは 5 秒程度で揃う。
+2. **cold era では Discovery 後のデータ転送時間が支配的**。1,192 件相当で 97–282 秒の step-function 収束が観測された（途中経過なしで一気にジャンプ）。
+3. **`timedatectl synchronized: yes` は inter-host alignment を保証しない**。`--since-iso` フィルタや tombstone TTL 評価に影響するため `chrony` 推奨（Issue #10）。
+4. **`gc --retention-days N` は project スコープを切らない**ため、複数プロジェクト相乗り環境では事故が起きうる。Issue #11 / TASK-129 で `--project` フィルタを追加予定。
+5. **CLI `--project` フィルタは zenohd 再起動直後に短時間 0 件を返す**競合が観測された（Issue #8）。empty keyword search では同じデータが見えるという乖離。
+
+---
+
+## 既知制約 / Open issues
+
+`v0.1.0` 時点（2026-04-24 リリース）と PoC 検証以降の as-built での既知制約。
+GitHub Issue 一覧は `gh issue list --state open` で最新を確認。
+
+| Issue | 状態 | 内容 |
+|---|---|---|
+| #5 | open | benchmark / DR 拡張 — Tier-2/3・DR は PASS、MCP / Case 4-5 は defer |
+| #6 | open | v0.2.0 release prep（PoC 結果の取り込み） |
+| #7 | open | `search_observations` に server-side filtering を入れる（16k 件で 2.2 s の全走査コスト） |
+| #8 | open | CLI `--project` フィルタ: zenohd 再起動直後に 0 件、empty keyword search では見える race |
+| #9 | partial | Observation 構造化 — Phase 1 (`7a5ccd3`) / Phase 2 (`469a516`) 完了、Phase 3 (CLI、TASK-128) commit pending |
+| #10 | open | NTP advisory — `chrony` 強推奨。`timedatectl synchronized: yes` は不十分（TASK-122 参照） |
+| #11 | partial | `mesh-mem gc --project` フィルタ（TASK-129）commit pending。GC test (TASK-125) で発覚 |
+
+設計書の本文（PoC 制約、識別子設計、key expression、tombstone モデル）は **PoC スコープでは安定**しており、
+v0.2.0 に向けて差し替える予定はない。次フェーズで再検討する候補は §将来の拡張 を参照。
