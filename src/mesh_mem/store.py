@@ -26,6 +26,7 @@ from typing import Any
 
 import zenoh
 
+from .local_index import LocalIndex
 from .models import Observation
 from .models import Tombstone
 
@@ -37,6 +38,36 @@ MAX_SEARCH = 10_000
 GET_TIMEOUT = 5.0
 
 _session: zenoh.Session | None = None
+_index: LocalIndex | None = None
+
+
+def get_index() -> LocalIndex:
+    """Return the cached LocalIndex sidecar, opening it on first use.
+
+    The index is a write-side mirror of zenoh; reads still go through
+    zenoh in Phase 2. Disabled via ``MESH_MEM_DISABLE_INDEX=1`` (the
+    returned instance is a no-op) so callers do not need to branch.
+    """
+    global _index
+    if _index is None:
+        _index = LocalIndex.connect()
+    return _index
+
+
+def _reset_index() -> None:
+    """Drop the cached index so the next call reopens it.
+
+    Used by tests via ``conftest.py`` to ensure each test gets a fresh
+    SQLite file under its own ``MESH_MEM_STATE_DIR`` tmp_path. Production
+    code does not call this.
+    """
+    global _index
+    if _index is not None:
+        try:
+            _index.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _index = None
 
 
 class QueryErrorReply(Exception):
@@ -159,15 +190,30 @@ def _parse_iso(s: str) -> datetime | None:
 
 @with_retry
 def put_observation(obs: Observation) -> None:
-    """Publish an observation to its canonical ``mem/obs/...`` key."""
+    """Publish an observation to its canonical ``mem/obs/...`` key.
+
+    On zenoh success, also upsert into the local SQLite sidecar index
+    (Issue #7 plan B). Index errors are best-effort and do not raise so
+    a corrupt index file cannot break a working put.
+    """
     get_session().put(obs.key_expr, obs.to_json())
+    # Sidecar write happens AFTER the zenoh put so that a successful
+    # zenoh-side write is the contract for callers. The index is a read-
+    # acceleration layer; Phase 4 will reconcile it from zenoh on demand.
+    get_index().upsert(obs)
 
 
 @with_retry
 def put_tombstone(obs: Observation, reason: str = '') -> None:
-    """Publish a tombstone at the mirrored ``mem/tomb/...`` key for this observation."""
+    """Publish a tombstone at the mirrored ``mem/tomb/...`` key for this observation.
+
+    Also stamps ``deleted_at`` on the matching SQLite row when the index
+    is enabled. A no-op on the index side when no row exists yet (the
+    tombstone will be reconciled on Phase 4 rebuild).
+    """
     tomb = Tombstone(observation_id=obs.observation_id, reason=reason)
     get_session().put(obs.tombstone_key_expr(), tomb.to_json())
+    get_index().mark_deleted(obs.observation_id, tomb.deleted_at)
 
 
 @with_retry

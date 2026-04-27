@@ -41,14 +41,19 @@ from mesh_mem import store
 
 @pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """Redirect MESH_MEM_STATE_DIR per test and reset identity / store caches."""
+    """Redirect MESH_MEM_STATE_DIR per test and reset identity / store / index caches."""
     monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    # MESH_MEM_INDEX_DB は state_dir() 配下に解決されるが、
+    # 環境変数で別パスが指定されているとテストが本物の state_dir に書きに行ってしまうので削除。
+    monkeypatch.delenv('MESH_MEM_INDEX_DB', raising=False)
     identity.reset_caches()
-    # store._session に他テストの残骸が残りうるので明示クリア。
+    # store._session / _index に他テストの残骸が残りうるので明示クリア。
     store._reset_session()
+    store._reset_index()
     yield tmp_path
     identity.reset_caches()
     store._reset_session()
+    store._reset_index()
 
 
 def _purge_mem_keys() -> None:
