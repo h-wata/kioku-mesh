@@ -111,3 +111,130 @@ def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None: 
     assert found is not None
     assert found.content == 'saved-through-subprocess'
     assert found.project == 'mcp-cli'
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 CLI tests — exercise ``mesh_mem.__main__.main()`` directly
+# ---------------------------------------------------------------------------
+
+from mesh_mem.__main__ import main as cli_main  # noqa: E402
+
+
+def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """All new options are accepted and persisted."""
+    rc = cli_main(
+        [
+            'save',
+            'test-content-phase3',
+            '--memory-type',
+            'decision',
+            '--importance',
+            '4',
+            '--subject',
+            'test-subject',
+            '--summary',
+            'test-summary',
+            '--source-files',
+            'a.py,b.py',
+            '--supersedes',
+            '',
+            '-p',
+            'proj-phase3',
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '保存完了' in out
+    obs_id = out.strip().split()[-1]
+    assert len(obs_id) == 32
+
+    time.sleep(_INGEST_SETTLE)
+    obs = store.find_observation_by_id(obs_id)
+    assert obs is not None
+    assert obs.memory_type == 'decision'
+    assert obs.importance == 4
+    assert obs.subject == 'test-subject'
+    assert obs.summary == 'test-summary'
+    assert obs.source_files == ['a.py', 'b.py']
+
+
+def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """Save then get-memory returns all structured fields."""
+    rc = cli_main(
+        [
+            'save',
+            'get-memory-content',
+            '--memory-type',
+            'bugfix',
+            '--importance',
+            '3',
+            '--subject',
+            'root-cause',
+            '--summary',
+            'one-line-summary',
+            '--source-files',
+            'x.py',
+        ]
+    )
+    assert rc == 0
+    obs_id = capsys.readouterr().out.strip().split()[-1]
+
+    time.sleep(_INGEST_SETTLE)
+    rc2 = cli_main(['get-memory', obs_id])
+    assert rc2 == 0
+    out = capsys.readouterr().out
+    assert f'id: {obs_id}' in out
+    assert 'memory_type: bugfix' in out
+    assert 'importance: 3' in out
+    assert 'subject: root-cause' in out
+    assert 'summary: one-line-summary' in out
+    assert 'source_files: x.py' in out
+    assert '---' in out
+    assert 'get-memory-content' in out
+
+
+def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """Search output shows summary when present, falls back to content[:80]."""
+    rc = cli_main(
+        [
+            'save',
+            'full-body-content-that-is-long',
+            '--summary',
+            'short-summary',
+            '-p',
+            'proj-search',
+        ]
+    )
+    assert rc == 0
+    obs_id = capsys.readouterr().out.strip().split()[-1]
+
+    time.sleep(_INGEST_SETTLE)
+    rc2 = cli_main(['search', '--project', 'proj-search'])
+    assert rc2 == 0
+    out = capsys.readouterr().out
+    assert 'short-summary' in out
+    assert f'<id={obs_id}>' in out
+    assert '[note][2]' in out
+
+
+def test_cli_save_importance_out_of_range(capsys: pytest.CaptureFixture) -> None:
+    """Importance outside 1-5 causes argparse error (exit code 2)."""
+    with pytest.raises(SystemExit) as exc:
+        cli_main(['save', 'content', '--importance', '6'])
+    assert exc.value.code == 2
+
+    with pytest.raises(SystemExit) as exc2:
+        cli_main(['save', 'content', '--importance', '0'])
+    assert exc2.value.code == 2
+
+
+def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """--source-files a.py,b.py is parsed into list[str]."""
+    rc = cli_main(['save', 'csv-test', '--source-files', 'a.py,b.py'])
+    assert rc == 0
+    obs_id = capsys.readouterr().out.strip().split()[-1]
+
+    time.sleep(_INGEST_SETTLE)
+    obs = store.find_observation_by_id(obs_id)
+    assert obs is not None
+    assert obs.source_files == ['a.py', 'b.py']
