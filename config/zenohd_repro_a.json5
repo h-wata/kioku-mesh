@@ -1,0 +1,50 @@
+// repro-issue-8: Router A — localhost port 7448, connects to B at 7449
+// Replication intervals are shortened (interval=2s) so cold era is reached in ~22s,
+// making the step-function alignment observable without waiting 6 minutes.
+{
+  mode: "router",
+
+  listen: {
+    endpoints: [
+      "tcp/127.0.0.1:7448",
+    ],
+  },
+
+  connect: {
+    endpoints: ["tcp/127.0.0.1:7449"],
+  },
+
+  scouting: {
+    multicast: { enabled: false },
+  },
+
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        rocksdb: {},
+      },
+      storages: {
+        agent_mem: {
+          key_expr: "mem/**",
+          strip_prefix: "mem",
+          replication: {
+            interval: 2.0,
+            sub_intervals: 5,
+            hot: 6,
+            warm: 10,
+            propagation_delay: 250,
+          },
+          volume: {
+            id: "rocksdb",
+            dir: "agent_mem",
+            create_db: true,
+          },
+        },
+      },
+    },
+  },
+}

@@ -1,0 +1,50 @@
+// repro-issue-8: Router B — localhost port 7449, connects to A at 7448
+// Mirror of zenohd_repro_a.json5 with ports swapped.
+// Storage config must be identical to A for replication digest comparison to work.
+{
+  mode: "router",
+
+  listen: {
+    endpoints: [
+      "tcp/127.0.0.1:7449",
+    ],
+  },
+
+  connect: {
+    endpoints: ["tcp/127.0.0.1:7448"],
+  },
+
+  scouting: {
+    multicast: { enabled: false },
+  },
+
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        rocksdb: {},
+      },
+      storages: {
+        agent_mem: {
+          key_expr: "mem/**",
+          strip_prefix: "mem",
+          replication: {
+            interval: 2.0,
+            sub_intervals: 5,
+            hot: 6,
+            warm: 10,
+            propagation_delay: 250,
+          },
+          volume: {
+            id: "rocksdb",
+            dir: "agent_mem",
+            create_db: true,
+          },
+        },
+      },
+    },
+  },
+}
