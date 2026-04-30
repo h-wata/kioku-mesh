@@ -147,3 +147,69 @@ def test_search_respects_since_iso_filter(single_zenohd: Any) -> None:  # noqa: 
     ids = {r.observation_id for r in results}
     assert recent.observation_id in ids
     assert old.observation_id not in ids
+
+
+def test_search_uses_sqlite_index_by_default(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Phase 3: ``search_observations`` reads from the local SQLite sidecar.
+
+    Inject a sentinel row directly into the SQLite index without going
+    through Zenoh, then verify ``search_observations`` returns it. If the
+    index were not on the read path, this row would never appear.
+    """
+    obs = _mk_obs('sqlite-only sentinel', project='index-default')
+    # Bypass put_observation (which writes to both Zenoh and the index)
+    # by upserting straight into the LocalIndex.
+    store.get_index().upsert(obs)
+
+    results = store.search_observations(project='index-default')
+    ids = {r.observation_id for r in results}
+    assert obs.observation_id in ids, 'SQLite-first read path must surface index-only rows'
+
+
+def test_search_falls_back_to_zenoh_when_index_disabled(
+    monkeypatch: Any,
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """``MESH_MEM_DISABLE_INDEX=1`` routes ``search_observations`` to Zenoh.
+
+    Confirmed by writing a row only to Zenoh (LocalIndex disabled) and
+    verifying it is still searchable. The flip side of the test above:
+    when the index is unavailable, the legacy full-scan path remains.
+    """
+    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    store._reset_index()  # pick up the env change
+
+    obs = _mk_obs('zenoh-fallback row', project='fallback')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    results = store.search_observations(project='fallback')
+    ids = {r.observation_id for r in results}
+    assert obs.observation_id in ids
+
+
+def test_find_by_id_uses_sqlite_index_then_falls_back(single_zenohd: Any) -> None:  # noqa: ARG001
+    """``find_observation_by_id`` hits the index first, then Zenoh on miss.
+
+    Two cases covered:
+        1. Row only in the SQLite index — index hit returns it.
+        2. Row only in Zenoh (deleted from index) — Zenoh fallback finds it.
+    """
+    # Case 1: index-only sentinel.
+    only_in_index = _mk_obs('index-hit', project='find-routing')
+    store.get_index().upsert(only_in_index)
+    hit = store.find_observation_by_id(only_in_index.observation_id)
+    assert hit is not None
+    assert hit.content == 'index-hit'
+
+    # Case 2: row in Zenoh but absent from the index (simulate by deleting
+    # the row from the sidecar after put). The Zenoh fallback must locate
+    # it so the delete / gc paths still work for pre-Phase-2 observations.
+    zenoh_only = _mk_obs('zenoh-only', project='find-routing')
+    store.put_observation(zenoh_only)
+    time.sleep(_INGEST_SETTLE)
+    store.get_index().physical_delete(zenoh_only.observation_id)
+
+    hit2 = store.find_observation_by_id(zenoh_only.observation_id)
+    assert hit2 is not None
+    assert hit2.content == 'zenoh-only'

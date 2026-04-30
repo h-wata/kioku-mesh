@@ -7,6 +7,11 @@ QueryErrorReply / _iter_ok_replies / with_retry path:
                        (does NOT silently return an empty / partial list)
 2. err -> retry ok  -> one retryable failure is re-attempted and succeeds
 3. err -> retry err -> final RuntimeError with __cause__ == QueryErrorReply
+
+Phase 3 routes ``search_observations`` through the SQLite local index by
+default; the zenoh retry path that these tests exercise is only entered
+when ``MESH_MEM_DISABLE_INDEX=1``. Tests below force that env var so the
+retry semantics under test are actually reachable.
 """
 
 from __future__ import annotations
@@ -53,7 +58,14 @@ class _FakeSession:
 
 
 def _install_fake_session(monkeypatch: pytest.MonkeyPatch, session: _FakeSession) -> None:
-    """Redirect ``_open_session`` so ``get_session`` / ``_reset_session`` cycle uses the fake."""
+    """Redirect ``_open_session`` so ``get_session`` / ``_reset_session`` cycle uses the fake.
+
+    Also forces ``MESH_MEM_DISABLE_INDEX=1`` so ``search_observations`` falls
+    back to the legacy zenoh path being exercised by these tests, and resets
+    the cached LocalIndex so the env var takes effect on the next call.
+    """
+    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    store._reset_index()
     monkeypatch.setattr(store, '_open_session', lambda: session)
     store._reset_session()
 

@@ -1,10 +1,10 @@
 """Local SQLite sidecar index for observation metadata.
 
 Issue #7 / TASK-131 plan B. Zenoh-rocksdb stays the source of truth; this
-file maintains a per-process SQLite mirror that the read path will switch
-to in Phase 3. Phase 2 (this commit) only wires up the write side: every
-``put_observation`` upserts into ``obs_index``, every ``put_tombstone``
-stamps ``deleted_at``. Reads still go through the Zenoh full-scan path.
+file maintains a per-process SQLite mirror that ``store.search_observations``
+reads from since Phase 3. ``put_observation`` upserts into ``obs_index``,
+``put_tombstone`` stamps ``deleted_at`` (no row delete). The Zenoh full-
+scan path stays available behind ``MESH_MEM_DISABLE_INDEX=1`` as a fallback.
 
 Failure semantics: SQLite is a sidecar. Zenoh write success is the contract;
 SQLite errors are logged and swallowed so a corrupt index file cannot turn
@@ -14,6 +14,12 @@ will repopulate the index from Zenoh on demand.
 Disable: set ``MESH_MEM_DISABLE_INDEX=1`` (or ``MESH_MEM_INDEX_DB=:memory:``
 for an ephemeral in-process DB) — the LocalIndex methods become no-ops in
 the disabled case so callers don't branch.
+
+Identity filters (``agent_family`` / ``client_id`` / ``pc_id`` / ``session_id``)
+use ``json_extract(payload_json, ...)`` rather than dedicated columns. At
+PoC scale this stays well under the sub-200ms target (TASK-134 spike). A
+schema migration to lift these into indexable columns is deferred to a
+later issue once 100k+ workloads or skewed identity distributions need it.
 
 Schema validated by TASK-134 spike at 50k rows: rebuild ~0.4s, query p99
 ~0.04ms, file size ~49MB. See docs/poc-reports/raw/TASK-134-spike-issue-7-result.yaml.
@@ -198,22 +204,83 @@ class LocalIndex:
     def search_by_project(self, project: str, limit: int = 50) -> list[Observation]:
         """Return live observations for ``project`` ordered by created_at DESC.
 
-        Phase 3 will swap ``store.search_observations`` to call this (or a
-        richer variant). Exposed in Phase 2 so tests can verify writes
-        landed without going through Zenoh.
+        Phase 2 entry point retained for backward compatibility; Phase 3
+        callers should prefer :meth:`search` for richer filters.
+        """
+        return self.search(project=project, limit=limit)
+
+    def search(
+        self,
+        *,
+        project: str = '',
+        agent_family: str = '',
+        client_id: str = '',
+        pc_id: str = '',
+        session_id: str = '',
+        query: str = '',
+        since_iso: str = '',
+        limit: int = 50,
+        include_deleted: bool = False,
+    ) -> list[Observation]:
+        """SQL-side search returning Observations ordered by created_at DESC.
+
+        Filters compose with AND. Empty-string filters are skipped (matches
+        ``store.search_observations`` semantics). ``query`` is a case-
+        insensitive substring match against ``payload_json`` — this covers
+        content / project / tags / subject / summary uniformly. False
+        positives on identity-field substrings are accepted for PoC; the
+        existing Zenoh-side semantic was content/project/tags only, so this
+        is a slight broadening that no current test depends on negatively.
+
+        ``since_iso`` is compared lexicographically against ``created_at``;
+        both are produced as 'Z'-suffixed UTC ISO 8601 strings by
+        :meth:`mesh_mem.models._utc_now_iso`, so lex order matches time
+        order. Rows whose created_at cannot be lex-compared (legacy bad
+        writes) will sort, possibly incorrectly — same caveat as the
+        existing Zenoh path.
         """
         if self._disabled or self._conn is None:
             return []
+        where: list[str] = []
+        params: list[object] = []
+        if not include_deleted:
+            where.append('deleted_at IS NULL')
+        if project:
+            where.append('project = ?')
+            params.append(project)
+        if agent_family:
+            where.append("json_extract(payload_json, '$.agent_family') = ?")
+            params.append(agent_family)
+        if client_id:
+            where.append("json_extract(payload_json, '$.client_id') = ?")
+            params.append(client_id)
+        if pc_id:
+            where.append("json_extract(payload_json, '$.pc_id') = ?")
+            params.append(pc_id)
+        if session_id:
+            where.append("json_extract(payload_json, '$.session_id') = ?")
+            params.append(session_id)
+        if since_iso:
+            where.append('created_at >= ?')
+            params.append(since_iso)
+        if query:
+            # Case-insensitive substring against the full payload (content /
+            # project / tags / subject / summary). LIKE is fast enough at PoC
+            # scale; FTS5 is the natural upgrade if profiling demands it.
+            where.append('LOWER(payload_json) LIKE ?')
+            params.append(f'%{query.lower()}%')
+
+        sql = 'SELECT payload_json FROM obs_index'
+        if where:
+            sql += ' WHERE ' + ' AND '.join(where)
+        sql += ' ORDER BY created_at DESC LIMIT ?'
+        params.append(max(1, limit))
+
         with self._lock:
             try:
-                rows = self._conn.execute(
-                    'SELECT payload_json FROM obs_index '
-                    'WHERE project = ? AND deleted_at IS NULL '
-                    'ORDER BY created_at DESC LIMIT ?',
-                    (project, limit),
-                ).fetchall()
+                rows = self._conn.execute(sql, params).fetchall()
             except sqlite3.Error as e:
-                log.warning('LocalIndex.search_by_project failed: %s', e)
+                log.warning('LocalIndex.search failed: %s', e)
                 return []
         out: list[Observation] = []
         for (payload,) in rows:
@@ -222,6 +289,49 @@ class LocalIndex:
             except Exception as e:  # noqa: BLE001 — malformed payload should not crash search
                 log.warning('LocalIndex skip malformed payload: %s', e)
         return out
+
+    def physical_delete(self, observation_id: str) -> None:
+        """Hard-DELETE the row matching ``observation_id``. No-op on miss.
+
+        Called by ``store.physical_delete_observation`` after the Zenoh
+        key delete so the index does not leak rows that no longer exist
+        upstream. The gc retention sweep also routes through here.
+        """
+        if self._disabled or self._conn is None:
+            return
+        with self._lock:
+            try:
+                self._conn.execute('DELETE FROM obs_index WHERE observation_id = ?', (observation_id,))
+                self._conn.commit()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.physical_delete failed for %s: %s', observation_id, e)
+
+    def find_by_id(self, observation_id: str, include_deleted: bool = False) -> Observation | None:
+        """Return the observation with id ``observation_id`` or None.
+
+        Phase 3 caller is ``store.find_observation_by_id``. ``include_deleted``
+        defaults to False so the lookup matches ``search`` semantics; the
+        gc / delete paths in store call this with ``include_deleted=True``
+        when they need to locate a tombstoned obs to physical-delete.
+        """
+        if self._disabled or self._conn is None:
+            return None
+        sql = 'SELECT payload_json FROM obs_index WHERE observation_id = ?'
+        if not include_deleted:
+            sql += ' AND deleted_at IS NULL'
+        with self._lock:
+            try:
+                row = self._conn.execute(sql, (observation_id,)).fetchone()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.find_by_id failed for %s: %s', observation_id, e)
+                return None
+        if row is None:
+            return None
+        try:
+            return Observation.from_json(row[0])
+        except Exception as e:  # noqa: BLE001
+            log.warning('LocalIndex.find_by_id malformed payload for %s: %s', observation_id, e)
+            return None
 
     def row_count(self) -> int:
         """Return the total number of rows. Returns 0 when disabled."""

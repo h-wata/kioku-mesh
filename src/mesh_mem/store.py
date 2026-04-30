@@ -44,9 +44,11 @@ _index: LocalIndex | None = None
 def get_index() -> LocalIndex:
     """Return the cached LocalIndex sidecar, opening it on first use.
 
-    The index is a write-side mirror of zenoh; reads still go through
-    zenoh in Phase 2. Disabled via ``MESH_MEM_DISABLE_INDEX=1`` (the
-    returned instance is a no-op) so callers do not need to branch.
+    Since Phase 3 the index is the default read path for
+    ``search_observations`` / ``find_observation_by_id``; the legacy
+    Zenoh full-scan stays available as a fallback when the index is
+    disabled (``MESH_MEM_DISABLE_INDEX=1``) — in that case the returned
+    instance is a no-op so callers do not need to branch.
     """
     global _index
     if _index is None:
@@ -216,7 +218,6 @@ def put_tombstone(obs: Observation, reason: str = '') -> None:
     get_index().mark_deleted(obs.observation_id, tomb.deleted_at)
 
 
-@with_retry
 def search_observations(
     query: str = '',
     agent_family: str = '',
@@ -227,12 +228,60 @@ def search_observations(
     since_iso: str = '',
     limit: int = 50,
 ) -> list[Observation]:
-    """Search observations, narrowing by key_expr then filtering in Python.
+    """Search observations via the SQLite local index, falling back to Zenoh.
 
-    ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``).
-    Tombstone keys for the same observation_id cause the entry to be hidden.
+    Phase 3 of TASK-131: routes through :class:`LocalIndex.search` by
+    default (sub-100ms at 50k per TASK-134 spike). The legacy Zenoh full-
+    scan path stays available behind ``MESH_MEM_DISABLE_INDEX=1`` so
+    operators can flip back if the index is unavailable.
+
+    ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``). Tombstones hide
+    the matching observation in both paths.
     """
     limit = max(1, min(limit, MAX_SEARCH))
+    idx = get_index()
+    if not idx.disabled:
+        return idx.search(
+            project=project,
+            agent_family=agent_family,
+            client_id=client_id,
+            pc_id=pc_id,
+            session_id=session_id,
+            query=query,
+            since_iso=since_iso,
+            limit=limit,
+        )
+    return _search_via_zenoh(
+        query=query,
+        agent_family=agent_family,
+        client_id=client_id,
+        pc_id=pc_id,
+        session_id=session_id,
+        project=project,
+        since_iso=since_iso,
+        limit=limit,
+    )
+
+
+@with_retry
+def _search_via_zenoh(
+    *,
+    query: str,
+    agent_family: str,
+    client_id: str,
+    pc_id: str,
+    session_id: str,
+    project: str,
+    since_iso: str,
+    limit: int,
+) -> list[Observation]:
+    """Legacy Zenoh full-scan search path, retained as a fallback.
+
+    Identical semantics to the pre-Phase-3 ``search_observations`` body:
+    narrow by key_expr, then filter project / since / query (substring
+    on content / project / tags) in Python. Re-enabled by setting
+    ``MESH_MEM_DISABLE_INDEX=1``.
+    """
     since_dt = _parse_iso(since_iso)
 
     parts = [
@@ -282,14 +331,30 @@ def search_observations(
     return results[:limit]
 
 
-@with_retry
 def find_observation_by_id(observation_id: str) -> Observation | None:
-    """Locate a specific observation by full 32-char id, scanning ``mem/obs/**`` directly.
+    """Locate a specific observation by full 32-char id.
 
-    Bypasses ``search_observations`` so that the delete path is not gated
-    by ``MAX_SEARCH`` — required for reliable tombstone emission on older
-    entries.
+    Routes through the SQLite local index by default; on miss (or when
+    the index is disabled / unavailable) falls back to a direct Zenoh
+    ``mem/obs/**`` scan so the delete / gc paths can still locate
+    pre-Phase-2 observations that were never indexed.
+
+    The index lookup includes tombstoned rows because the gc / physical-
+    delete callers need to find tombstoned observations to purge them.
     """
+    idx = get_index()
+    if not idx.disabled:
+        hit = idx.find_by_id(observation_id, include_deleted=True)
+        if hit is not None:
+            return hit
+        # Fall through: the index may legitimately not have the id (e.g.
+        # an obs put on a peer before this PC's sidecar existed).
+    return _find_by_id_via_zenoh(observation_id)
+
+
+@with_retry
+def _find_by_id_via_zenoh(observation_id: str) -> Observation | None:
+    """Direct Zenoh ``mem/obs/**`` scan, retained for fallback / index-miss."""
     session = get_session()
     for ok in _iter_ok_replies(session, 'mem/obs/**'):
         try:
@@ -406,6 +471,10 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
     _broadcast_delete_best_effort(f'mem/obs/*/*/*/*/{observation_id}')
     _broadcast_delete_best_effort(f'mem/tomb/*/*/*/*/{observation_id}')
 
+    # Drop the local SQLite row too; otherwise readers would still see the
+    # observation via the index even though Zenoh has dropped it.
+    get_index().physical_delete(observation_id)
+
     return (obs_removed, bool(tomb_keys))
 
 
@@ -467,5 +536,8 @@ def gc_expired_tombstones(
         obs_key = tomb_key.replace('mem/tomb/', 'mem/obs/', 1)
         delete_key(tomb_key)
         delete_key(obs_key)
+        # Mirror the purge into the SQLite sidecar so the row does not
+        # outlive the Zenoh delete.
+        get_index().physical_delete(tomb.observation_id)
         purged += 1
     return purged

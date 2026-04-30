@@ -23,6 +23,17 @@ versions without a migration path until `1.0.0`.
   `--summary`, `--source-files`, `--supersedes` (Refs #9)
 - CLI `mesh-mem get-memory <id>` added for fetching full observation (Refs #9)
 - CLI `mesh-mem search` output now matches MCP summary-first format (Refs #9)
+- SQLite local index sidecar for observation metadata; populated on every
+  `save_observation` / `put_tombstone`. Disabled with
+  `MESH_MEM_DISABLE_INDEX=1`. (Refs #7 Phase 2)
+- ADRs 0001-0005 documenting the PoC's design decisions (transport,
+  tombstone semantics, filter strategy, identity env, gc scope).
+
+### Changed
+- `search_observations` / `find_observation_by_id` now read from the
+  SQLite local index by default. Set `MESH_MEM_DISABLE_INDEX=1` to fall
+  back to the Zenoh full scan. Latency at 50k observations stays
+  sub-200ms per the TASK-134 spike (Refs #7 Phase 3).
 
 ### Fixed
 - Unify default search `limit` to 50 across CLI/MCP/API (#1)

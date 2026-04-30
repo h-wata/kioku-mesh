@@ -1,9 +1,10 @@
-"""Unit tests for ``mesh_mem.local_index.LocalIndex`` (Issue #7 Phase 2).
+"""Unit tests for ``mesh_mem.local_index.LocalIndex`` (Issue #7 Phase 2 + 3).
 
 Covers schema creation, upsert idempotency, tombstone marking, the
-disable env var, and project-scoped query (Phase 3 will use this entry
-point but it is exposed in Phase 2 so writes can be verified without
-going through Zenoh).
+disable env var, project-scoped query (Phase 2), and the richer
+``search`` / ``find_by_id`` entry points (Phase 3) that
+``store.search_observations`` / ``store.find_observation_by_id`` route
+through.
 
 Tests do not spin up zenohd — LocalIndex is a pure SQLite layer.
 """
@@ -172,5 +173,150 @@ def test_local_index_query_by_project_returns_recent(tmp_path: Path) -> None:
 
         # cross-project query is empty for proj-C
         assert idx.search_by_project('proj-C') == []
+    finally:
+        idx.close()
+
+
+def test_search_query_substring_match(tmp_path: Path) -> None:
+    """``search(query=...)`` does a case-insensitive substring match against payload."""
+    idx = LocalIndex.connect(str(tmp_path / 'sub.db'))
+    try:
+        idx.upsert(_mk_obs('Replication digest mismatch', project='ops'))
+        idx.upsert(_mk_obs('hello world', project='ops'))
+        idx.upsert(_mk_obs('zenoh hot era split', project='ops'))
+
+        hits = idx.search(query='replication')
+        contents = {r.content for r in hits}
+        assert contents == {'Replication digest mismatch'}, 'case-insensitive match expected'
+
+        # substring inside content also wins
+        hits2 = idx.search(query='hot era')
+        assert {r.content for r in hits2} == {'zenoh hot era split'}
+
+        # non-match yields empty list, not error
+        assert idx.search(query='nothing-matches-this') == []
+    finally:
+        idx.close()
+
+
+def test_search_since_iso_filter(tmp_path: Path) -> None:
+    """``since_iso`` keeps rows whose ``created_at`` is lex-greater-or-equal."""
+    idx = LocalIndex.connect(str(tmp_path / 'since.db'))
+    try:
+        old = _mk_obs('old', project='since')
+        old.created_at = '2020-01-01T00:00:00.000000Z'
+        recent = _mk_obs('recent', project='since')
+        recent.created_at = '2025-06-01T00:00:00.000000Z'
+        idx.upsert(old)
+        idx.upsert(recent)
+
+        hits = idx.search(project='since', since_iso='2024-01-01T00:00:00Z')
+        assert {r.content for r in hits} == {'recent'}
+    finally:
+        idx.close()
+
+
+def test_search_excludes_deleted_by_default(tmp_path: Path) -> None:
+    """Tombstoned rows must not appear in default ``search`` results."""
+    idx = LocalIndex.connect(str(tmp_path / 'exclude.db'))
+    try:
+        kept = _mk_obs('still alive', project='live')
+        gone = _mk_obs('was deleted', project='live')
+        idx.upsert(kept)
+        idx.upsert(gone)
+        idx.mark_deleted(gone.observation_id, '2026-04-30T00:00:00.000000Z')
+
+        hits = idx.search(project='live')
+        ids = {r.observation_id for r in hits}
+        assert kept.observation_id in ids
+        assert gone.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_includes_deleted_when_requested(tmp_path: Path) -> None:
+    """``include_deleted=True`` surfaces tombstoned rows alongside live ones."""
+    idx = LocalIndex.connect(str(tmp_path / 'include.db'))
+    try:
+        kept = _mk_obs('alive', project='live')
+        gone = _mk_obs('tombstoned', project='live')
+        idx.upsert(kept)
+        idx.upsert(gone)
+        idx.mark_deleted(gone.observation_id, '2026-04-30T00:00:00.000000Z')
+
+        hits = idx.search(project='live', include_deleted=True)
+        ids = {r.observation_id for r in hits}
+        assert kept.observation_id in ids
+        assert gone.observation_id in ids, 'tombstoned row must appear when include_deleted=True'
+    finally:
+        idx.close()
+
+
+def test_find_by_id_returns_observation(tmp_path: Path) -> None:
+    """``find_by_id`` round-trips a stored observation; missing ids return None."""
+    idx = LocalIndex.connect(str(tmp_path / 'findby.db'))
+    try:
+        obs = _mk_obs('locate me', project='find')
+        idx.upsert(obs)
+
+        hit = idx.find_by_id(obs.observation_id)
+        assert hit is not None
+        assert hit.observation_id == obs.observation_id
+        assert hit.content == 'locate me'
+
+        assert idx.find_by_id('00000000000000000000000000000000') is None
+    finally:
+        idx.close()
+
+
+def test_find_by_id_excludes_deleted_by_default_but_include_flag_works(tmp_path: Path) -> None:
+    """Tombstoned obs are hidden from ``find_by_id`` unless ``include_deleted=True``."""
+    idx = LocalIndex.connect(str(tmp_path / 'findbydel.db'))
+    try:
+        obs = _mk_obs('about to disappear', project='find')
+        idx.upsert(obs)
+        idx.mark_deleted(obs.observation_id, '2026-04-30T00:00:00.000000Z')
+
+        assert idx.find_by_id(obs.observation_id) is None
+        # Delete / gc paths in store.py rely on this branch to physically
+        # purge tombstoned rows.
+        hit = idx.find_by_id(obs.observation_id, include_deleted=True)
+        assert hit is not None
+        assert hit.observation_id == obs.observation_id
+    finally:
+        idx.close()
+
+
+def test_physical_delete_removes_row(tmp_path: Path) -> None:
+    """``physical_delete`` hard-deletes the row; subsequent lookups return None."""
+    idx = LocalIndex.connect(str(tmp_path / 'phys.db'))
+    try:
+        obs = _mk_obs('purge me', project='gc')
+        idx.upsert(obs)
+        assert idx.row_count() == 1
+
+        idx.physical_delete(obs.observation_id)
+        assert idx.row_count() == 0
+        assert idx.find_by_id(obs.observation_id, include_deleted=True) is None
+
+        # Idempotent on miss
+        idx.physical_delete('00000000000000000000000000000000')
+    finally:
+        idx.close()
+
+
+def test_search_identity_filters(tmp_path: Path) -> None:
+    """agent_family / client_id / pc_id / session_id filter via json_extract."""
+    idx = LocalIndex.connect(str(tmp_path / 'identity.db'))
+    try:
+        a = _mk_obs('A', project='id')
+        a.session_id = 'session-keep'
+        b = _mk_obs('B', project='id')
+        b.session_id = 'session-drop'
+        idx.upsert(a)
+        idx.upsert(b)
+
+        hits = idx.search(project='id', session_id='session-keep')
+        assert {r.content for r in hits} == {'A'}
     finally:
         idx.close()
