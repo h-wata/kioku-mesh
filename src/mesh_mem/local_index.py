@@ -27,6 +27,7 @@ Schema validated by TASK-134 spike at 50k rows: rebuild ~0.4s, query p99
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from pathlib import Path
@@ -35,10 +36,19 @@ import threading
 
 from .identity import state_dir
 from .models import Observation
+from .models import Tombstone
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+
+@dataclasses.dataclass
+class RebuildStats:
+    added: int = 0
+    marked_deleted: int = 0
+    unchanged: int = 0
+
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -344,6 +354,90 @@ class LocalIndex:
                 log.warning('LocalIndex.row_count failed: %s', e)
                 return 0
         return int(count)
+
+    def rebuild_from_zenoh(self, session: object) -> RebuildStats:
+        """Scan zenoh-rocksdb for all observations/tombstones and reconcile SQLite index.
+
+        Idempotent: safe to call on every startup. Returns counts of rows
+        added, tombstone marks applied, and unchanged rows.
+        """
+        if self._disabled or self._conn is None:
+            return RebuildStats()
+
+        obs_list: list[Observation] = []
+        for reply in session.get('mem/obs/**', timeout=30.0):  # type: ignore[attr-defined]
+            if reply.ok:
+                try:
+                    obs_list.append(Observation.from_json(reply.ok.payload.to_string()))
+                except Exception as e:  # noqa: BLE001
+                    log.warning('rebuild_from_zenoh skip malformed obs: %s', e)
+
+        tomb_ids: dict[str, str] = {}
+        for reply in session.get('mem/tomb/**', timeout=30.0):  # type: ignore[attr-defined]
+            if reply.ok:
+                try:
+                    tomb = Tombstone.from_json(reply.ok.payload.to_string())
+                    tomb_ids[tomb.observation_id] = tomb.deleted_at
+                except Exception as e:  # noqa: BLE001
+                    log.warning('rebuild_from_zenoh skip malformed tomb: %s', e)
+
+        added = 0
+        marked_deleted = 0
+        unchanged = 0
+
+        with self._lock:
+            try:
+                existing: dict[str, str | None] = {
+                    row[0]: row[1]
+                    for row in self._conn.execute('SELECT observation_id, deleted_at FROM obs_index').fetchall()
+                }
+
+                upsert_rows = []
+                for obs in obs_list:
+                    if obs.observation_id not in existing:
+                        upsert_rows.append(
+                            (
+                                obs.observation_id,
+                                obs.project,
+                                obs.created_at,
+                                obs.memory_type,
+                                obs.importance,
+                                obs.subject,
+                                obs.summary,
+                                obs.to_json(),
+                            )
+                        )
+                        added += 1
+                    else:
+                        unchanged += 1
+
+                # obs_ids being added in this transaction (not yet in existing)
+                new_obs_ids = {row[0] for row in upsert_rows}
+                mark_rows = []
+                for obs_id, del_at in tomb_ids.items():
+                    # Mark deleted if the row is live (exists, deleted_at=None) OR
+                    # is being upserted in this same transaction.
+                    already_live = obs_id in existing and existing[obs_id] is None
+                    being_added = obs_id in new_obs_ids
+                    if already_live or being_added:
+                        mark_rows.append((del_at, obs_id))
+                        marked_deleted += 1
+
+                self._conn.execute('BEGIN')
+                if upsert_rows:
+                    self._conn.executemany(_UPSERT_SQL, upsert_rows)
+                if mark_rows:
+                    self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
+                self._conn.execute('COMMIT')
+            except sqlite3.Error as e:
+                try:
+                    self._conn.execute('ROLLBACK')
+                except Exception:  # noqa: BLE001
+                    pass
+                log.warning('rebuild_from_zenoh transaction failed: %s', e)
+                raise
+
+        return RebuildStats(added=added, marked_deleted=marked_deleted, unchanged=unchanged)
 
     def close(self) -> None:
         """Close the underlying connection. Safe to call multiple times."""

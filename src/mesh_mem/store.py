@@ -39,6 +39,7 @@ GET_TIMEOUT = 5.0
 
 _session: zenoh.Session | None = None
 _index: LocalIndex | None = None
+_subscribers: list | None = None
 
 
 def get_index() -> LocalIndex:
@@ -49,11 +50,45 @@ def get_index() -> LocalIndex:
     Zenoh full-scan stays available as a fallback when the index is
     disabled (``MESH_MEM_DISABLE_INDEX=1``) — in that case the returned
     instance is a no-op so callers do not need to branch.
+
+    Phase 4: on first init, runs rebuild_from_zenoh then starts the
+    replication subscriber (unless MESH_MEM_DISABLE_INDEX=1 or
+    MESH_MEM_SKIP_REBUILD=1 for the rebuild step). Zenoh errors are
+    logged and swallowed so a missing router cannot block reads/writes.
     """
-    global _index
+    global _index, _subscribers
     if _index is None:
         _index = LocalIndex.connect()
+        if not _index.disabled:
+            try:
+                session = get_session()
+                if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() != '1':
+                    try:
+                        stats = _index.rebuild_from_zenoh(session)
+                        log.info('LocalIndex rebuild: %s', stats)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning('LocalIndex rebuild failed (partial index): %s', e)
+                if _subscribers is None:
+                    _subscribers = start_index_subscriber(session)
+            except Exception as e:  # noqa: BLE001
+                log.warning('LocalIndex zenoh init skipped (no session): %s', e)
     return _index
+
+
+def _reset_subscribers() -> None:
+    """Undeclare zenoh subscribers and clear the cache.
+
+    Called by _reset_index so that subscriber callbacks stop referencing
+    the about-to-be-closed LocalIndex instance.
+    """
+    global _subscribers
+    if _subscribers:
+        for sub in _subscribers:
+            try:
+                sub.undeclare()
+            except Exception:  # noqa: BLE001
+                pass
+    _subscribers = None
 
 
 def _reset_index() -> None:
@@ -64,6 +99,7 @@ def _reset_index() -> None:
     code does not call this.
     """
     global _index
+    _reset_subscribers()
     if _index is not None:
         try:
             _index.close()
@@ -188,6 +224,37 @@ def _parse_iso(s: str) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def start_index_subscriber(session: zenoh.Session) -> list:
+    """Subscribe to mem/obs/** and mem/tomb/** to keep SQLite in sync with replication.
+
+    Callbacks are idempotent (upsert / mark_deleted) so overlap with the
+    rebuild scan on startup is safe. The returned list holds the two
+    zenoh.Subscriber objects; callers must call undeclare() on each when
+    tearing down (handled by _reset_subscribers / _reset_index).
+    """
+    idx = get_index()
+    if idx.disabled:
+        return []
+
+    def on_obs(sample: Any) -> None:
+        try:
+            obs = Observation.from_json(sample.payload.to_string())
+            idx.upsert(obs)
+        except Exception as e:  # noqa: BLE001
+            log.warning('index subscriber on_obs error: %s', e)
+
+    def on_tomb(sample: Any) -> None:
+        try:
+            tomb = Tombstone.from_json(sample.payload.to_string())
+            idx.mark_deleted(tomb.observation_id, tomb.deleted_at)
+        except Exception as e:  # noqa: BLE001
+            log.warning('index subscriber on_tomb error: %s', e)
+
+    sub_obs = session.declare_subscriber('mem/obs/**', on_obs)
+    sub_tomb = session.declare_subscriber('mem/tomb/**', on_tomb)
+    return [sub_obs, sub_tomb]
 
 
 @with_retry

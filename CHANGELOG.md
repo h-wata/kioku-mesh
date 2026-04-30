@@ -29,6 +29,13 @@ versions without a migration path until `1.0.0`.
 - ADRs 0001-0005 documenting the PoC's design decisions (transport,
   tombstone semantics, filter strategy, identity env, gc scope).
 
+### Added
+- SQLite local index now rebuilds from zenoh-rocksdb on startup,
+  keeping search results consistent after restart and replication.
+  Skip with MESH_MEM_SKIP_REBUILD=1. (#7 Phase 4)
+- Zenoh subscriber populates the local index in real time for
+  observations and tombstones replicated from other hosts. (#7 Phase 4)
+
 ### Changed
 - `search_observations` / `find_observation_by_id` now read from the
   SQLite local index by default. Set `MESH_MEM_DISABLE_INDEX=1` to fall

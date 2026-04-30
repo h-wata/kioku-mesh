@@ -18,8 +18,10 @@ import time
 import pytest
 
 from mesh_mem.local_index import LocalIndex
+from mesh_mem.local_index import RebuildStats
 from mesh_mem.local_index import SCHEMA_VERSION
 from mesh_mem.models import Observation
+from mesh_mem.models import Tombstone
 
 
 def _mk_obs(content: str, *, project: str = 'demo', tags: list[str] | None = None) -> Observation:
@@ -318,5 +320,129 @@ def test_search_identity_filters(tmp_path: Path) -> None:
 
         hits = idx.search(project='id', session_id='session-keep')
         assert {r.content for r in hits} == {'A'}
+    finally:
+        idx.close()
+
+
+# ---------------------------------------------------------------------------
+# Helpers for rebuild_from_zenoh unit tests (no live zenohd required)
+# ---------------------------------------------------------------------------
+
+
+class _FakePayload:
+    def __init__(self, s: str) -> None:
+        self._s = s
+
+    def to_string(self) -> str:
+        return self._s
+
+
+class _FakeOk:
+    def __init__(self, s: str) -> None:
+        self.payload = _FakePayload(s)
+
+
+class _FakeReply:
+    def __init__(self, s: str) -> None:
+        self.ok = _FakeOk(s)
+
+
+class _FakeSession:
+    """Minimal zenoh session mock for rebuild_from_zenoh tests."""
+
+    def __init__(self, obs: list[Observation], tombs: list[Tombstone]) -> None:
+        self._obs_replies = [_FakeReply(o.to_json()) for o in obs]
+        self._tomb_replies = [_FakeReply(t.to_json()) for t in tombs]
+
+    def get(self, key_expr: str, **kwargs: object) -> list[_FakeReply]:  # type: ignore[override]
+        if 'mem/obs' in key_expr:
+            return self._obs_replies
+        if 'mem/tomb' in key_expr:
+            return self._tomb_replies
+        return []
+
+
+# ---------------------------------------------------------------------------
+# rebuild_from_zenoh tests
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_from_zenoh_populates_empty_index(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_pop.db'))
+    try:
+        obs1 = _mk_obs('alpha', project='r')
+        obs2 = _mk_obs('beta', project='r')
+        session = _FakeSession([obs1, obs2], [])
+
+        stats = idx.rebuild_from_zenoh(session)
+
+        assert isinstance(stats, RebuildStats)
+        assert stats.added == 2
+        assert stats.marked_deleted == 0
+        assert stats.unchanged == 0
+        assert idx.row_count() == 2
+        ids = {r.observation_id for r in idx.search(project='r')}
+        assert obs1.observation_id in ids
+        assert obs2.observation_id in ids
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_marks_tombstones(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_tomb.db'))
+    try:
+        obs = _mk_obs('will be deleted', project='r')
+        tomb = Tombstone(observation_id=obs.observation_id, deleted_at='2026-04-30T00:00:00.000000Z')
+        session = _FakeSession([obs], [tomb])
+
+        stats = idx.rebuild_from_zenoh(session)
+
+        assert stats.added == 1
+        assert stats.marked_deleted == 1
+        # Row exists but is marked deleted; search (which filters deleted) returns empty.
+        assert idx.search(project='r') == []
+        assert idx.row_count() == 1
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_idempotent(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_idem.db'))
+    try:
+        obs = _mk_obs('stable', project='r')
+        idx.upsert(obs)
+        session = _FakeSession([obs], [])
+
+        stats = idx.rebuild_from_zenoh(session)
+
+        assert stats.added == 0
+        assert stats.unchanged == 1
+        assert idx.row_count() == 1
+
+        # Running again is still a no-op.
+        stats2 = idx.rebuild_from_zenoh(session)
+        assert stats2.added == 0
+        assert stats2.unchanged == 1
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_handles_partial_index(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_partial.db'))
+    try:
+        existing = _mk_obs('already indexed', project='r')
+        idx.upsert(existing)
+
+        new_obs = _mk_obs('newly replicated', project='r')
+        session = _FakeSession([existing, new_obs], [])
+
+        stats = idx.rebuild_from_zenoh(session)
+
+        assert stats.added == 1
+        assert stats.unchanged == 1
+        assert idx.row_count() == 2
+        ids = {r.observation_id for r in idx.search(project='r')}
+        assert existing.observation_id in ids
+        assert new_obs.observation_id in ids
     finally:
         idx.close()
