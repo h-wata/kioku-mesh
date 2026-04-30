@@ -11,6 +11,9 @@ versions without a migration path until `1.0.0`.
 ## [Unreleased]
 
 ### Added
+- Tier-4 benchmark verified `search_observations` stays sub-200ms at 50k
+  observations (p50=6.47ms, 352× faster than the 2.2s linear-scan baseline
+  at 16k). (closes #7)
 - Observation schema extended with `memory_type`, `importance`, `subject`,
   `summary`, `source_files`, `supersedes` fields (Refs #9)
 - MCP tool `save_observation` extended with `memory_type`, `importance`,
@@ -43,6 +46,9 @@ versions without a migration path until `1.0.0`.
   sub-200ms per the TASK-134 spike (Refs #7 Phase 3).
 
 ### Fixed
+- search_observations zenoh fallback path now deduplicates results by
+  observation_id; the SQLite-first path was already deduplicated by
+  PRIMARY KEY. Surfaces in multi-router topologies. (#12)
 - Unify default search `limit` to 50 across CLI/MCP/API (#1)
 
 ## [0.1.0] — 2026-04-24

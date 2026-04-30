@@ -122,3 +122,20 @@ def test_search_final_failure_preserves_cause(monkeypatch: pytest.MonkeyPatch) -
         store.search_observations()
     assert ei.value.__cause__ is not None
     assert isinstance(ei.value.__cause__, QueryErrorReply)
+
+
+def test_search_via_zenoh_deduplicates_by_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Duplicate obs replies (multi-router replication overlap) collapse to one result (#12)."""
+    obs = Observation(content='deduplicated', project='dedup-test')
+    # Simulate two Zenoh storages both replying with the same observation.
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(obs), _ok_reply(obs)],  # same obs from two storages
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(project='dedup-test')
+    assert len(results) == 1
+    assert results[0].observation_id == obs.observation_id

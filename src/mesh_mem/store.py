@@ -369,7 +369,10 @@ def _search_via_zenoh(
         tombs.add(str(ok.key_expr).rsplit('/', 1)[-1])
 
     q = query.lower()
-    results: list[Observation] = []
+    # Use a dict keyed by observation_id so multiple Zenoh storages replying
+    # with the same observation (multi-router / replication overlap) do not
+    # produce duplicates (#12). Last-writer-wins within a single GET scan.
+    results_by_id: dict[str, Observation] = {}
     for ok in _iter_ok_replies(session, key_expr):
         try:
             obs = Observation.from_json(ok.payload.to_string())
@@ -391,11 +394,10 @@ def _search_via_zenoh(
             and not any(q in t.lower() for t in obs.tags)
         ):
             continue
-        results.append(obs)
+        results_by_id[obs.observation_id] = obs
 
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    results.sort(key=lambda o: _parse_iso(o.created_at) or epoch, reverse=True)
-    return results[:limit]
+    return sorted(results_by_id.values(), key=lambda o: _parse_iso(o.created_at) or epoch, reverse=True)[:limit]
 
 
 def find_observation_by_id(observation_id: str) -> Observation | None:
