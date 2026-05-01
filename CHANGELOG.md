@@ -10,61 +10,88 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
-### Fixed
-
-- `search_observations` zenoh fallback now applies project / identity
-  filters before keyword filtering, eliminating the "filter returns 0
-  while empty-keyword returns rows" race observed after zenohd restart. (#8)
-- `smoke_5peer_mesh.py` cleanup made robust against RocksDB flush
-  timing; previously a quick rerun could leave residual data and
-  inflate Phase 2 counts. Cleanup now sends SIGTERM, polls for process
-  exit, and uses `lsof`-based port lookup to catch stray processes from
-  prior runs regardless of command-line arguments. (Refs #5)
-- `smoke_5peer_mesh.py` cleanup is now PID-primary with cmdline-verified
-  orphan fallback, eliminating a TOCTOU where a port reuse during cleanup
-  could SIGKILL an unrelated process. (Codex review BLOCKER 2)
-- `smoke_5peer_mesh.py` raises an error instead of silently continuing when
-  the RocksDB LOCK file does not disappear within the cleanup timeout.
-  (Codex review IMPORTANT 6)
-- `smoke_5peer_mesh.py` `_cleanup_smoke_processes()` now also raises
-  `RuntimeError` when the RocksDB LOCK file persists past the cleanup
-  deadline, matching `_graceful_stop_router()` behavior. LOCK wait
-  extracted into shared `_wait_for_rocksdb_lock_to_disappear()` helper.
-- `mesh_ready` now returns `yes` when the local zenoh session probe
-  completes successfully even with zero replies (e.g., empty store or
-  fresh deployment). Previously `is_mesh_ready()` required at least one
-  observation in the mesh, causing permanent "waiting" status on new
-  installations. (Codex review IMPORTANT 1)
+## [0.2.1] - 2026-05-02
 
 ### Added
 
-- `mesh-mem status` reports `mesh_ready: yes/waiting (Xs)` to indicate
-  whether peer alignment has completed after a zenohd restart. (#8)
-- `test` optional-dependency: `PyYAML>=6.0` for the 5-peer mesh smoke
-  script. (Codex review IMPORTANT 4)
-- 5-peer mesh config template (`config/zenohd_peer.json5.template`) and
-  setup example (`config/peers/example_5peer.md`) for personal multi-device use.
-- README section "Multi-agent identity" describing how to run multiple
-  agents on a single host without key collisions.
-- README section "Multi-host mesh setup" with firewall / verification steps.
-- Windows / macOS support: `state_dir()` now resolves per-OS. macOS uses
-  `~/Library/Application Support/mesh-mem`, Windows uses
-  `%LOCALAPPDATA%\mesh-mem` via `platformdirs`. Linux keeps the
-  v0.2.0-compatible `~/.local/share/mesh-mem` path (XDG_DATA_HOME is
-  intentionally ignored to avoid a silent migration for users who set
-  it). The `MESH_MEM_STATE_DIR` override is unchanged on all OSes.
-- README section "Windows host setup" covering zenohd install, NSSM
-  service registration, firewall rule, and `w32time` verification.
+- **5-peer mesh config template** (`config/zenohd_peer.json5.template`)
+  with `{SELF_IP}` / `{PEER_N_IP}` placeholders, plus a 5-host walkthrough
+  (`config/peers/example_5peer.md`) including sample IPs, ufw / iptables
+  rules, and verification commands. (`2a6beae`)
+- **README "Multi-agent identity" section** explaining how to run
+  multiple Claude Code / Codex / autonomous agents on a single host
+  using distinct `MESH_MEM_CLIENT_ID` values, with naming conventions,
+  `direnv` examples, and MCP harness env-block configuration. (`2a6beae`)
+- **README "Multi-host mesh setup" section** documenting N-peer setup
+  steps (topology, per-peer config, firewall, boot, verify) with a
+  troubleshooting table. (`2a6beae`)
+- **README "Windows host setup" section** covering zenohd install,
+  NSSM service registration, `New-NetFirewallRule` for TCP 7447, and
+  `w32tm` time-sync verification. Documentation only; the project has
+  not yet field-tested a mixed-OS LAN/VPN deployment. (`3fe7161`)
+- **`mesh-mem status` `mesh_ready` field** reporting `yes` once the
+  local node has at least one successful peer probe and has been up
+  for the minimum settle time (~5 s warm in the localhost smoke; cold-era
+  catch-up may take longer). Informational only; no API change. (#8, `63c2907`)
+- **5-peer mesh smoke test** (`scripts/smoke_5peer_mesh.py`) that runs
+  five zenohd routers **on localhost**, verifies 100/100 observation
+  propagation in Phase 2, peer-restart convergence in Phase 3, and
+  latency p50/p99 in Phase 4. Two consecutive runs PASS; this validates
+  the wiring at peer count 5, not real LAN/VPN deployment. (`a93681d`,
+  `6bfd0a9`)
 
 ### Changed
 
-- dependencies: add `platformdirs>=4.0`.
-- `smoke_5peer_mesh.py` result YAML path is now configurable via
-  `--result-yaml` CLI argument; default is
-  `~/mesh-mem-smoke-results/smoke_5peer_<ts>.yaml`. Removed a hardcoded
-  path that referenced a developer's home directory. Temp directory is
-  now resolved via `tempfile.gettempdir()`. Script is documented as
-  POSIX-only (lsof / SIGTERM / SIGKILL). (Codex review IMPORTANT 3)
+- **`state_dir()` now resolves per-OS**:
+  Linux keeps the fixed `~/.local/share/mesh-mem` path
+  (`XDG_DATA_HOME` is intentionally NOT honored to preserve
+  pre-v0.2.1 behavior and avoid a silent migration for users who
+  set it). macOS uses `~/Library/Application Support/mesh-mem` and
+  Windows uses `%LOCALAPPDATA%\mesh-mem` via `platformdirs`. The
+  `MESH_MEM_STATE_DIR` environment-variable override is unchanged
+  on all OSes. New runtime dependency: `platformdirs>=4.0`.
+  macOS / Windows users who previously placed data outside the new
+  default location should set `MESH_MEM_STATE_DIR` before the first run
+  after upgrade to keep using the existing store; otherwise an empty
+  store is created at the new default and the old data remains
+  untouched at the previous path. (`3fe7161`, `3325109`; Codex review
+  BLOCKER fix — Linux silent migration when `XDG_DATA_HOME` is set)
+- **`smoke_5peer_mesh.py` cleanup hardened**: routers we started are
+  terminated by PID first, with a `cmdline`-verified port lookup as
+  fallback only for orphan `zenohd` processes — closing a TOCTOU
+  where a port reuse during cleanup could SIGKILL an unrelated
+  process. A shared `_wait_for_rocksdb_lock_to_disappear()` helper
+  raises `RuntimeError` from both `_graceful_stop_router()` and
+  `_cleanup_smoke_processes()` when the RocksDB `LOCK` file persists
+  past the deadline, surfacing a hung previous `zenohd` instead of
+  silently continuing. Idempotent reruns no longer leave residual
+  rows nor risk killing an unrelated process. (Codex review BLOCKER
+  + IMPORTANT; `6bfd0a9`, `79694b2`, `1b81e7a`)
+
+### Fixed
+
+- **`search_observations` Zenoh fallback filter order is now
+  test-locked**: tombstone → project / identity → since → keyword.
+  This eliminates the post-restart "`--project` returns 0 while empty
+  keyword returns rows" race observed when `MESH_MEM_DISABLE_INDEX=1`
+  is in effect. The SQLite-first read path (v0.2.0 default) was
+  already race-free via `PRIMARY KEY` deduplication and indexed
+  filtering. (closes #8, `63c2907`)
+
+- **`mesh_ready` no longer hangs on an empty store**: a successful
+  zero-reply probe is now treated as ready, so freshly initialised
+  deployments stop reporting permanent `waiting` in `mesh-mem
+  status`. (Codex review IMPORTANT, `9e61871`)
+- **`scripts/smoke_5peer_mesh.py` no longer hardcodes a developer
+  home directory**: the result YAML path is configurable via
+  `--result-yaml` and the script is documented as POSIX-only.
+  (Codex review IMPORTANT, `9e61871`)
+
+### Added (test deps)
+
+- **`PyYAML>=6.0`** added to the `test` optional-dependency, fixing
+  the missing dependency that would otherwise break the 5-peer smoke
+  runs in clean environments. (Codex review IMPORTANT, `79694b2`)
 
 ## [0.2.0] - 2026-05-01
 
