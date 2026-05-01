@@ -26,6 +26,10 @@ versions without a migration path until `1.0.0`.
 - `smoke_5peer_mesh.py` raises an error instead of silently continuing when
   the RocksDB LOCK file does not disappear within the cleanup timeout.
   (Codex review IMPORTANT 6)
+- `smoke_5peer_mesh.py` `_cleanup_smoke_processes()` now also raises
+  `RuntimeError` when the RocksDB LOCK file persists past the cleanup
+  deadline, matching `_graceful_stop_router()` behavior. LOCK wait
+  extracted into shared `_wait_for_rocksdb_lock_to_disappear()` helper.
 - `mesh_ready` now returns `yes` when the local zenoh session probe
   completes successfully even with zero replies (e.g., empty store or
   fresh deployment). Previously `is_mesh_ready()` required at least one

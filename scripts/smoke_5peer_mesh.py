@@ -157,6 +157,30 @@ def _cli_search_count(peer_idx: int, project: str, limit: int = 500) -> int:
     return result.stdout.count('<id=')
 
 
+def _wait_for_rocksdb_lock_to_disappear(rocksdb_dir: pathlib.Path, timeout: float = 10.0) -> None:
+    """Wait for the RocksDB LOCK file to disappear; raise RuntimeError on timeout.
+
+    Shared by _graceful_stop_router and _cleanup_smoke_processes so both
+    cleanup paths surface a stuck zenohd as a hard error rather than
+    silently continuing.
+    """
+    lock_file = rocksdb_dir / 'LOCK'
+    if not lock_file.exists():
+        return
+    deadline = time.monotonic() + timeout
+    while lock_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if lock_file.exists():
+        print(f'WARN: RocksDB LOCK still present after {timeout}s at {lock_file}')
+        time.sleep(2.0)
+        if lock_file.exists():
+            raise RuntimeError(
+                f'RocksDB LOCK at {lock_file} did not disappear after '
+                f'{timeout + 2}s; previous zenohd process may be hung. '
+                f'Manual cleanup required.'
+            )
+
+
 def _graceful_stop_router(
     proc: subprocess.Popen | None,
     rocksdb_dir: pathlib.Path,
@@ -178,20 +202,7 @@ def _graceful_stop_router(
         except OSError:
             pass
 
-    # Wait for the RocksDB LOCK file to disappear before the caller rmtree's the dir
-    lock_file = rocksdb_dir / 'LOCK'
-    deadline = time.monotonic() + lock_timeout
-    while lock_file.exists() and time.monotonic() < deadline:
-        time.sleep(0.1)
-    if lock_file.exists():
-        print(f'WARN: RocksDB LOCK still present after {lock_timeout}s at {lock_file}')
-        time.sleep(2.0)
-        if lock_file.exists():
-            raise RuntimeError(
-                f'RocksDB LOCK at {lock_file} did not disappear after '
-                f'{lock_timeout + 2}s; previous zenohd process may be hung. '
-                f'Manual cleanup required.'
-            )
+    _wait_for_rocksdb_lock_to_disappear(rocksdb_dir, timeout=lock_timeout)
 
 
 def _kill_known_routers(procs: list[subprocess.Popen], timeout: float = 10.0) -> None:
@@ -262,13 +273,8 @@ def _cleanup_smoke_processes(procs: list[subprocess.Popen | None] | None = None)
         _kill_orphan_zenohd_on_port(port)
 
     # Wait for all LOCK files under TMP_BASE to disappear
-    deadline = time.monotonic() + 10.0
     for i in range(N_PEERS):
-        lock_file = _rocksdb_dir(i) / 'LOCK'
-        while lock_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if lock_file.exists():
-            print(f'WARN: RocksDB LOCK still present after cleanup: {lock_file}')
+        _wait_for_rocksdb_lock_to_disappear(_rocksdb_dir(i), timeout=10.0)
 
     time.sleep(0.5)  # small extra margin
 
