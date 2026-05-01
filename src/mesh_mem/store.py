@@ -41,6 +41,7 @@ _session: zenoh.Session | None = None
 _index: LocalIndex | None = None
 _subscribers: list | None = None
 _mesh_first_probe_success: float | None = None
+_mesh_session_start_time: float | None = None
 
 
 def get_index() -> LocalIndex:
@@ -138,7 +139,7 @@ def _open_session() -> zenoh.Session:
 
 def _reset_session() -> None:
     """Drop the cached session so the next call reopens it."""
-    global _session, _mesh_first_probe_success
+    global _session, _mesh_first_probe_success, _mesh_session_start_time
     if _session is not None:
         try:
             _session.close()
@@ -146,18 +147,24 @@ def _reset_session() -> None:
             pass
     _session = None
     _mesh_first_probe_success = None
+    _mesh_session_start_time = None
 
 
 def get_session() -> zenoh.Session:
     """Return the cached Zenoh session, opening it on first use or after reset."""
-    global _session
+    global _session, _mesh_session_start_time
     if _session is None:
         _session = _open_session()
+        _mesh_session_start_time = time.monotonic()
     return _session
 
 
 def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:
-    """Return True if the first zenoh probe succeeded at least min_ready_sec ago.
+    """Return True if a probe completed without error and min_ready_sec has elapsed.
+
+    A probe completing with zero replies is considered ready (e.g., empty store
+    or fresh deployment). Previously required at least one reply, which caused
+    permanent "waiting" status on empty stores.
 
     Informational only — search_observations never blocks on readiness.
     Probe result is cached; re-probes after _reset_session().
@@ -166,9 +173,8 @@ def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:
     if _mesh_first_probe_success is None:
         try:
             session = get_session()
-            for _ in session.get('mem/**', timeout=1.0):
-                _mesh_first_probe_success = time.monotonic()
-                break
+            list(session.get('mem/**', timeout=1.0))
+            _mesh_first_probe_success = time.monotonic()
         except Exception:  # noqa: BLE001
             pass
     if _mesh_first_probe_success is None:
@@ -179,15 +185,15 @@ def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:
 def mesh_ready_label(min_ready_sec: float = 5.0) -> str:
     """Human-readable readiness string for ``mesh-mem status``.
 
-    Returns ``'yes'`` when ready, ``'waiting (Xs)'`` with remaining seconds
-    until ready, or ``'waiting (no probe)'`` when no zenoh response yet.
+    Returns ``'yes'`` when ready, ``'waiting (Xs)'`` showing elapsed seconds
+    since session start, or ``'waiting (no session)'`` before any session opens.
     """
     if is_mesh_ready(min_ready_sec):
         return 'yes'
-    if _mesh_first_probe_success is None:
-        return 'waiting (no probe)'
-    remaining = max(0.0, min_ready_sec - (time.monotonic() - _mesh_first_probe_success))
-    return f'waiting ({remaining:.0f}s)'
+    if _mesh_session_start_time is None:
+        return 'waiting (no session)'
+    elapsed = time.monotonic() - _mesh_session_start_time
+    return f'waiting ({elapsed:.1f}s)'
 
 
 def with_retry(func: Callable[..., Any]) -> Callable[..., Any]:

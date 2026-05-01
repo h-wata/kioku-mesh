@@ -26,6 +26,11 @@ versions without a migration path until `1.0.0`.
 - `smoke_5peer_mesh.py` raises an error instead of silently continuing when
   the RocksDB LOCK file does not disappear within the cleanup timeout.
   (Codex review IMPORTANT 6)
+- `mesh_ready` now returns `yes` when the local zenoh session probe
+  completes successfully even with zero replies (e.g., empty store or
+  fresh deployment). Previously `is_mesh_ready()` required at least one
+  observation in the mesh, causing permanent "waiting" status on new
+  installations. (Codex review IMPORTANT 1)
 
 ### Added
 
@@ -50,6 +55,12 @@ versions without a migration path until `1.0.0`.
 ### Changed
 
 - dependencies: add `platformdirs>=4.0`.
+- `smoke_5peer_mesh.py` result YAML path is now configurable via
+  `--result-yaml` CLI argument; default is
+  `~/mesh-mem-smoke-results/smoke_5peer_<ts>.yaml`. Removed a hardcoded
+  path that referenced a developer's home directory. Temp directory is
+  now resolved via `tempfile.gettempdir()`. Script is documented as
+  POSIX-only (lsof / SIGTERM / SIGKILL). (Codex review IMPORTANT 3)
 
 ## [0.2.0] - 2026-05-01
 
