@@ -20,21 +20,30 @@ versions without a migration path until `1.0.0`.
   inflate Phase 2 counts. Cleanup now sends SIGTERM, polls for process
   exit, and uses `lsof`-based port lookup to catch stray processes from
   prior runs regardless of command-line arguments. (Refs #5)
+- `smoke_5peer_mesh.py` cleanup is now PID-primary with cmdline-verified
+  orphan fallback, eliminating a TOCTOU where a port reuse during cleanup
+  could SIGKILL an unrelated process. (Codex review BLOCKER 2)
+- `smoke_5peer_mesh.py` raises an error instead of silently continuing when
+  the RocksDB LOCK file does not disappear within the cleanup timeout.
+  (Codex review IMPORTANT 6)
 
 ### Added
 
 - `mesh-mem status` reports `mesh_ready: yes/waiting (Xs)` to indicate
   whether peer alignment has completed after a zenohd restart. (#8)
+- `test` optional-dependency: `PyYAML>=6.0` for the 5-peer mesh smoke
+  script. (Codex review IMPORTANT 4)
 - 5-peer mesh config template (`config/zenohd_peer.json5.template`) and
   setup example (`config/peers/example_5peer.md`) for personal multi-device use.
 - README section "Multi-agent identity" describing how to run multiple
   agents on a single host without key collisions.
 - README section "Multi-host mesh setup" with firewall / verification steps.
-- Windows / macOS support: `state_dir()` now uses `platformdirs` to pick
-  the correct per-OS application data directory (Linux:
-  `~/.local/share/mesh-mem`, macOS: `~/Library/Application Support/mesh-mem`,
-  Windows: `%LOCALAPPDATA%\mesh-mem`). The `MESH_MEM_STATE_DIR` override
-  is unchanged.
+- Windows / macOS support: `state_dir()` now resolves per-OS. macOS uses
+  `~/Library/Application Support/mesh-mem`, Windows uses
+  `%LOCALAPPDATA%\mesh-mem` via `platformdirs`. Linux keeps the
+  v0.2.0-compatible `~/.local/share/mesh-mem` path (XDG_DATA_HOME is
+  intentionally ignored to avoid a silent migration for users who set
+  it). The `MESH_MEM_STATE_DIR` override is unchanged on all OSes.
 - README section "Windows host setup" covering zenohd install, NSSM
   service registration, firewall rule, and `w32time` verification.
 

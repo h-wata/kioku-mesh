@@ -193,6 +193,13 @@ mesh-mem search "mesh-check from peer1" --limit 5
 For the full 5-peer setup with example IPs, firewall rules, and add/remove
 procedures, see [config/peers/example_5peer.md](config/peers/example_5peer.md).
 
+To run the localhost 5-peer smoke test (requires `pip install -e '.[dev,test]'`):
+
+```bash
+pip install -e '.[dev,test]'   # installs PyYAML and other test deps
+PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
+```
+
 ## Windows host setup
 
 mesh-mem development is Linux-first, but Windows 10 / 11 hosts can join the
@@ -285,12 +292,13 @@ reliable NTP server with `w32tm /config /update /manualpeerlist:"time.cloudflare
 
 ### 6. Data directory
 
-From v0.2.1 onward, mesh-mem auto-resolves its state directory per OS
-through `platformdirs`:
+From v0.2.1 onward, mesh-mem resolves its state directory per OS:
 
-- **Windows**: `%LOCALAPPDATA%\mesh-mem` (e.g. `C:\Users\<user>\AppData\Local\mesh-mem`)
-- **macOS**: `~/Library/Application Support/mesh-mem`
-- **Linux**: `~/.local/share/mesh-mem` (unchanged)
+- **Windows**: `%LOCALAPPDATA%\mesh-mem` (e.g. `C:\Users\<user>\AppData\Local\mesh-mem`) — via `platformdirs`
+- **macOS**: `~/Library/Application Support/mesh-mem` — via `platformdirs`
+- **Linux**: `~/.local/share/mesh-mem` (fixed, unchanged from v0.2.0;
+  `XDG_DATA_HOME` is intentionally NOT honored to preserve the
+  pre-v0.2.1 path and avoid silently migrating users who had set it)
 
 To override (e.g. point at a faster NVMe):
 

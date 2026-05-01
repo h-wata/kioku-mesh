@@ -29,6 +29,7 @@ dev = [
 ]
 test = [
     "fastmcp>=0.2",
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]

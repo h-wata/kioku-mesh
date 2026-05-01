@@ -4,6 +4,10 @@
 Validates that mesh-mem's Zenoh replication works correctly with 5 routers
 forming a full mesh topology on localhost.
 
+POSIX-only: This script relies on lsof, SIGTERM/SIGKILL, and a POSIX temp
+directory (via tempfile.gettempdir()). It is not supported on Windows. For
+Windows environments, refer to the README for manual multi-host setup guidance.
+
 Phases:
   0: Cleanup old state and processes (graceful shutdown + RocksDB LOCK wait)
   1: Start 5 routers with full-mesh connectivity
@@ -13,17 +17,19 @@ Phases:
   5: Cleanup (same graceful sequence as Phase 0)
 
 Usage:
-  PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
+  PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py [--result-yaml PATH]
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime
 import os
 import pathlib
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / 'src'))
@@ -31,7 +37,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parents[1] / 'src'))
 # ── ports and dirs ──────────────────────────────────────────────────────────
 PORTS = [7448, 7449, 7450, 7451, 7452]
 N_PEERS = len(PORTS)
-TMP_BASE = pathlib.Path('/tmp/mesh_smoke_5peer')
+TMP_BASE = pathlib.Path(tempfile.gettempdir()) / 'mesh_smoke_5peer'
 WAIT_STARTUP = 10.0
 WAIT_REPLICATION = 30.0
 WAIT_CONVERGENCE_MAX = 120.0
@@ -177,41 +183,83 @@ def _graceful_stop_router(
     deadline = time.monotonic() + lock_timeout
     while lock_file.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
+    if lock_file.exists():
+        print(f'WARN: RocksDB LOCK still present after {lock_timeout}s at {lock_file}')
+        time.sleep(2.0)
+        if lock_file.exists():
+            raise RuntimeError(
+                f'RocksDB LOCK at {lock_file} did not disappear after '
+                f'{lock_timeout + 2}s; previous zenohd process may be hung. '
+                f'Manual cleanup required.'
+            )
 
 
-def _kill_pids_on_ports(ports: list[int], sig: int = signal.SIGTERM) -> None:
-    """Send *sig* to all processes listening on any of *ports* (via lsof)."""
-    for port in ports:
-        result = subprocess.run(
-            ['lsof', '-ti', f':{port}'],
-            capture_output=True,
-            text=True,
-        )
-        for pid_str in result.stdout.strip().splitlines():
+def _kill_known_routers(procs: list[subprocess.Popen], timeout: float = 10.0) -> None:
+    """Stop the routers we started, verifying by PID.
+
+    Primary cleanup path: terminate then poll, SIGKILL only our own PIDs.
+    """
+    live = [p for p in procs if p is not None]
+    for p in live:
+        if p.poll() is None:
+            p.terminate()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if all(p.poll() is not None for p in live):
+            break
+        time.sleep(0.2)
+    for p in live:
+        if p.poll() is None:
+            p.kill()
+
+
+def _kill_orphan_zenohd_on_port(port: int) -> int:
+    """Kill orphan zenohd on PORT only if its cmdline contains 'zenohd'.
+
+    Returns count killed. Used as a defensive cleanup for orphans from
+    previous runs; not the primary cleanup path.
+    """
+    try:
+        out = subprocess.check_output(['lsof', '-ti', f':{port}'], text=True)
+    except subprocess.CalledProcessError:
+        return 0
+    killed = 0
+    for pid_str in out.split():
+        try:
+            pid = int(pid_str)
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                cmdline = f.read().replace(b'\x00', b' ').decode('utf-8', 'replace')
+            if 'zenohd' not in cmdline:
+                continue
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(0.5)
             try:
-                os.kill(int(pid_str), sig)
-            except (ProcessLookupError, ValueError, OSError):
+                os.kill(pid, 0)
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
+            killed += 1
+        except (ValueError, FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+    return killed
 
 
 def _cleanup_smoke_processes(procs: list[subprocess.Popen | None] | None = None) -> None:
     """Stop all zenohd processes on smoke ports and wait for RocksDB to flush.
 
-    If *procs* is given, each live process gets a graceful SIGTERM sequence.
-    All remaining processes on PORTS are then killed via lsof-based lookup so
-    that stray processes from prior runs (e.g. TASK-138 zenohd on 7451/7452)
-    are also cleaned up regardless of their command-line arguments.
+    Cleanup order:
+      1. PID-primary: terminate our own started processes (_kill_known_routers).
+      2. Orphan fallback: kill any remaining zenohd on smoke ports whose cmdline
+         contains 'zenohd' (_kill_orphan_zenohd_on_port). Non-zenohd processes
+         on those ports are never touched.
     """
-    # Graceful stop for known processes
+    # 1. Graceful stop for known (our own) processes
     if procs:
-        for i, proc in enumerate(procs):
-            if proc is not None and proc.poll() is None:
-                _graceful_stop_router(proc, _rocksdb_dir(i))
+        _kill_known_routers([p for p in procs if p is not None])
 
-    # Kill any remaining listeners on smoke ports (SIGTERM then SIGKILL)
-    _kill_pids_on_ports(PORTS, signal.SIGTERM)
-    time.sleep(2.0)
-    _kill_pids_on_ports(PORTS, signal.SIGKILL)
+    # 2. Orphan cleanup — cmdline-verified, zenohd only
+    for port in PORTS:
+        _kill_orphan_zenohd_on_port(port)
 
     # Wait for all LOCK files under TMP_BASE to disappear
     deadline = time.monotonic() + 10.0
@@ -219,6 +267,8 @@ def _cleanup_smoke_processes(procs: list[subprocess.Popen | None] | None = None)
         lock_file = _rocksdb_dir(i) / 'LOCK'
         while lock_file.exists() and time.monotonic() < deadline:
             time.sleep(0.1)
+        if lock_file.exists():
+            print(f'WARN: RocksDB LOCK still present after cleanup: {lock_file}')
 
     time.sleep(0.5)  # small extra margin
 
@@ -415,9 +465,21 @@ def main() -> dict:
     return results
 
 
-if __name__ == '__main__':
-    out_dir = pathlib.Path('/home/gisen/work/tmux-multi-agents/docs/poc-reports/raw')
+def _default_result_path(measured_at: str) -> pathlib.Path:
+    out_dir = pathlib.Path.home() / 'mesh-mem-smoke-results'
     out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir / f'smoke_5peer_{measured_at.replace(":", "").replace("-", "")}.yaml'
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='5-peer full-mesh replication smoke test')
+    parser.add_argument(
+        '--result-yaml',
+        metavar='PATH',
+        default=None,
+        help='Path to write the result YAML (default: ~/mesh-mem-smoke-results/smoke_5peer_<ts>.yaml)',
+    )
+    args = parser.parse_args()
 
     measured_at = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     print(f'=== 5-peer mesh smoke test  {measured_at} ===\n')
@@ -448,7 +510,7 @@ if __name__ == '__main__':
     import yaml
 
     report = {
-        'task_id': 'TASK-152',
+        'task_id': 'smoke_5peer',
         'measured_at': measured_at,
         'env': {
             'routers': N_PEERS,
@@ -464,7 +526,8 @@ if __name__ == '__main__':
         'observations': observations,
     }
 
-    report_path = out_dir / 'TASK-152-5peer-mesh-smoke-result.yaml'
+    report_path = pathlib.Path(args.result_yaml) if args.result_yaml else _default_result_path(measured_at)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(yaml.dump(report, allow_unicode=True, sort_keys=False))
     print(f'\nReport written: {report_path}')
     print(f'Overall verdict: {overall}')
