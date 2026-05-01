@@ -16,6 +16,7 @@ from .models import Observation
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
 from .store import MAX_SEARCH
+from .store import mesh_ready_label
 from .store import physical_delete_observation
 from .store import put_observation
 from .store import put_tombstone
@@ -134,6 +135,12 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
         print(f'  family {family}: {count}件')
     for pc, count in sorted(by_pc.items()):
         print(f'  pc {pc[:8]}: {count}件')
+    label = mesh_ready_label()
+    print(f'mesh_ready: {label}')
+    if label != 'yes':
+        print(
+            '警告: ピアアライメントが未完了です。再起動直後は検索件数が少なく見えることがあります。', file=sys.stderr
+        )
     return 0
 
 

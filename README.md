@@ -43,6 +43,11 @@ mesh-mem get-memory <observation_id> # full record (32-char id) — extended fie
 mesh-mem status
 ```
 
+After restarting zenohd or your host, mesh-mem may briefly return
+fewer results until peer alignment completes (typically 5-10 s, up
+to ~3 min for cold-era data). Use `mesh-mem status` to check
+readiness (`mesh_ready: yes` when alignment is complete).
+
 ## Multi-agent identity (single host, multiple agents)
 
 A single PC often runs several agents simultaneously — two Claude Code

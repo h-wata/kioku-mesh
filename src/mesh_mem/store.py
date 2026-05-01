@@ -40,6 +40,7 @@ GET_TIMEOUT = 5.0
 _session: zenoh.Session | None = None
 _index: LocalIndex | None = None
 _subscribers: list | None = None
+_mesh_first_probe_success: float | None = None
 
 
 def get_index() -> LocalIndex:
@@ -137,13 +138,14 @@ def _open_session() -> zenoh.Session:
 
 def _reset_session() -> None:
     """Drop the cached session so the next call reopens it."""
-    global _session
+    global _session, _mesh_first_probe_success
     if _session is not None:
         try:
             _session.close()
         except Exception:  # noqa: BLE001
             pass
     _session = None
+    _mesh_first_probe_success = None
 
 
 def get_session() -> zenoh.Session:
@@ -152,6 +154,40 @@ def get_session() -> zenoh.Session:
     if _session is None:
         _session = _open_session()
     return _session
+
+
+def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:
+    """Return True if the first zenoh probe succeeded at least min_ready_sec ago.
+
+    Informational only — search_observations never blocks on readiness.
+    Probe result is cached; re-probes after _reset_session().
+    """
+    global _mesh_first_probe_success
+    if _mesh_first_probe_success is None:
+        try:
+            session = get_session()
+            for _ in session.get('mem/**', timeout=1.0):
+                _mesh_first_probe_success = time.monotonic()
+                break
+        except Exception:  # noqa: BLE001
+            pass
+    if _mesh_first_probe_success is None:
+        return False
+    return (time.monotonic() - _mesh_first_probe_success) >= min_ready_sec
+
+
+def mesh_ready_label(min_ready_sec: float = 5.0) -> str:
+    """Human-readable readiness string for ``mesh-mem status``.
+
+    Returns ``'yes'`` when ready, ``'waiting (Xs)'`` with remaining seconds
+    until ready, or ``'waiting (no probe)'`` when no zenoh response yet.
+    """
+    if is_mesh_ready(min_ready_sec):
+        return 'yes'
+    if _mesh_first_probe_success is None:
+        return 'waiting (no probe)'
+    remaining = max(0.0, min_ready_sec - (time.monotonic() - _mesh_first_probe_success))
+    return f'waiting ({remaining:.0f}s)'
 
 
 def with_retry(func: Callable[..., Any]) -> Callable[..., Any]:

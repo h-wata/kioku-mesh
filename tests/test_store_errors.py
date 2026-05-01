@@ -139,3 +139,52 @@ def test_search_via_zenoh_deduplicates_by_observation_id(monkeypatch: pytest.Mon
     results = store.search_observations(project='dedup-test')
     assert len(results) == 1
     assert results[0].observation_id == obs.observation_id
+
+
+def test_search_via_zenoh_filter_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Project filter is evaluated before keyword filter in _search_via_zenoh (#8).
+
+    An obs matching project='keep' but not the keyword must survive project
+    filtering. An obs matching the keyword but belonging to a different project
+    must be dropped.  This validates the evaluation order:
+    project/identity -> keyword.
+    """
+    obs_match = Observation(content='no-keyword-here', project='keep')
+    obs_wrong_project = Observation(content='the-keyword', project='drop')
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(obs_match), _ok_reply(obs_wrong_project)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='the-keyword', project='keep')
+    ids = {o.observation_id for o in results}
+    # obs_match has wrong keyword but correct project — must NOT appear (keyword filter)
+    assert obs_match.observation_id not in ids
+    # obs_wrong_project has correct keyword but wrong project — must NOT appear (project filter)
+    assert obs_wrong_project.observation_id not in ids
+
+
+def test_search_via_zenoh_filters_skip_non_matching_early(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Observations not matching project are excluded from results_by_id, not just from output.
+
+    Verify that a non-matching project obs is completely absent from results
+    even when no keyword filter is applied — i.e. project filter acts as an
+    early-exit guard before dict registration.
+    """
+    obs_keep = Observation(content='stays', project='target')
+    obs_skip = Observation(content='filtered-out', project='other')
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(obs_keep), _ok_reply(obs_skip)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(project='target')
+    ids = {o.observation_id for o in results}
+    assert obs_keep.observation_id in ids
+    assert obs_skip.observation_id not in ids

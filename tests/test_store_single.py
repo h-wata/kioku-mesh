@@ -213,3 +213,18 @@ def test_find_by_id_uses_sqlite_index_then_falls_back(single_zenohd: Any) -> Non
     hit2 = store.find_observation_by_id(zenoh_only.observation_id)
     assert hit2 is not None
     assert hit2.content == 'zenoh-only'
+
+
+def test_is_mesh_ready_returns_false_immediately_after_start(single_zenohd: Any) -> None:  # noqa: ARG001
+    """is_mesh_ready returns False when the probe just completed (min_ready_sec not elapsed)."""
+    # Inject a probe-success timestamp that is "just now" so the elapsed time
+    # is effectively 0, well below any positive min_ready_sec.
+    store._mesh_first_probe_success = time.monotonic()
+    assert store.is_mesh_ready(min_ready_sec=1000.0) is False
+
+
+def test_is_mesh_ready_returns_true_after_probe(single_zenohd: Any) -> None:  # noqa: ARG001
+    """is_mesh_ready returns True once min_ready_sec has elapsed since first probe."""
+    # Simulate a probe that completed 10 seconds ago.
+    store._mesh_first_probe_success = time.monotonic() - 10.0
+    assert store.is_mesh_ready(min_ready_sec=5.0) is True

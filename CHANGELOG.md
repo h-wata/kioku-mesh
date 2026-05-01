@@ -10,7 +10,16 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- `search_observations` zenoh fallback now applies project / identity
+  filters before keyword filtering, eliminating the "filter returns 0
+  while empty-keyword returns rows" race observed after zenohd restart. (#8)
+
 ### Added
+
+- `mesh-mem status` reports `mesh_ready: yes/waiting (Xs)` to indicate
+  whether peer alignment has completed after a zenohd restart. (#8)
 - 5-peer mesh config template (`config/zenohd_peer.json5.template`) and
   setup example (`config/peers/example_5peer.md`) for personal multi-device use.
 - README section "Multi-agent identity" describing how to run multiple
