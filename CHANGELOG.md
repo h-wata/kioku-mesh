@@ -25,6 +25,17 @@ versions without a migration path until `1.0.0`.
 - README section "Multi-agent identity" describing how to run multiple
   agents on a single host without key collisions.
 - README section "Multi-host mesh setup" with firewall / verification steps.
+- Windows / macOS support: `state_dir()` now uses `platformdirs` to pick
+  the correct per-OS application data directory (Linux:
+  `~/.local/share/mesh-mem`, macOS: `~/Library/Application Support/mesh-mem`,
+  Windows: `%LOCALAPPDATA%\mesh-mem`). The `MESH_MEM_STATE_DIR` override
+  is unchanged.
+- README section "Windows host setup" covering zenohd install, NSSM
+  service registration, firewall rule, and `w32time` verification.
+
+### Changed
+
+- dependencies: add `platformdirs>=4.0`.
 
 ## [0.2.0] - 2026-05-01
 

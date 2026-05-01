@@ -17,6 +17,7 @@ keywords = ["mesh", "distributed-memory", "zenoh", "mcp", "agent", "memory"]
 dependencies = [
     "eclipse-zenoh>=1.9.0",
     "fastmcp>=0.1.0",
+    "platformdirs>=4.0",
 ]
 
 [project.optional-dependencies]

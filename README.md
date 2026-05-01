@@ -193,6 +193,134 @@ mesh-mem search "mesh-check from peer1" --limit 5
 For the full 5-peer setup with example IPs, firewall rules, and add/remove
 procedures, see [config/peers/example_5peer.md](config/peers/example_5peer.md).
 
+## Windows host setup
+
+mesh-mem development is Linux-first, but Windows 10 / 11 hosts can join the
+Zenoh mesh as peers. The steps below cover the differences from the Linux
+quick start; everything else (identity env vars, CLI commands, MCP
+registration) works the same.
+
+### 1. Install Python and zenohd
+
+- Install Python 3.10+ from python.org with **Add to PATH** checked.
+- In an elevated PowerShell:
+
+  ```powershell
+  pip install mesh-mem
+  # or, for a checkout: pip install -e .
+  ```
+
+- Download a `zenohd` Windows build from the
+  [Eclipse Zenoh releases page](https://github.com/eclipse-zenoh/zenoh/releases)
+  and place `zenohd.exe` somewhere on PATH (e.g. `C:\Program Files\zenoh\`).
+  Install the matching `zenoh-backend-rocksdb` plugin alongside it.
+
+### 2. Per-peer config
+
+- Copy `config\zenohd_peer.json5.template` and replace `{SELF_IP}` /
+  `{PEER_N_IP}` with real IPs. The walkthrough at
+  [config/peers/example_5peer.md](config/peers/example_5peer.md) applies
+  unchanged; only the path style differs.
+- Use forward slashes inside JSON5 string values for the rocksdb dir to
+  avoid escaping headaches:
+
+  ```json5
+  // optional override; default storage dir is %LOCALAPPDATA%\mesh-mem
+  // when ZENOH_BACKEND_ROCKSDB_ROOT points there.
+  // Forward slashes work on Windows in zenoh's config parser.
+  ```
+
+### 3. Run zenohd, optionally as a service
+
+For interactive use:
+
+```powershell
+$env:ZENOH_BACKEND_ROCKSDB_ROOT = "$env:LOCALAPPDATA\mesh-mem"
+New-Item -ItemType Directory -Force -Path $env:ZENOH_BACKEND_ROCKSDB_ROOT | Out-Null
+zenohd.exe --config C:\path\to\zenohd_peer.json5
+```
+
+For auto-start, register zenohd as a Windows service. NSSM
+(Non-Sucking Service Manager, https://nssm.cc) handles stdout / stderr
+logging more cleanly than `sc.exe`:
+
+```powershell
+nssm install zenohd "C:\Program Files\zenoh\zenohd.exe" "--config C:\path\to\zenohd_peer.json5"
+nssm set     zenohd AppEnvironmentExtra "ZENOH_BACKEND_ROCKSDB_ROOT=C:\Users\<user>\AppData\Local\mesh-mem"
+nssm start   zenohd
+```
+
+### 4. Windows Defender Firewall
+
+Allow inbound TCP/7447 from the other peers' IPs:
+
+```powershell
+New-NetFirewallRule -DisplayName "mesh-mem zenohd" `
+                    -Direction Inbound -Action Allow `
+                    -Protocol TCP -LocalPort 7447 `
+                    -RemoteAddress 192.168.1.0/24,10.0.0.14
+```
+
+Tighten `-RemoteAddress` to the actual LAN/VPN range you mesh with.
+
+### 5. Time sync (w32time)
+
+Windows ships with the `w32time` service; mesh-mem only needs sub-second
+agreement across peers. Verify and force a resync if needed:
+
+```powershell
+# Status
+w32tm /query /status
+w32tm /query /source
+
+# Force an immediate correction (Linux's `chronyc makestep` equivalent)
+w32tm /resync /force
+
+# Cross-check against another peer
+w32tm /stripchart /computer:192.168.1.10 /samples:5 /dataonly
+```
+
+If skew exceeds a few hundred milliseconds, change the source to a
+reliable NTP server with `w32tm /config /update /manualpeerlist:"time.cloudflare.com"`.
+
+### 6. Data directory
+
+From v0.2.1 onward, mesh-mem auto-resolves its state directory per OS
+through `platformdirs`:
+
+- **Windows**: `%LOCALAPPDATA%\mesh-mem` (e.g. `C:\Users\<user>\AppData\Local\mesh-mem`)
+- **macOS**: `~/Library/Application Support/mesh-mem`
+- **Linux**: `~/.local/share/mesh-mem` (unchanged)
+
+To override (e.g. point at a faster NVMe):
+
+```powershell
+$env:MESH_MEM_STATE_DIR = "D:\mesh-mem-state"
+```
+
+### 7. Smoke check
+
+```powershell
+$env:MESH_MEM_AGENT_FAMILY = "claude-code"
+$env:MESH_MEM_CLIENT_ID    = "claude-windows-1"
+
+mesh-mem save "hello from windows" --project demo --memory-type note
+# From any other peer:
+mesh-mem search "hello from windows" --project demo --limit 5
+```
+
+### Known limitations
+
+- WSL2: a Windows-host zenohd is reachable from WSL only when the WSL
+  network mode is set to `mirrored` (Windows 11 23H2+) or you forward
+  TCP/7447 manually. The default `nat` mode hides Windows from the WSL
+  guest.
+- Search latency on Windows mirrors Linux for the SQLite-first path
+  (per-OS layer is just `pathlib`); the v0.2.0 benchmark numbers carry
+  over.
+- mesh-mem's CI runs Linux-only; Windows-specific regressions are caught
+  by the user at run time, not in pre-merge tests.
+
 ## Development
 
 ```bash

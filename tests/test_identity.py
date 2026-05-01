@@ -62,3 +62,42 @@ def test_get_pc_id_raises_on_empty_preexisting_file(
     (tmp_path / 'pc_id').write_text('')
     with pytest.raises(RuntimeError, match='empty'):
         identity.get_pc_id()
+
+
+def test_state_dir_env_override_wins(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MESH_MEM_STATE_DIR overrides the per-OS platformdirs default."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    assert identity.state_dir() == tmp_path
+    assert tmp_path.exists()
+
+
+def test_state_dir_uses_platformdirs_when_no_override(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without override, state_dir delegates to platformdirs.user_data_dir.
+
+    Captures the call so the test does not depend on the host's actual
+    XDG / Library / LOCALAPPDATA layout, and confirms the returned
+    directory is created.
+    """
+    monkeypatch.delenv('MESH_MEM_STATE_DIR', raising=False)
+    fake_dir = tmp_path / 'platformdirs-managed'
+    captured: dict[str, object] = {}
+
+    def fake_user_data_dir(appname: str, *, appauthor: bool | None = False) -> str:
+        captured['appname'] = appname
+        captured['appauthor'] = appauthor
+        return str(fake_dir)
+
+    import platformdirs
+
+    monkeypatch.setattr(platformdirs, 'user_data_dir', fake_user_data_dir)
+
+    result = identity.state_dir()
+    assert result == fake_dir
+    assert fake_dir.exists()
+    assert captured == {'appname': 'mesh-mem', 'appauthor': False}

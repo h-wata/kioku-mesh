@@ -30,13 +30,27 @@ _session_id_cache: str | None = None
 
 
 def state_dir() -> pathlib.Path:
-    """Return the writable state directory, creating it if absent."""
-    d = pathlib.Path(
-        os.environ.get(
-            'MESH_MEM_STATE_DIR',
-            pathlib.Path.home() / '.local/share/mesh-mem',
-        )
-    )
+    r"""Return the writable state directory, creating it if absent.
+
+    Resolution order:
+        1. ``MESH_MEM_STATE_DIR`` env var (always wins when set)
+        2. Per-OS application data directory via ``platformdirs``:
+           - Linux:   ``$XDG_DATA_HOME/mesh-mem`` or ``~/.local/share/mesh-mem``
+           - macOS:   ``~/Library/Application Support/mesh-mem``
+           - Windows: ``%LOCALAPPDATA%\mesh-mem``
+
+    The Linux default matches the pre-v0.2.1 hardcoded path, so existing
+    deployments that did not set ``MESH_MEM_STATE_DIR`` keep their pc_id.
+    """
+    override = os.environ.get('MESH_MEM_STATE_DIR')
+    if override:
+        d = pathlib.Path(override)
+    else:
+        # Imported lazily so tests that monkeypatch the env var do not
+        # require platformdirs at collection time.
+        import platformdirs
+
+        d = pathlib.Path(platformdirs.user_data_dir('mesh-mem', appauthor=False))
     d.mkdir(parents=True, exist_ok=True)
     return d
 
