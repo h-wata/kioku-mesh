@@ -23,6 +23,7 @@ from datetime import datetime
 from datetime import timezone
 import os
 import pathlib
+import sys
 import uuid
 
 _pc_id_cache: str | None = None
@@ -33,19 +34,27 @@ def state_dir() -> pathlib.Path:
     r"""Return the writable state directory, creating it if absent.
 
     Resolution order:
-        1. ``MESH_MEM_STATE_DIR`` env var (always wins when set)
-        2. Per-OS application data directory via ``platformdirs``:
-           - Linux:   ``$XDG_DATA_HOME/mesh-mem`` or ``~/.local/share/mesh-mem``
+        1. ``MESH_MEM_STATE_DIR`` env var (always wins when set, all OSes)
+        2. Per-OS default:
+           - Linux:   ``~/.local/share/mesh-mem`` (fixed; ``XDG_DATA_HOME``
+             is intentionally NOT honored to preserve pre-v0.2.1 behavior
+             and avoid a silent migration for users who set it)
            - macOS:   ``~/Library/Application Support/mesh-mem``
            - Windows: ``%LOCALAPPDATA%\mesh-mem``
 
-    The Linux default matches the pre-v0.2.1 hardcoded path, so existing
-    deployments that did not set ``MESH_MEM_STATE_DIR`` keep their pc_id.
+    On macOS / Windows the default is resolved through ``platformdirs``;
+    those platforms had no pre-v0.2.1 hardcoded path to preserve.
     """
     override = os.environ.get('MESH_MEM_STATE_DIR')
     if override:
         d = pathlib.Path(override)
+    elif sys.platform == 'linux':
+        # v0.2.0 compatibility: keep the fixed path even when
+        # XDG_DATA_HOME is set, so upgrading users do not silently lose
+        # access to their existing pc_id / SQLite index / session state.
+        d = pathlib.Path.home() / '.local/share/mesh-mem'
     else:
+        # macOS / Windows: delegate to platformdirs.
         # Imported lazily so tests that monkeypatch the env var do not
         # require platformdirs at collection time.
         import platformdirs
