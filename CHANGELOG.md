@@ -10,6 +10,13 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+- 5-peer mesh config template (`config/zenohd_peer.json5.template`) and
+  setup example (`config/peers/example_5peer.md`) for personal multi-device use.
+- README section "Multi-agent identity" describing how to run multiple
+  agents on a single host without key collisions.
+- README section "Multi-host mesh setup" with firewall / verification steps.
+
 ## [0.2.0] - 2026-05-01
 
 ### Added

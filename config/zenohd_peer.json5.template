@@ -1,0 +1,79 @@
+// zenoh-mem: N-peer mesh router config template
+//
+// Copy this file once per peer and replace the placeholders below. The
+// zenohd_home.json5 / zenohd_office.json5 configs are the 2-peer instance of
+// the same pattern; use this template when you want 3+ peers without
+// hand-rolling each side from scratch.
+//
+// Placeholders:
+//   {SELF_IP}   — this peer's LAN IP (the one OTHER peers will dial)
+//   {PEER_N_IP} — every OTHER peer in the mesh, one entry each
+//
+// Operational notes:
+//   - 127.0.0.1 stays in `listen` so MCP clients on the same host can connect.
+//   - `connect.endpoints` lists every peer EXCEPT this one. Zenoh's link layer
+//     deduplicates the resulting graph; redundant edges are fine.
+//   - storage / replication blocks must match across all peers byte-for-byte:
+//     mismatched `interval` / `sub_intervals` / `hot` / `warm` will silently
+//     prevent digest convergence.
+//   - Set `ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"` before
+//     starting zenohd, and ensure the parent directory exists.
+//   - Open TCP/7447 between every peer pair. See README §Multi-host mesh setup.
+
+{
+  mode: "router",
+
+  // 127.0.0.1 is for local MCP clients; {SELF_IP} is what peers dial.
+  listen: {
+    endpoints: [
+      "tcp/127.0.0.1:7447",
+      "tcp/{SELF_IP}:7447",
+    ],
+  },
+
+  // Every OTHER peer. Drop unused lines if your mesh is smaller.
+  connect: {
+    endpoints: [
+      "tcp/{PEER_1_IP}:7447",
+      "tcp/{PEER_2_IP}:7447",
+      "tcp/{PEER_3_IP}:7447",
+      "tcp/{PEER_4_IP}:7447",
+    ],
+  },
+
+  // replication / storage_manager require timestamping at every level.
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+
+  plugins: {
+    storage_manager: {
+      volumes: {
+        rocksdb: {},
+      },
+      storages: {
+        agent_mem: {
+          key_expr: "mem/**",
+          strip_prefix: "mem",
+
+          // Keep these values identical on every peer. Mismatched digest
+          // parameters break convergence without a visible error.
+          replication: {
+            interval: 10.0,          // seconds (float ok)
+            sub_intervals: 5,
+            hot: 6,
+            warm: 30,
+            propagation_delay: 250,  // milliseconds
+          },
+
+          volume: {
+            id: "rocksdb",
+            // Resolved path: ${ZENOH_BACKEND_ROCKSDB_ROOT}/agent_mem
+            dir: "agent_mem",
+            create_db: true,
+          },
+        },
+      },
+    },
+  },
+}
