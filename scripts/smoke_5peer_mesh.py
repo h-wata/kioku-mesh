@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""5-peer full-mesh replication smoke test (TASK-152).
+"""5-peer full-mesh replication smoke test (TASK-152 / hardened in TASK-153).
 
 Validates that mesh-mem's Zenoh replication works correctly with 5 routers
 forming a full mesh topology on localhost.
 
 Phases:
-  0: Cleanup old state and processes
+  0: Cleanup old state and processes (graceful shutdown + RocksDB LOCK wait)
   1: Start 5 routers with full-mesh connectivity
   2: All-direction put/search consistency (100 obs per peer, 5 projects)
   3: 1 peer restart scenario (alignment recovery timing)
   4: Latency measurement (search p50/p99 across all peers)
-  5: Cleanup
+  5: Cleanup (same graceful sequence as Phase 0)
 
 Usage:
   PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import time
@@ -150,6 +151,78 @@ def _cli_search_count(peer_idx: int, project: str, limit: int = 500) -> int:
     return result.stdout.count('<id=')
 
 
+def _graceful_stop_router(
+    proc: subprocess.Popen | None,
+    rocksdb_dir: pathlib.Path,
+    stop_timeout: float = 10.0,
+    lock_timeout: float = 5.0,
+) -> None:
+    """SIGTERM → poll for exit (SIGKILL fallback) → wait for RocksDB LOCK to vanish."""
+    if proc is not None:
+        try:
+            proc.send_signal(signal.SIGTERM)
+            deadline = time.monotonic() + stop_timeout
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.2)
+            else:
+                proc.kill()
+                proc.wait()
+        except OSError:
+            pass
+
+    # Wait for the RocksDB LOCK file to disappear before the caller rmtree's the dir
+    lock_file = rocksdb_dir / 'LOCK'
+    deadline = time.monotonic() + lock_timeout
+    while lock_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+
+
+def _kill_pids_on_ports(ports: list[int], sig: int = signal.SIGTERM) -> None:
+    """Send *sig* to all processes listening on any of *ports* (via lsof)."""
+    for port in ports:
+        result = subprocess.run(
+            ['lsof', '-ti', f':{port}'],
+            capture_output=True,
+            text=True,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            try:
+                os.kill(int(pid_str), sig)
+            except (ProcessLookupError, ValueError, OSError):
+                pass
+
+
+def _cleanup_smoke_processes(procs: list[subprocess.Popen | None] | None = None) -> None:
+    """Stop all zenohd processes on smoke ports and wait for RocksDB to flush.
+
+    If *procs* is given, each live process gets a graceful SIGTERM sequence.
+    All remaining processes on PORTS are then killed via lsof-based lookup so
+    that stray processes from prior runs (e.g. TASK-138 zenohd on 7451/7452)
+    are also cleaned up regardless of their command-line arguments.
+    """
+    # Graceful stop for known processes
+    if procs:
+        for i, proc in enumerate(procs):
+            if proc is not None and proc.poll() is None:
+                _graceful_stop_router(proc, _rocksdb_dir(i))
+
+    # Kill any remaining listeners on smoke ports (SIGTERM then SIGKILL)
+    _kill_pids_on_ports(PORTS, signal.SIGTERM)
+    time.sleep(2.0)
+    _kill_pids_on_ports(PORTS, signal.SIGKILL)
+
+    # Wait for all LOCK files under TMP_BASE to disappear
+    deadline = time.monotonic() + 10.0
+    for i in range(N_PEERS):
+        lock_file = _rocksdb_dir(i) / 'LOCK'
+        while lock_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+    time.sleep(0.5)  # small extra margin
+
+
 def _start_router(peer_idx: int) -> subprocess.Popen:
     rocksdb_root = _rocksdb_dir(peer_idx).parent
     env = {**os.environ, 'ZENOH_BACKEND_ROCKSDB_ROOT': str(rocksdb_root)}
@@ -164,29 +237,15 @@ def _start_router(peer_idx: int) -> subprocess.Popen:
     return proc
 
 
-def _stop_router_by_port(port: int) -> None:
-    subprocess.run(
-        ['pkill', '-f', f'tcp/127.0.0.1:{port}'],
-        capture_output=True,
-    )
-    time.sleep(1)
-
-
-def _cleanup_smoke_processes() -> None:
-    for port in PORTS:
-        subprocess.run(['pkill', '-f', f'tcp/127.0.0.1:{port}'], capture_output=True)
-    time.sleep(2)
-
-
 def main() -> dict:
+    import shutil
+
     results = {}
     procs: list[subprocess.Popen | None] = [None] * N_PEERS
 
     # ── Phase 0: cleanup ────────────────────────────────────────────────────
     print('[Phase 0] Cleanup old state and processes')
-    _cleanup_smoke_processes()
-    import shutil
-
+    _cleanup_smoke_processes()  # kill any stray processes from prior runs
     if TMP_BASE.exists():
         shutil.rmtree(TMP_BASE)
     TMP_BASE.mkdir(parents=True)
@@ -213,11 +272,8 @@ def main() -> dict:
         time.sleep(WAIT_STARTUP)
 
         # Verify connectivity from logs
-        connected_counts = []
         for i in range(N_PEERS):
             log_text = _log_path(i).read_text(errors='ignore')
-            connected = log_text.count('ESTABLISHED') + log_text.count('router_peers=')
-            connected_counts.append(connected)
             print(f'  peer{i + 1} log mentions: {log_text.count("ESTABLISHED")} ESTABLISHED')
 
         results['phase_1'] = {
@@ -271,17 +327,9 @@ def main() -> dict:
         print(f'\n[Phase 3] Peer restart scenario (peer3 stops {PEER3_RESTART_WAIT}s)')
         peer3_idx = 2  # 0-indexed
 
-        # Stop peer3
         print(f'  Stopping peer3 (:{PORTS[peer3_idx]})')
-        if procs[peer3_idx]:
-            procs[peer3_idx].terminate()
-            try:
-                procs[peer3_idx].wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                procs[peer3_idx].kill()
-                procs[peer3_idx].wait()
-            procs[peer3_idx] = None
-        _stop_router_by_port(PORTS[peer3_idx])
+        _graceful_stop_router(procs[peer3_idx], _rocksdb_dir(peer3_idx))
+        procs[peer3_idx] = None
 
         # Write +50 obs to peer1 during peer3 downtime
         print(f'  Writing {PEER3_EXTRA_WRITES} extra obs to peer1 while peer3 is down...')
@@ -357,11 +405,9 @@ def main() -> dict:
         }
 
     finally:
-        # ── Phase 5: cleanup ─────────────────────────────────────────────────
-        print('\n[Phase 5] Cleanup')
-        _cleanup_smoke_processes()
-        import shutil
-
+        # ── Phase 5: cleanup (graceful) ──────────────────────────────────────
+        print('\n[Phase 5] Cleanup (graceful shutdown + RocksDB LOCK wait)')
+        _cleanup_smoke_processes(procs)
         if TMP_BASE.exists():
             shutil.rmtree(TMP_BASE)
         print('  Cleanup done')
@@ -390,7 +436,7 @@ if __name__ == '__main__':
 
     observations = []
     if results.get('phase_2', {}).get('converged') is False:
-        observations.append('Phase 2: not all peers saw all obs within 30s replication window')
+        observations.append('Phase 2: not all peers saw all obs within replication window')
     p3 = results.get('phase_3', {})
     if p3.get('convergence_after_restart_sec') and p3['convergence_after_restart_sec'] > 30:
         observations.append(
@@ -398,6 +444,8 @@ if __name__ == '__main__':
         )
     if not observations:
         observations.append('No unexpected behavior observed')
+
+    import yaml
 
     report = {
         'task_id': 'TASK-152',
@@ -415,8 +463,6 @@ if __name__ == '__main__':
         'verdict': overall,
         'observations': observations,
     }
-
-    import yaml
 
     report_path = out_dir / 'TASK-152-5peer-mesh-smoke-result.yaml'
     report_path.write_text(yaml.dump(report, allow_unicode=True, sort_keys=False))

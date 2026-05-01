@@ -15,6 +15,11 @@ versions without a migration path until `1.0.0`.
 - `search_observations` zenoh fallback now applies project / identity
   filters before keyword filtering, eliminating the "filter returns 0
   while empty-keyword returns rows" race observed after zenohd restart. (#8)
+- `smoke_5peer_mesh.py` cleanup made robust against RocksDB flush
+  timing; previously a quick rerun could leave residual data and
+  inflate Phase 2 counts. Cleanup now sends SIGTERM, polls for process
+  exit, and uses `lsof`-based port lookup to catch stray processes from
+  prior runs regardless of command-line arguments. (Refs #5)
 
 ### Added
 
