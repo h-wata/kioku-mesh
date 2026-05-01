@@ -10,46 +10,89 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
-### Added
-- Tier-4 benchmark verified `search_observations` stays sub-200ms at 50k
-  observations (p50=6.47ms, 352× faster than the 2.2s linear-scan baseline
-  at 16k). (closes #7)
-- Observation schema extended with `memory_type`, `importance`, `subject`,
-  `summary`, `source_files`, `supersedes` fields (Refs #9)
-- MCP tool `save_observation` extended with `memory_type`, `importance`,
-  `subject`, `summary`, `source_files`, `supersedes` (all optional, Refs #9)
-- MCP tool `get_memory` added for retrieving full observation by ID (Refs #9)
-- `search_memory` display now prefers `summary` over full content (Refs #9)
-- CLI `mesh-mem gc --project <name>` filters retention sweep by project (#11)
-- docs: NTP advisory section recommending chrony for sub-second alignment (#10)
-- CLI `mesh-mem save` accepts `--memory-type`, `--importance`, `--subject`,
-  `--summary`, `--source-files`, `--supersedes` (Refs #9)
-- CLI `mesh-mem get-memory <id>` added for fetching full observation (Refs #9)
-- CLI `mesh-mem search` output now matches MCP summary-first format (Refs #9)
-- SQLite local index sidecar for observation metadata; populated on every
-  `save_observation` / `put_tombstone`. Disabled with
-  `MESH_MEM_DISABLE_INDEX=1`. (Refs #7 Phase 2)
-- ADRs 0001-0005 documenting the PoC's design decisions (transport,
-  tombstone semantics, filter strategy, identity env, gc scope).
+## [0.2.0] - 2026-05-01
 
 ### Added
-- SQLite local index now rebuilds from zenoh-rocksdb on startup,
-  keeping search results consistent after restart and replication.
-  Skip with MESH_MEM_SKIP_REBUILD=1. (#7 Phase 4)
-- Zenoh subscriber populates the local index in real time for
-  observations and tombstones replicated from other hosts. (#7 Phase 4)
+
+- **SQLite local index sidecar** for fast observation search. Populated on
+  every `save_observation` / `put_tombstone` and rebuilt from Zenoh-RocksDB
+  on startup. Keeps results consistent after restart and cross-host
+  replication. (#7, 8b06c14 / 73e8ba2 / f195cd5)
+- **Tier-4 benchmark** verifies `search_observations` stays sub-200 ms at 50k
+  observations (6.47 ms p50 limit=1000, 352× faster than Tier-3 baseline).
+  (#7, c06f0b0)
+- **Observation schema extended** with six optional structured fields:
+  `memory_type`, `importance`, `subject`, `summary`, `source_files`,
+  `supersedes`. All fields default to backward-compatible values; old
+  observations decode correctly with `from_json`. (#9, 7a5ccd3 / 469a516)
+- **MCP tool `save_observation`** accepts the six new structured fields
+  (all optional). (#9, 469a516)
+- **MCP tool `get_memory(observation_id)`** returns the full record including
+  all structured fields. (#9, 469a516)
+- **CLI `mesh-mem save`** accepts `--memory-type`, `--importance`, `--subject`,
+  `--summary`, `--source-files`, `--supersedes`. (#9, b4e9fc0)
+- **CLI `mesh-mem get-memory <id>`** fetches a single observation by full
+  32-char ID. (#9, b4e9fc0)
+- **CLI `mesh-mem gc --project <name>`** scopes retention sweep to one project,
+  preventing accidental cross-project tombstone deletion. (#11, 2faad5b)
+- Issue #8 reproduction script (`scripts/repro_issue_8.py`) with 2-router
+  localhost configs; reveals Zenoh routing behavior and a latent
+  `observation_id` deduplication gap. (#8, b06661f)
+- ADRs 0001–0005 documenting PoC design decisions (transport choice,
+  tombstone semantics, filter strategy, identity env, gc scope).
+- `config/zenohd_localhost.json5` for single-host development without LAN
+  peers. (`844f1a3`)
+- Systemd drop-in override example `docs/systemd-zenohd-override.example.conf`
+  for auto-starting zenohd via the apt-packaged unit. (#3, `c4cfaee`)
+- `fastmcp` added as a `test` extra dependency enabling MCP smoke tests.
+  (#4, `e5768c4`)
+- DR 24h test writer script `scripts/run_dr_writer.sh`. (`4aca9f1`)
+- Benchmark script `scripts/bench_bulk_save.py` (Tier-1/2/3). (`66e0a08`)
 
 ### Changed
-- `search_observations` / `find_observation_by_id` now read from the
-  SQLite local index by default. Set `MESH_MEM_DISABLE_INDEX=1` to fall
-  back to the Zenoh full scan. Latency at 50k observations stays
-  sub-200ms per the TASK-134 spike (Refs #7 Phase 3).
+
+- **`search_observations` / `find_observation_by_id` now read from the
+  SQLite local index by default.** Latency at 50 k observations: sub-200 ms
+  (was 2.2 s at 16 k with the full Zenoh scan). Set `MESH_MEM_DISABLE_INDEX=1`
+  to revert to the Zenoh full-scan fallback. (#7, f195cd5)
+- **`search_memory` (MCP) and `mesh-mem search` (CLI) output format** now
+  shows `[memory_type][importance] created_at (project) subject` on line 1
+  and `summary` (or `content[:80]`) on line 2, separated by `---`. (#9)
+- **Default `limit` unified to 50** across CLI (`mesh-mem search`), MCP
+  (`search_memory`), and API (`search_observations`). Previously 20 for
+  CLI/MCP and 50 for API. (#1, `c0f5194`)
+- `ZENOH_BACKEND_ROCKSDB_ROOT` default path aligned to
+  `~/.local/share/mesh-mem` (was `~/.local/share/zenoh-mem`). (#2, `2a39ff5`)
+- `config/zenohd_home.json5` and `config/zenohd_office.json5` LAN IP
+  placeholders reverted to `192.168.3.x / 192.168.3.y`; hardcoded deployment
+  IPs removed. (`36c12b7`)
 
 ### Fixed
-- search_observations zenoh fallback path now deduplicates results by
-  observation_id; the SQLite-first path was already deduplicated by
-  PRIMARY KEY. Surfaces in multi-router topologies. (#12)
-- Unify default search `limit` to 50 across CLI/MCP/API (#1)
+
+- **Default search `limit` unified** to 50 across all interfaces. (#1, `c0f5194`)
+- `search_observations` zenoh fallback path now deduplicates results by
+  `observation_id`; the SQLite-first path was already deduplicated by
+  `PRIMARY KEY`. Surfaces in multi-router topologies. (#12, `8cb0f54`)
+- `test_search_respects_since_iso_filter` pinned to a fixed `created_at`
+  value, eliminating CI clock dependency. (`40b1fe9`)
+
+### Documentation
+
+- README `## Time sync` section expanded: `chrony` installation, `chronyc
+  tracking` / `chronyc sources -v` / cross-host `date -u` verification,
+  `timedatectl` warning (12.75 s drift observed with `synchronized: yes`),
+  `chronyc makestep` recovery, and links to NTP skew PoC results. (#10, `69cc40b`)
+- `plan.md` and `README.md` synced to as-built state: Observation schema,
+  MCP/CLI signatures, PoC verification results summary, and open issues
+  section. (`88e2019`)
+
+### Security
+
+- Replaced hardcoded LAN IPs in zenohd config templates with
+  `192.168.3.x / 192.168.3.y` placeholders to avoid leaking
+  deployment-specific addresses. (`36c12b7`)
+
+---
 
 ## [0.1.0] — 2026-04-24
 
