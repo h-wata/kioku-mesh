@@ -152,7 +152,12 @@ def _cli_search_count(peer_idx: int, project: str, limit: int = 500) -> int:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
     if result.returncode != 0:
-        return 0
+        # Surface CLI / transport failures rather than collapsing them to 0;
+        # otherwise replication failure and CLI breakage look identical and
+        # flaky-test triage is harder.
+        raise RuntimeError(
+            f'search CLI failed on peer{peer_idx + 1} (exit {result.returncode}): {result.stderr.strip()}'
+        )
     # Output format: each obs ends with " <id=xxxx>" on the body line
     return result.stdout.count('<id=')
 
@@ -283,13 +288,17 @@ def _start_router(peer_idx: int) -> subprocess.Popen:
     rocksdb_root = _rocksdb_dir(peer_idx).parent
     env = {**os.environ, 'ZENOH_BACKEND_ROCKSDB_ROOT': str(rocksdb_root)}
     log_path = _log_path(peer_idx)
-    log_f = open(log_path, 'w')
-    proc = subprocess.Popen(
-        ['zenohd', '--config', str(_config_path(peer_idx))],
-        stdout=log_f,
-        stderr=log_f,
-        env=env,
-    )
+    # Open with `with` so the parent's handle is closed once Popen has
+    # duped the fd into the child. The child keeps its own copy via dup2,
+    # so its writes still land in the file. On Windows this matters for
+    # cleanup: an open parent handle blocks delete/replace of log_path.
+    with open(log_path, 'w') as log_f:
+        proc = subprocess.Popen(
+            ['zenohd', '--config', str(_config_path(peer_idx))],
+            stdout=log_f,
+            stderr=log_f,
+            env=env,
+        )
     return proc
 
 
