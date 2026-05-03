@@ -27,6 +27,10 @@ versions without a migration path until `1.0.0`.
   log-file handle** once `subprocess.Popen` has duped the fd into the
   child, freeing Windows from the open-handle delete-block during
   cleanup. (#15, Codex review IMPORTANT 7 follow-up)
+- **`scripts/smoke_5peer_mesh.py` `_cli_save()` parsing now anchors on
+  `<id=...>` regex** instead of `split()[-1]`, so adding a trailing
+  summary line to the save CLI output no longer silently corrupts the
+  smoke. (#18, Codex review NICE-TO-HAVE 3 follow-up)
 
 ### Documentation
 

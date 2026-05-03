@@ -26,6 +26,7 @@ import argparse
 import datetime
 import os
 import pathlib
+import re
 import signal
 import subprocess
 import sys
@@ -126,7 +127,11 @@ def _cli_save(peer_idx: int, content: str, project: str) -> str:
     result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
     if result.returncode != 0:
         raise RuntimeError(f'save failed on peer{peer_idx + 1}: {result.stderr}')
-    return result.stdout.strip().split()[-1]
+    stdout = result.stdout
+    m = re.search(r'([0-9a-f]{32})', stdout)
+    if m is None:
+        raise RuntimeError(f'unexpected save output: {stdout!r}')
+    return m.group(1)
 
 
 def _cli_search_count(peer_idx: int, project: str, limit: int = 500) -> int:
