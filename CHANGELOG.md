@@ -16,6 +16,27 @@ versions without a migration path until `1.0.0`.
   and `pytest tests/` on `ubuntu-24.04` with Python 3.12, triggered on
   every PR and on push to `main`. (#22)
 
+### Changed
+
+- **`scripts/smoke_5peer_mesh.py` `_cli_search_count()` now raises** on
+  non-zero exit rather than collapsing the failure to `0`. This
+  separates replication zero-result from CLI / transport failure and
+  makes flaky-test triage tractable. (#14, Codex review IMPORTANT 5
+  follow-up)
+- **`scripts/smoke_5peer_mesh.py` `_start_router()` closes the parent's
+  log-file handle** once `subprocess.Popen` has duped the fd into the
+  child, freeing Windows from the open-handle delete-block during
+  cleanup. (#15, Codex review IMPORTANT 7 follow-up)
+
+### Documentation
+
+- **`state_dir()` clarifies `MESH_MEM_STATE_DIR=''` semantics**: an
+  empty string is treated as "not set" and falls through to the per-OS
+  default. v0.2.0 interpreted an empty string as the current working
+  directory; v0.2.1+ does not. Use `MESH_MEM_STATE_DIR=.` to keep the
+  cwd-relative behavior. A unit test pins this fallback. (#16, Codex
+  review NICE-TO-HAVE 1 follow-up)
+
 ## [0.2.1] - 2026-05-02
 
 ### Added

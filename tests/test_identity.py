@@ -74,6 +74,27 @@ def test_state_dir_env_override_wins(
     assert tmp_path.exists()
 
 
+def test_state_dir_empty_env_falls_through_to_default(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty MESH_MEM_STATE_DIR falls through to the per-OS default.
+
+    v0.2.0 treated an empty string as cwd; v0.2.1+ treats it as unset.
+    """
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', '')
+    fake_home = tmp_path / 'home'
+    fake_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, 'home', classmethod(lambda cls: fake_home))
+    monkeypatch.setattr('sys.platform', 'linux')
+
+    result = identity.state_dir()
+
+    expected = fake_home / '.local/share/mesh-mem'
+    assert result == expected
+    assert expected.exists()
+
+
 def test_state_dir_linux_ignores_xdg_data_home(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

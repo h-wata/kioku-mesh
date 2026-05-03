@@ -34,7 +34,12 @@ def state_dir() -> pathlib.Path:
     r"""Return the writable state directory, creating it if absent.
 
     Resolution order:
-        1. ``MESH_MEM_STATE_DIR`` env var (always wins when set, all OSes)
+        1. ``MESH_MEM_STATE_DIR`` env var when set to a **non-empty** value
+           (all OSes). An empty string (``MESH_MEM_STATE_DIR=''``) is
+           treated as "not set" and falls through to the per-OS default;
+           this differs from v0.2.0, which interpreted an empty string as
+           the current working directory. Set the variable to ``.`` when
+           the cwd-relative behavior is required.
         2. Per-OS default:
            - Linux:   ``~/.local/share/mesh-mem`` (fixed; ``XDG_DATA_HOME``
              is intentionally NOT honored to preserve pre-v0.2.1 behavior
