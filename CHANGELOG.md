@@ -32,6 +32,10 @@ versions without a migration path until `1.0.0`.
   adding a trailing summary line to the save CLI output no longer
   silently corrupts the smoke. (#18, Codex review NICE-TO-HAVE 3
   follow-up)
+- **`scripts/smoke_5peer_mesh.py` Phase 1 connectivity check now raises**
+  on missing links instead of printing-and-continuing, so a partial
+  mesh fails fast in Phase 1 rather than producing confusing results
+  in Phase 2/3. (#17, Codex review NICE-TO-HAVE 2 follow-up)
 
 ### Documentation
 

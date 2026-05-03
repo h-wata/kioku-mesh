@@ -341,10 +341,21 @@ def main() -> dict:
         print(f'  Waiting {WAIT_STARTUP}s for full-mesh connections...')
         time.sleep(WAIT_STARTUP)
 
-        # Verify connectivity from logs
+        # Verify connectivity from logs — assert full-mesh before proceeding
+        # 5-peer full mesh: each peer connects to 4 others = 20 unidirectional links
+        expected_links = N_PEERS * (N_PEERS - 1)
+        actual_links = 0
         for i in range(N_PEERS):
             log_text = _log_path(i).read_text(errors='ignore')
-            print(f'  peer{i + 1} log mentions: {log_text.count("ESTABLISHED")} ESTABLISHED')
+            peer_links = log_text.count('ESTABLISHED')
+            print(f'  peer{i + 1} log mentions: {peer_links} ESTABLISHED')
+            actual_links += peer_links
+
+        if actual_links < expected_links:
+            raise RuntimeError(
+                f'Phase 1 connectivity check failed: expected {expected_links} active links, got {actual_links}'
+            )
+        print(f'  Phase 1 connectivity: {actual_links}/{expected_links} links ESTABLISHED — OK')
 
         results['phase_1'] = {
             'started': N_PEERS,
