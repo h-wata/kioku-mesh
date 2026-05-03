@@ -142,29 +142,107 @@ def test_search_via_zenoh_deduplicates_by_observation_id(monkeypatch: pytest.Mon
 
 
 def test_search_via_zenoh_filter_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Project filter is evaluated before keyword filter in _search_via_zenoh (#8).
+    """Both project and keyword filters drop non-matching items in the FINAL result set (#8).
 
-    An obs matching project='keep' but not the keyword must survive project
-    filtering. An obs matching the keyword but belonging to a different project
-    must be dropped.  This validates the evaluation order:
-    project/identity -> keyword.
+    Final-state contract only: an obs matching project but failing keyword
+    must be absent, and an obs matching keyword but failing project must
+    also be absent. Evaluation order is NOT pinned here — the final result
+    set is identical whether project or keyword is checked first.
+    Order is locked at the internal-state level by
+    ``test_search_via_zenoh_project_filter_short_circuits_before_keyword``.
     """
-    obs_match = Observation(content='no-keyword-here', project='keep')
+    obs_match_project = Observation(content='no-keyword-here', project='keep')
     obs_wrong_project = Observation(content='the-keyword', project='drop')
     fake = _FakeSession(
         [
             [],  # tombstones empty
-            [_ok_reply(obs_match), _ok_reply(obs_wrong_project)],
+            [_ok_reply(obs_match_project), _ok_reply(obs_wrong_project)],
         ]
     )
     _install_fake_session(monkeypatch, fake)
 
     results = store.search_observations(query='the-keyword', project='keep')
     ids = {o.observation_id for o in results}
-    # obs_match has wrong keyword but correct project — must NOT appear (keyword filter)
-    assert obs_match.observation_id not in ids
-    # obs_wrong_project has correct keyword but wrong project — must NOT appear (project filter)
+    # Correct project, wrong keyword — dropped by keyword filter.
+    assert obs_match_project.observation_id not in ids
+    # Correct keyword, wrong project — dropped by project filter.
     assert obs_wrong_project.observation_id not in ids
+
+
+def test_search_via_zenoh_project_filter_short_circuits_before_keyword(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project filter MUST short-circuit before the keyword filter runs (#13).
+
+    The pre-existing ``test_search_via_zenoh_filter_order`` test only checks
+    the FINAL result set, which is identical regardless of evaluation order
+    (both filters reject the same items either way). To pin the actual
+    order at the internal-state level we spy on ``obs.content.lower()``
+    — the heavy call invoked by the keyword filter — and assert:
+
+      * the project-mismatch obs is NEVER subjected to that call,
+        proving project is checked first and the obs never reaches the
+        ``results_by_id`` registration step.
+      * the project-match obs DOES reach the keyword filter (sanity that
+        the spy is wired correctly).
+
+    Equivalently: an item that matches keyword but fails project never
+    incurs keyword-evaluation cost.
+    """
+    real_from_json = Observation.from_json
+    lower_calls: dict[str, int] = {}
+
+    class _TrackedStr(str):
+        """``str`` subclass logging ``.lower()`` invocations keyed by observation_id.
+
+        Attached only to ``Observation.content`` after JSON parsing so we
+        can detect whether the keyword filter (``obs.content.lower()``)
+        ran on a given obs without having to refactor production code.
+        """
+
+        def __new__(cls, value: str, key: str) -> '_TrackedStr':
+            inst = super().__new__(cls, value)
+            inst._key = key  # noqa: SLF001 — test-local marker on a str subclass
+            return inst
+
+        def lower(self) -> str:
+            lower_calls[self._key] = lower_calls.get(self._key, 0) + 1  # noqa: SLF001
+            return super().lower()
+
+    def spy_from_json(data: str) -> Observation:
+        obs = real_from_json(data)
+        obs.content = _TrackedStr(obs.content, obs.observation_id)
+        return obs
+
+    monkeypatch.setattr(Observation, 'from_json', spy_from_json)
+
+    obs_match = Observation(content='the-keyword stays', project='keep')
+    obs_mismatch = Observation(content='the-keyword leaves', project='drop')
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(obs_match), _ok_reply(obs_mismatch)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    store.search_observations(query='the-keyword', project='keep')
+
+    # If filter order is flipped (keyword before project), content.lower()
+    # is invoked on every parsed obs — including project-mismatches — and
+    # this assertion fails. With the documented order
+    # (tombstone -> project -> since -> keyword) the project-mismatch obs
+    # short-circuits before content.lower() is ever called.
+    assert lower_calls.get(obs_mismatch.observation_id, 0) == 0, (
+        f'project-mismatch obs reached the keyword filter — order regressed '
+        f'(content.lower() called {lower_calls.get(obs_mismatch.observation_id, 0)} times '
+        f'on a project-mismatch row that should have been skipped earlier)'
+    )
+    # Sanity check that the spy itself is wired correctly: the project-match
+    # obs DOES go through the keyword filter at least once.
+    assert (
+        lower_calls.get(obs_match.observation_id, 0) >= 1
+    ), 'project-match obs never reached the keyword filter — spy is not wired correctly'
 
 
 def test_search_via_zenoh_filters_skip_non_matching_early(monkeypatch: pytest.MonkeyPatch) -> None:
