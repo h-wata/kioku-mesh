@@ -329,6 +329,15 @@ mesh-mem search "hello from windows" --project demo --limit 5
 - mesh-mem's CI runs Linux-only; Windows-specific regressions are caught
   by the user at run time, not in pre-merge tests.
 
+## Continuous Integration & PR Review
+
+- Pull requests run lint and tests automatically (see #22).
+- When `ANTHROPIC_API_KEY` is configured in repo secrets, PRs receive
+  an automated review from the
+  [Claude Code Action](https://github.com/anthropics/claude-code-action),
+  and you can address Claude in any PR / issue comment by mentioning
+  `@claude`.
+
 ## Development
 
 ```bash

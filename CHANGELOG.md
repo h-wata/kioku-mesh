@@ -15,6 +15,10 @@ versions without a migration path until `1.0.0`.
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) running pre-commit
   and `pytest tests/` on `ubuntu-24.04` with Python 3.12, triggered on
   every PR and on push to `main`. (#22)
+- **Claude Code Action workflow** (`.github/workflows/claude.yml`)
+  posting an automated AI review on every PR and responding to
+  `@claude` mentions in comments. Requires `ANTHROPIC_API_KEY`
+  repo secret to be set by the maintainer. (#23)
 
 ### Changed
 
