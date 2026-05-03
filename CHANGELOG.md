@@ -41,6 +41,15 @@ versions without a migration path until `1.0.0`.
   mesh fails fast in Phase 1 rather than producing confusing results
   in Phase 2/3. (#17, Codex review NICE-TO-HAVE 2 follow-up)
 
+### Removed
+
+- **Claude Code Action workflow** (`.github/workflows/claude.yml`,
+  introduced in #23) removed. In the current dev flow Claude is
+  already involved in authoring most diffs, so a same-model
+  auto-review on the merged result added little independent value;
+  cross-vendor review (Codex) is run manually for high-stakes
+  changes instead. (#26)
+
 ### Documentation
 
 - **`state_dir()` clarifies `MESH_MEM_STATE_DIR=''` semantics**: an
