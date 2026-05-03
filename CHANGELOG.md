@@ -22,6 +22,13 @@ versions without a migration path until `1.0.0`.
 
 ### Changed
 
+- **`_search_via_zenoh` filter evaluation order is now test-locked at
+  the internal-state level**: a unit test asserts that an item which
+  matches `keyword` but fails `project` is never registered in
+  `results_by_id`, catching a regression that final-result inclusion
+  tests would miss. The first of the existing filter-order tests had
+  its docstring re-aligned with the assertion. (#13, Codex review
+  IMPORTANT 2 follow-up)
 - **`scripts/smoke_5peer_mesh.py` `_cli_search_count()` now raises** on
   non-zero exit rather than collapsing the failure to `0`. This
   separates replication zero-result from CLI / transport failure and
