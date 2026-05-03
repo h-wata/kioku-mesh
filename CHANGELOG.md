@@ -10,6 +10,12 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **GitHub Actions CI** (`.github/workflows/ci.yml`) running pre-commit
+  and `pytest tests/` on `ubuntu-24.04` with Python 3.12, triggered on
+  every PR and on push to `main`. (#22)
+
 ## [0.2.1] - 2026-05-02
 
 ### Added
