@@ -10,6 +10,21 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Documentation
+
+- **README Windows quick start refreshed** (#36): drop the misleading
+  `pip install mesh-mem` line (the package is not on PyPI yet); call
+  out the user-local zenohd install path for non-admin (`%LOCALAPPDATA%\Programs\zenoh\`)
+  alongside the admin `Program Files\zenoh\` path; pin the exact zip
+  asset names (`zenoh-1.9.0-x86_64-pc-windows-msvc-standalone.zip` and
+  the rocksdb backend equivalent) so users stop guessing among the four
+  naming patterns; clarify that `New-NetFirewallRule` needs an elevated
+  PowerShell and that outbound-only peers can skip the inbound rule
+  entirely; document the venv path-style mapping
+  (`~/.venv/mesh-mem/bin/<bin>` → `Scripts\<bin>.exe`); cross-link the
+  new `--rebuild` opt-in (#38) for first-time alignment on a populated
+  mesh.
+
 ### Changed
 
 - **CLI skips `rebuild_from_zenoh` on startup by default** (#38). The

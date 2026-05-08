@@ -242,25 +242,51 @@ PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
 
 mesh-mem development is Linux-first. Windows 10 / 11 hosts *can* join the
 Zenoh mesh as peers natively; the steps below cover the differences from
-the Linux quick start. Everything else (identity env vars, CLI commands,
-MCP registration) works the same.
+the Linux quick start. Identity env vars, CLI commands, and MCP
+registration all work the same — only the **path style** differs:
+wherever the Linux examples reference `~/.venv/mesh-mem/bin/<binary>`,
+the Windows equivalent is `C:\Users\<user>\.venv\mesh-mem\Scripts\<binary>.exe`.
 
-### 1. Install Python and zenohd
+### 1. Install Python and mesh-mem
 
-- Install Python 3.10+ from python.org with **Add to PATH** checked.
-- In an elevated PowerShell:
+- Install Python 3.10+ from python.org with **Add to PATH** checked. No
+  admin rights are needed for the per-user installer.
+- mesh-mem is **not published on PyPI yet**. Install from a checkout:
 
   ```powershell
-  pip install mesh-mem
-  # or, for a checkout: pip install -e .
+  git clone https://github.com/h-wata/mesh-mem.git
+  cd mesh-mem
+  python -m venv $env:USERPROFILE\.venv\mesh-mem
+  & "$env:USERPROFILE\.venv\mesh-mem\Scripts\python.exe" -m pip install -e .
   ```
 
-- Download a `zenohd` Windows build from the
-  [Eclipse Zenoh releases page](https://github.com/eclipse-zenoh/zenoh/releases)
-  and place `zenohd.exe` somewhere on PATH (e.g. `C:\Program Files\zenoh\`).
-  Install the matching `zenoh-backend-rocksdb` plugin alongside it.
+  (`pip install mesh-mem` resolves to nothing today — the package will
+  appear on PyPI as part of the v1.0 release.)
 
-### 2. Per-peer config
+### 2. Install zenohd
+
+Grab the two standalone zip files matching your zenoh version
+(1.9.0 at time of writing) from the
+[Eclipse Zenoh releases page](https://github.com/eclipse-zenoh/zenoh/releases):
+
+- `zenoh-1.9.0-x86_64-pc-windows-msvc-standalone.zip`
+- `zenoh-backend-rocksdb-1.9.0-x86_64-pc-windows-msvc-standalone.zip`
+
+(The releases page lists four naming patterns per asset — `msvc` is the
+right default for Windows 10 / 11 unless you have a specific reason to
+prefer `gnu`.)
+
+Choose an install location — admin status drives the choice:
+
+- **Have admin?** Extract both zips to `C:\Program Files\zenoh\` and add
+  the directory to **machine** PATH.
+- **No admin (typical corporate Win11)?** Extract to
+  `%LOCALAPPDATA%\Programs\zenoh\` and append to **user** PATH instead
+  (System Properties → Environment Variables → User variables → `Path`).
+  Both `zenohd.exe` and the rocksdb plugin DLL must end up next to each
+  other in whichever directory you pick.
+
+### 3. Per-peer config
 
 - Copy `config\zenohd_peer.json5.template` and replace `{SELF_IP}` /
   `{PEER_N_IP}` with real IPs. The walkthrough at
@@ -275,7 +301,7 @@ MCP registration) works the same.
   // Forward slashes work on Windows in zenoh's config parser.
   ```
 
-### 3. Run zenohd, optionally as a service
+### 4. Run zenohd, optionally as a service
 
 For interactive use:
 
@@ -295,9 +321,12 @@ nssm set     zenohd AppEnvironmentExtra "ZENOH_BACKEND_ROCKSDB_ROOT=C:\Users\<us
 nssm start   zenohd
 ```
 
-### 4. Windows Defender Firewall
+### 5. Windows Defender Firewall
 
-Allow inbound TCP/7447 from the other peers' IPs:
+`New-NetFirewallRule` requires an **elevated PowerShell** — without
+admin, it fails silently with `Access is denied.`. Right-click
+PowerShell → "Run as administrator", or invoke
+`Start-Process powershell -Verb RunAs` to trigger the UAC prompt:
 
 ```powershell
 New-NetFirewallRule -DisplayName "mesh-mem zenohd" `
@@ -308,7 +337,13 @@ New-NetFirewallRule -DisplayName "mesh-mem zenohd" `
 
 Tighten `-RemoteAddress` to the actual LAN/VPN range you mesh with.
 
-### 5. Time sync (w32time)
+A peer that only **initiates outbound** zenoh connections (i.e., never
+needs other peers to dial in) can skip this step entirely — Windows
+Firewall lets the return traffic flow on the established socket. The
+inbound rule is only required when this host appears in some other
+peer's `connect.endpoints` list.
+
+### 6. Time sync (w32time)
 
 Windows ships with the `w32time` service; mesh-mem only needs sub-second
 agreement across peers. Verify and force a resync if needed:
@@ -328,7 +363,7 @@ w32tm /stripchart /computer:192.168.1.10 /samples:5 /dataonly
 If skew exceeds a few hundred milliseconds, change the source to a
 reliable NTP server with `w32tm /config /update /manualpeerlist:"time.cloudflare.com"`.
 
-### 6. Data directory
+### 7. Data directory
 
 From v0.2.1 onward, mesh-mem resolves its state directory per OS:
 
@@ -344,7 +379,7 @@ To override (e.g. point at a faster NVMe):
 $env:MESH_MEM_STATE_DIR = "D:\mesh-mem-state"
 ```
 
-### 7. Smoke check
+### 8. Smoke check
 
 ```powershell
 $env:MESH_MEM_AGENT_FAMILY = "claude-code"
@@ -354,6 +389,22 @@ mesh-mem save "hello from windows" --project demo --memory-type note
 # From any other peer:
 mesh-mem search "hello from windows" --project demo --limit 5
 ```
+
+When this host is the **new** peer joining an established mesh, the
+local SQLite index is empty and the in-process replication subscriber
+will populate it as observations arrive — `save` / `search` against
+freshly-published data work fine. To pull historical entries from the
+existing peers' zenohd RocksDB into the local index in one shot, run
+once with `--rebuild`:
+
+```powershell
+mesh-mem --rebuild status   # one-time alignment scan
+```
+
+Expect the rebuild to take **tens of seconds** on a populated mesh
+(observed ~15 s against ~117k records). Subsequent CLI invocations
+default to skipping that scan (#38) so interactive use stays
+sub-second.
 
 ### Known limitations
 
