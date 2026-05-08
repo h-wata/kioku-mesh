@@ -239,6 +239,35 @@ def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # no
     assert found.source_files == ['src/mesh_mem/mcp_server.py']
 
 
+def test_save_observation_rejects_invalid_memory_type(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Reject invalid memory_type at the MCP boundary.
+
+    The tool must return a friendly error string (not raise) when an LLM
+    passes a memory_type outside the documented enum, and must not persist
+    a partial observation.
+    """
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'should not persist',
+                    'project': 'mcp-mt-validate',
+                    'memory_type': 'feature',  # invalid
+                },
+            )
+            return result.data
+
+    msg = _run(_go())
+    assert 'memory_type' in msg
+    assert 'feature' in msg
+
+    time.sleep(_INGEST_SETTLE)
+    leaked = store.search_observations(project='mcp-mt-validate', limit=10)
+    assert leaked == [], 'invalid memory_type must not produce a stored obs'
+
+
 def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: ARG001
     async def _go() -> str:
         async with Client(mcp) as client:

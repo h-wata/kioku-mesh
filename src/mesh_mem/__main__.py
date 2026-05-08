@@ -13,6 +13,7 @@ from . import __version__
 from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
+from .models import VALID_MEMORY_TYPES
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
 from .store import MAX_SEARCH
@@ -178,7 +179,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--version', action='version', version=f'mesh-mem {__version__}')
     sub = parser.add_subparsers(dest='command', required=True)
 
-    _MEMORY_TYPES = ['note', 'decision', 'bugfix', 'discovery', 'config', 'pattern', 'fact', 'status', 'learning']  # noqa: N806
+    _MEMORY_TYPES = sorted(VALID_MEMORY_TYPES)  # noqa: N806
 
     p_save = sub.add_parser('save', help='Observation を保存')
     p_save.add_argument('content', help='保存する内容')

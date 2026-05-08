@@ -165,7 +165,7 @@ def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> No
             'save',
             'get-memory-content',
             '--memory-type',
-            'bugfix',
+            'bug',
             '--importance',
             '3',
             '--subject',
@@ -184,7 +184,7 @@ def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> No
     assert rc2 == 0
     out = capsys.readouterr().out
     assert f'id: {obs_id}' in out
-    assert 'memory_type: bugfix' in out
+    assert 'memory_type: bug' in out
     assert 'importance: 3' in out
     assert 'subject: root-cause' in out
     assert 'summary: one-line-summary' in out

@@ -14,6 +14,7 @@ from . import __version__
 from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
+from .models import VALID_MEMORY_TYPES
 from .store import find_observation_by_id
 from .store import MAX_SEARCH
 from .store import put_observation
@@ -95,6 +96,8 @@ def save_observation(
     Returns:
         The generated ``observation_id``.
     """
+    if memory_type not in VALID_MEMORY_TYPES:
+        return f'memory_type は {sorted(VALID_MEMORY_TYPES)} のいずれかである必要があります。 got: {memory_type!r}'
     obs = Observation(
         content=content,
         project=project,

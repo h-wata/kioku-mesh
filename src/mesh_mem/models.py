@@ -16,6 +16,7 @@ from dataclasses import fields
 from datetime import datetime
 from datetime import timezone
 import json
+import logging
 from typing import Any
 import uuid
 
@@ -23,6 +24,8 @@ from .identity import get_agent_family
 from .identity import get_client_id
 from .identity import get_pc_id
 from .identity import get_session_id
+
+log = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -34,6 +37,19 @@ def _from_dict_compat(cls: type, data: dict[str, Any]) -> Any:
     """Build ``cls`` from ``data`` while dropping unknown fields."""
     known = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in data.items() if k in known})
+
+
+VALID_MEMORY_TYPES: frozenset[str] = frozenset({'note', 'decision', 'bug', 'pattern', 'config', 'summary'})
+"""Closed enum for ``Observation.memory_type``.
+
+The MCP server's instructions advertise this same set; both ends must agree
+or LLMs that ignore the docstring will silently land entries that fall out
+of the documented categories (which they did, before validation existed).
+
+Forward-compat note: ``Observation.from_json`` deliberately bypasses this
+validation so that older readers can still ingest a future writer that adds
+a new memory_type. Only newly-constructed observations are checked.
+"""
 
 
 @dataclass
@@ -59,6 +75,8 @@ class Observation:
             self.importance = 1
         elif self.importance > 5:
             self.importance = 5
+        if self.memory_type not in VALID_MEMORY_TYPES:
+            raise ValueError(f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}; got {self.memory_type!r}')
 
     @property
     def key_expr(self) -> str:
@@ -75,8 +93,23 @@ class Observation:
 
     @classmethod
     def from_json(cls, data: str) -> 'Observation':
-        """Parse JSON tolerantly, dropping unknown fields for forward/back compat."""
-        return _from_dict_compat(cls, json.loads(data))
+        """Parse JSON tolerantly, dropping unknown fields for forward/back compat.
+
+        A peer running a future schema may emit a ``memory_type`` value not
+        in this version's :data:`VALID_MEMORY_TYPES`. To preserve forward-
+        compat, we clamp such values to ``"note"`` and log at WARNING — the
+        observation is still ingested, just relabelled. The original value
+        is lost on the receiver, which is acceptable for v0.x.
+        """
+        parsed = json.loads(data)
+        raw_type = parsed.get('memory_type')
+        if raw_type is not None and raw_type not in VALID_MEMORY_TYPES:
+            log.warning(
+                'Observation.from_json: clamping unknown memory_type %r to "note" (peer may be on a newer schema)',
+                raw_type,
+            )
+            parsed['memory_type'] = 'note'
+        return _from_dict_compat(cls, parsed)
 
 
 @dataclass

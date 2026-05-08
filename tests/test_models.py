@@ -1,9 +1,13 @@
 """Unit tests for mesh-mem data models."""
 
 import json
+import logging
+
+import pytest
 
 from mesh_mem.models import Observation
 from mesh_mem.models import Tombstone
+from mesh_mem.models import VALID_MEMORY_TYPES
 
 
 def test_observation_key_expr_contains_all_identity_fragments() -> None:
@@ -156,3 +160,38 @@ def test_observation_new_json_old_code_compat() -> None:
     assert restored.content == 'new obs'
     assert restored.memory_type == 'decision'
     assert restored.importance == 4
+
+
+def test_observation_rejects_invalid_memory_type() -> None:
+    """Construction with an out-of-enum memory_type must raise.
+
+    Without this guard, an LLM that ignores the MCP server's instructions
+    can land entries (e.g. memory_type='feature') that fall outside the
+    documented set, polluting category-based search.
+    """
+    with pytest.raises(ValueError, match='memory_type'):
+        Observation(content='x', memory_type='feature')
+
+
+def test_observation_accepts_all_documented_memory_types() -> None:
+    for mt in VALID_MEMORY_TYPES:
+        obs = Observation(content='x', memory_type=mt)
+        assert obs.memory_type == mt
+
+
+def test_observation_from_json_clamps_unknown_memory_type(caplog: pytest.LogCaptureFixture) -> None:
+    """Clamp unknown memory_type to 'note' for forward-compat.
+
+    A peer on a future schema may emit a value not in VALID_MEMORY_TYPES.
+    ``from_json`` must clamp to 'note' rather than raise so replication
+    does not stall on schema drift.
+    """
+    raw = {
+        'content': 'from a future peer',
+        'memory_type': 'feature',  # not in VALID_MEMORY_TYPES
+        'observation_id': 'a' * 32,
+    }
+    with caplog.at_level(logging.WARNING, logger='mesh_mem.models'):
+        obs = Observation.from_json(json.dumps(raw))
+    assert obs.memory_type == 'note'
+    assert any('feature' in rec.message for rec in caplog.records)
