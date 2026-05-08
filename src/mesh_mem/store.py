@@ -19,6 +19,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import functools
+import json
 import logging
 import os
 import time
@@ -284,6 +285,11 @@ def start_index_subscriber(session: zenoh.Session) -> list:
         try:
             obs = Observation.from_json(sample.payload.to_string())
             idx.upsert(obs)
+        except json.JSONDecodeError as e:
+            # Issue #31: gc broadcast-purge and other control payloads can
+            # arrive on mem/obs/** with non-Observation bytes. Demote to
+            # DEBUG so steady-state operation does not look pathological.
+            log.debug('index subscriber on_obs non-JSON payload: %s', e)
         except Exception as e:  # noqa: BLE001
             log.warning('index subscriber on_obs error: %s', e)
 
@@ -291,6 +297,8 @@ def start_index_subscriber(session: zenoh.Session) -> list:
         try:
             tomb = Tombstone.from_json(sample.payload.to_string())
             idx.mark_deleted(tomb.observation_id, tomb.deleted_at)
+        except json.JSONDecodeError as e:
+            log.debug('index subscriber on_tomb non-JSON payload: %s', e)
         except Exception as e:  # noqa: BLE001
             log.warning('index subscriber on_tomb error: %s', e)
 
