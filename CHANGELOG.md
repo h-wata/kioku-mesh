@@ -10,6 +10,51 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-05-08
+
+### Added
+
+- **`memory_type` is now validated against a closed enum**
+  (`note`, `decision`, `bug`, `pattern`, `config`, `summary`, exposed as
+  `mesh_mem.models.VALID_MEMORY_TYPES`). The MCP `save_observation` tool
+  returns a friendly error string and refuses to persist when an LLM
+  passes an out-of-enum value (regression introduced when the v0.2.2
+  PROACTIVE SAVE protocol shipped without a corresponding type guard);
+  the CLI's `--memory-type` choices are derived from the same constant.
+  ``Observation.from_json`` clamps unknown values from peers to
+  ``"note"`` with a WARNING log, preserving forward-compat with peers
+  on a future-extended schema.
+- **README §"Non-interactive smoke from `claude -p`"**: documents the
+  `--permission-mode bypassPermissions` flag required for MCP tool
+  calls in `-p` mode (without it, the first tool call lands in
+  `permission_denials` and the LLM exits with "permission needed").
+  (#34)
+
+### Changed
+
+- **CLI `--memory-type` choices narrowed.** v0.2.2 accepted
+  `note / decision / bugfix / discovery / config / pattern / fact /
+  status / learning`; v0.2.3 accepts only the canonical six listed
+  above. New `mesh-mem save --memory-type bugfix` (or `discovery` /
+  `fact` / `status` / `learning`) is now rejected by argparse.
+  Existing observations on the mesh whose `memory_type` is one of
+  the dropped values continue to display unchanged — this is a
+  write-side restriction, not a read-side one.
+- **`README` Windows host setup marked Experimental** and now opens
+  with a "WSL2 strongly recommended" callout. Native Windows is not
+  in CI; the section remains for the rare cases (e.g. Claude Desktop
+  on Windows) where WSL2 is not an option. (#36 partial — sub-points
+  1, 2, 4 still open.)
+
+### Fixed
+
+- **Issue #31: index subscriber non-JSON payloads no longer log at
+  WARNING.** `gc` broadcast-purge and similar control payloads can
+  arrive on `mem/obs/**` / `mem/tomb/**` with non-Observation bytes;
+  the subscriber now catches `JSONDecodeError` specifically and logs
+  at DEBUG, while other exceptions continue to log at WARNING. A new
+  unit test asserts no WARNING is emitted for non-JSON payloads.
+
 ## [0.2.2] - 2026-05-08
 
 ### Added
