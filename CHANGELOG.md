@@ -10,8 +10,20 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-08
+
 ### Added
 
+- **MCP server now ships a PROACTIVE SAVE protocol** via FastMCP's
+  `instructions=` field. Claude Code (and any MCP host that surfaces
+  `initialize_result.instructions`) now sees the trigger list —
+  decision / bug / discovery / pattern / config / feature /
+  preference / session summary — on connect, so coding agents
+  auto-call `save_observation` without per-project CLAUDE.md tweaks.
+  Previously the tool was registered but had no in-band signal
+  telling agents *when* to use it, so dogfooding fell back to manual
+  saves only. A smoke test pins the protocol so future refactors
+  can't silently drop it.
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) running pre-commit
   and `pytest tests/` on `ubuntu-24.04` with Python 3.12, triggered on
   every PR and on push to `main`. (#22)
