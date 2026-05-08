@@ -20,7 +20,41 @@ from .store import put_observation
 from .store import put_tombstone
 from .store import search_observations
 
-mcp = FastMCP('mesh-mem')
+_INSTRUCTIONS = """\
+mesh-mem provides a Zenoh-backed shared memory across coding agents and hosts.
+Treat this as ACTIVE PROTOCOL — do not wait for the user to ask.
+
+PROACTIVE SAVE — call ``save_observation`` IMMEDIATELY after ANY of these:
+- Architecture / convention / workflow / tool-choice decision is made
+- Bug fixed (include root cause; memory_type="bug")
+- Non-obvious discovery, gotcha, or edge case found
+- Pattern established (naming, structure, approach; memory_type="pattern")
+- Config change with rationale (memory_type="config")
+- Feature implemented with non-obvious approach
+- User confirms a recommendation, expresses a preference, or rejects an approach
+- Session concludes with a clear direction chosen (memory_type="summary")
+
+Self-check after every task: "Did the user or I just make a decision, confirm a
+recommendation, fix a bug, learn something, or establish a convention? If yes →
+``save_observation`` NOW." Skip transient notes, status checks, and routine
+tasks with no new learning.
+
+SEARCH MEMORY (``search_memory`` → ``get_memory``) when:
+- The user asks to recall anything ("remember", "what did we do", "前にやった")
+- Starting work on something that may have prior context
+- The user references a topic you have no context on
+- The user's first message names a feature, file, or problem — search before answering
+
+Identity (agent_family / client_id / pc_id / session_id) is resolved on the
+server side from environment + state. Do not pass these as tool arguments;
+they are intentionally not parameters of ``save_observation``.
+
+Use ``memory_type`` accurately — one of: note, decision, bug, pattern, config,
+summary. Set ``importance`` 1–5 and prefer adding ``subject`` + ``summary`` so
+search results stay scannable.
+"""
+
+mcp = FastMCP('mesh-mem', instructions=_INSTRUCTIONS)
 
 
 @mcp.tool()

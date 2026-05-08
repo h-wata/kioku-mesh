@@ -57,6 +57,27 @@ def test_list_tools_registers_all_four(single_zenohd: Any) -> None:  # noqa: ARG
     assert set(names) >= {'save_observation', 'search_memory', 'delete_memory', 'get_memory_status', 'get_memory'}
 
 
+def test_server_advertises_proactive_instructions(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Verify the MCP server ships a PROACTIVE SAVE protocol.
+
+    Coding agents must auto-trigger ``save_observation`` without per-project
+    CLAUDE.md tweaks. Without this, dogfooding fell back to manual saves only.
+    """
+
+    async def _go() -> str | None:
+        async with Client(mcp) as client:
+            init_result = client.initialize_result
+            if init_result is None:
+                return None
+            return init_result.instructions
+
+    instructions = _run(_go())
+    assert instructions, 'FastMCP must expose initialize().instructions'
+    assert 'PROACTIVE SAVE' in instructions
+    assert 'save_observation' in instructions
+    assert 'search_memory' in instructions
+
+
 def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa: ARG001
     async def _go() -> str:
         async with Client(mcp) as client:
