@@ -202,10 +202,20 @@ PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
 
 ## Windows host setup
 
-mesh-mem development is Linux-first, but Windows 10 / 11 hosts can join the
-Zenoh mesh as peers. The steps below cover the differences from the Linux
-quick start; everything else (identity env vars, CLI commands, MCP
-registration) works the same.
+> **Experimental — WSL2 strongly recommended.** Native Windows is not in CI;
+> the `zenohd` Windows binary, RocksDB plugin, and firewall/service plumbing
+> are user-maintained and may regress without notice. For a Windows
+> workstation, **prefer running mesh-mem inside WSL2** as a regular Linux
+> peer (see Quick start above). Keep WSL2 networking in `mirrored` mode
+> (Windows 11 23H2+) so the WSL guest is reachable from other LAN peers on
+> TCP/7447. The steps below remain for the rare case where a native
+> Windows install is unavoidable (e.g. Claude Desktop on Windows, which
+> cannot reach a WSL2 stdio MCP from the Windows host).
+
+mesh-mem development is Linux-first. Windows 10 / 11 hosts *can* join the
+Zenoh mesh as peers natively; the steps below cover the differences from
+the Linux quick start. Everything else (identity env vars, CLI commands,
+MCP registration) works the same.
 
 ### 1. Install Python and zenohd
 
@@ -319,15 +329,20 @@ mesh-mem search "hello from windows" --project demo --limit 5
 
 ### Known limitations
 
+- **No CI coverage.** mesh-mem's CI runs Linux-only; native Windows
+  regressions are caught by the user at run time, not in pre-merge tests.
+  This is the primary reason the section above is marked Experimental.
 - WSL2: a Windows-host zenohd is reachable from WSL only when the WSL
   network mode is set to `mirrored` (Windows 11 23H2+) or you forward
   TCP/7447 manually. The default `nat` mode hides Windows from the WSL
-  guest.
+  guest. (If you can run mesh-mem inside WSL2 instead, do that.)
 - Search latency on Windows mirrors Linux for the SQLite-first path
   (per-OS layer is just `pathlib`); the v0.2.0 benchmark numbers carry
   over.
-- mesh-mem's CI runs Linux-only; Windows-specific regressions are caught
-  by the user at run time, not in pre-merge tests.
+- Claude Desktop on Windows cannot launch an MCP server that lives inside
+  WSL2 over stdio. If you need Desktop integration on Windows, the native
+  install above is currently the only path — accept the experimental
+  caveats.
 
 ## Continuous Integration
 
@@ -369,6 +384,21 @@ claude mcp add mesh_mem -s user \
   -- /home/USER/.venv/mesh-mem/bin/mesh-mem-mcp
 
 claude mcp list   # expect: mesh_mem: ... - ✓ Connected
+```
+
+#### Non-interactive smoke from `claude -p`
+
+When invoking MCP tools from a non-interactive `claude -p` session, pass
+`--permission-mode bypassPermissions`. In `-p` mode there is no permission
+dialog, so without this flag the first tool call lands in
+`permission_denials` of the JSON output and the LLM exits early with a
+"permission needed" message. The flag does NOT affect interactive
+sessions.
+
+```bash
+claude -p --permission-mode bypassPermissions --output-format json \
+  "mesh-mem MCP の save_observation で 'smoke' を保存して" \
+  | jq '{result, denials:.permission_denials, error:.is_error}'
 ```
 
 ### Claude Desktop
