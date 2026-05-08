@@ -404,6 +404,45 @@ def test_gc_project_filter_skips_global_tomb_scan(
     assert _tomb_keys_for(obs.observation_id) == []
 
 
+def test_gc_project_filter_always_rebuilds_for_correctness(
+    single_zenohd: Any,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project-scoped gc must rebuild even when the SQLite sidecar is non-empty.
+
+    Codex review P1: a partial sidecar (some rows from earlier short-
+    lived runs) would otherwise let ``gc --project ...`` silently miss
+    older project tombstones that legacy ``mem/tomb/**`` would have
+    swept. The fix is to always realign the index from Zenoh before the
+    project-scoped query, dropping the previous ``row_count() == 0``
+    short-circuit.
+    """
+    from mesh_mem.local_index import LocalIndex
+
+    pre = _mk_obs('pre-existing live row', project='proj-pre')
+    store.put_observation(pre)
+    target = _mk_obs('to-be-purged in same proj', project='proj-pre')
+    store.put_observation(target)
+    _mk_aged_tombstone(target)
+    time.sleep(_INGEST_SETTLE)
+
+    rebuild_calls: list[bool] = []
+    orig = LocalIndex.rebuild_from_zenoh
+
+    def tracking_rebuild(self: LocalIndex, session: object) -> Any:
+        rebuild_calls.append(True)
+        return orig(self, session)
+
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
+
+    purged = store.gc_expired_tombstones(retention_days=30, project='proj-pre')
+    assert purged == 1
+    assert rebuild_calls, (
+        'project-scoped gc must always rebuild before the SQLite query (codex P1) '
+        'even when the index already has rows from prior writes'
+    )
+
+
 def test_gc_project_filter_falls_back_when_index_disabled(
     single_zenohd: Any,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,

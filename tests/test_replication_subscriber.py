@@ -297,3 +297,74 @@ def test_cli_main_with_rebuild_flag_runs_rebuild(
     rc = cli_main(['--rebuild', 'save', 'cli-rebuild-on-test', '-p', 'rebuild-policy'])
     assert rc == 0
     assert rebuild_calls, '--rebuild must trigger rebuild_from_zenoh on first init'
+
+
+def test_cli_rebuild_flag_overrides_skip_env(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """``mesh-mem --rebuild`` must win over ambient ``MESH_MEM_SKIP_REBUILD=1``.
+
+    Codex review P2: a shell profile or wrapper script that exports
+    ``MESH_MEM_SKIP_REBUILD=1`` previously blocked ``--rebuild`` because
+    the env var won the policy resolution. Direct user intent on this
+    invocation (the typed flag) must outrank ambient env config.
+    """
+    from mesh_mem.__main__ import main as cli_main
+    from mesh_mem.local_index import LocalIndex
+    from mesh_mem.local_index import RebuildStats
+
+    rebuild_calls: list[bool] = []
+
+    def tracking_rebuild(self: LocalIndex, session: object) -> RebuildStats:
+        rebuild_calls.append(True)
+        return RebuildStats()
+
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
+    monkeypatch.setenv('MESH_MEM_SKIP_REBUILD', '1')
+    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+
+    rc = cli_main(['--rebuild', 'save', 'cli-rebuild-vs-skip', '-p', 'rebuild-policy'])
+    assert rc == 0
+    assert rebuild_calls, '--rebuild must outrank MESH_MEM_SKIP_REBUILD=1 (codex P2)'
+
+
+def test_explicit_override_outranks_force_env(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """An explicit ``set_rebuild_on_init_explicit(False)`` outranks ``MESH_MEM_FORCE_REBUILD=1``.
+
+    Pin the highest-priority slot in the policy resolver: when a caller
+    deliberately sets the explicit override, env vars must not flip it
+    back. Symmetric to the ``--rebuild`` vs SKIP_REBUILD test above.
+    """
+    from mesh_mem.local_index import LocalIndex
+    from mesh_mem.local_index import RebuildStats
+
+    rebuild_calls: list[bool] = []
+
+    def tracking_rebuild(self: LocalIndex, session: object) -> RebuildStats:
+        rebuild_calls.append(True)
+        return RebuildStats()
+
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
+    monkeypatch.setenv('MESH_MEM_FORCE_REBUILD', '1')
+
+    store._reset_index()
+    store.set_rebuild_on_init_explicit(False)
+    store.get_index()
+
+    assert not rebuild_calls, 'explicit override(False) must beat MESH_MEM_FORCE_REBUILD=1'
+
+
+def test_reset_index_clears_explicit_override() -> None:
+    """``_reset_index()`` clears ``_rebuild_explicit_override`` along with the default.
+
+    Tests rely on this so a CLI test that flipped the explicit override
+    does not leak that policy into a subsequent test.
+    """
+    store.set_rebuild_on_init_explicit(True)
+    assert store._rebuild_explicit_override is True  # noqa: SLF001
+    store._reset_index()
+    assert store._rebuild_explicit_override is None  # noqa: SLF001

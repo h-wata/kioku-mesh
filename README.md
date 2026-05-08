@@ -72,9 +72,13 @@ mesh-mem --rebuild status               # explicit per-invocation flag
 MESH_MEM_FORCE_REBUILD=1 mesh-mem search hello   # env-level equivalent
 ```
 
-`MESH_MEM_FORCE_REBUILD=1` outranks `MESH_MEM_SKIP_REBUILD=1` when both
-are set — that combination is unusual but the precedence is fixed so
-scripts can layer overrides without reasoning about resolution order.
+`--rebuild` (the typed flag) outranks **everything else**, including an
+ambient `MESH_MEM_SKIP_REBUILD=1` exported from a shell profile or
+wrapper script — direct user intent on this invocation always wins.
+Below that, `MESH_MEM_FORCE_REBUILD=1` outranks `MESH_MEM_SKIP_REBUILD=1`
+when both env vars are set. Full resolution order: `--rebuild` flag >
+`MESH_MEM_FORCE_REBUILD` > `MESH_MEM_SKIP_REBUILD` > module default
+(`True` for long-lived processes, `False` for the CLI).
 
 ## Multi-agent identity (single host, multiple agents)
 

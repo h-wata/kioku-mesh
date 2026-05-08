@@ -23,6 +23,7 @@ from .store import put_observation
 from .store import put_tombstone
 from .store import search_observations
 from .store import set_rebuild_on_init_default
+from .store import set_rebuild_on_init_explicit
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -282,10 +283,17 @@ def main(argv: list[str] | None = None) -> int:
     converges via the replication subscriber anyway. Default to skipping
     that rebuild and only opt back in via ``--rebuild`` (or
     ``MESH_MEM_FORCE_REBUILD=1`` at the env layer).
+
+    ``--rebuild`` uses the explicit-override channel so it wins over
+    ambient ``MESH_MEM_SKIP_REBUILD=1`` in shell profiles / wrappers —
+    a flag the user typed on this exact invocation must beat env-level
+    ambient config (codex review P2).
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if not args.rebuild:
+    if args.rebuild:
+        set_rebuild_on_init_explicit(True)
+    else:
         set_rebuild_on_init_default(False)
     return args.func(args)
 

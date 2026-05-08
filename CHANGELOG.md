@@ -19,11 +19,12 @@ versions without a migration path until `1.0.0`.
   project. The new fast path queries the local index for
   ``(project, deleted_at)`` rows, then issues exact-key deletes — O(N)
   on the project-scoped subset, not O(M) on the global tombstone count.
-  Triggers a one-time ``rebuild_from_zenoh`` when the SQLite is empty
-  (typical for one-shot CLI on a fresh state dir) so correctness is
-  preserved without warm-up. Falls through to the legacy global scan
-  when the index is disabled (``MESH_MEM_DISABLE_INDEX=1``) or the fast
-  path raises.
+  Always realigns the index via ``rebuild_from_zenoh`` before the SQLite
+  query (codex review P1) — a non-empty sidecar from earlier short-lived
+  CLI runs may be partial, and gating the rebuild on ``row_count() == 0``
+  would silently miss older project tombstones. Falls through to the
+  legacy global scan when the index is disabled
+  (``MESH_MEM_DISABLE_INDEX=1``) or the fast path raises.
 - **SQLite WAL bounded checkpoint policy** (#32-B). Long-running
   ``mesh-mem-mcp`` processes hold the index connection open
   indefinitely, which blocks SQLite's automatic checkpoint from
@@ -62,8 +63,12 @@ versions without a migration path until `1.0.0`.
   (`mesh-mem-mcp`, autonomous agents) keep the previous behavior —
   the rebuild cost amortizes across their uptime.
   Opt back in per-invocation with `mesh-mem --rebuild ...` or via the
-  new `MESH_MEM_FORCE_REBUILD=1` env var. The latter outranks
-  `MESH_MEM_SKIP_REBUILD=1` when both are set.
+  new `MESH_MEM_FORCE_REBUILD=1` env var. ``--rebuild`` uses the new
+  explicit-override channel (codex review P2) so it outranks even an
+  ambient ``MESH_MEM_SKIP_REBUILD=1`` exported from a shell profile or
+  wrapper script — direct user intent on the typed invocation always
+  wins over env-level config. Resolution order: explicit override >
+  ``MESH_MEM_FORCE_REBUILD`` > ``MESH_MEM_SKIP_REBUILD`` > module default.
 
 ## [0.2.3] - 2026-05-08
 

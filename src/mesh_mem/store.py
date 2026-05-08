@@ -49,22 +49,49 @@ _mesh_session_start_time: float | None = None
 # startup. One-shot CLI invocations call ``set_rebuild_on_init_default(False)``
 # from ``__main__.main`` so each ``mesh-mem save/search/...`` does not pay
 # the rebuild_from_zenoh cost on a populated mesh (#38). Env vars
-# MESH_MEM_FORCE_REBUILD=1 and MESH_MEM_SKIP_REBUILD=1 override this default.
+# MESH_MEM_FORCE_REBUILD=1 and MESH_MEM_SKIP_REBUILD=1 override this default,
+# and an explicit ``set_rebuild_on_init_explicit(True/False)`` (the CLI's
+# ``--rebuild`` flag) outranks both env vars.
 _rebuild_on_init_default: bool = True
+_rebuild_explicit_override: bool | None = None
 
 
 def set_rebuild_on_init_default(rebuild: bool) -> None:
     """Override the default rebuild-on-first-init policy in this process.
 
-    Reset by ``_reset_index()`` (test path); production CLI calls this once
-    from ``main`` before any ``get_index()`` invocation.
+    Lowest-priority signal: env vars and the explicit override outrank
+    this. Reset by ``_reset_index()`` (test path); production CLI calls
+    this once from ``main`` before any ``get_index()`` invocation.
     """
     global _rebuild_on_init_default
     _rebuild_on_init_default = rebuild
 
 
+def set_rebuild_on_init_explicit(rebuild: bool | None) -> None:
+    """Explicit user-level override for the rebuild policy (highest priority).
+
+    Wins over both ``MESH_MEM_FORCE_REBUILD`` / ``MESH_MEM_SKIP_REBUILD``
+    env vars and the module default. Direct user intent — for example, the
+    CLI's ``--rebuild`` flag — must always take effect, even in environments
+    that export ``MESH_MEM_SKIP_REBUILD=1`` from a shell profile or wrapper
+    script. Pass ``None`` to clear the override.
+    """
+    global _rebuild_explicit_override
+    _rebuild_explicit_override = rebuild
+
+
 def _should_rebuild_on_init() -> bool:
-    """Resolve the effective rebuild policy for the current process."""
+    """Resolve the effective rebuild policy for the current process.
+
+    Priority (highest to lowest):
+      1. ``set_rebuild_on_init_explicit(True/False)`` — direct user intent.
+      2. ``MESH_MEM_FORCE_REBUILD=1`` env var.
+      3. ``MESH_MEM_SKIP_REBUILD=1`` env var.
+      4. Module-level default (``True`` for long-lived processes; CLI flips
+         to ``False`` so one-shot invocations stay sub-second).
+    """
+    if _rebuild_explicit_override is not None:
+        return _rebuild_explicit_override
     if os.environ.get('MESH_MEM_FORCE_REBUILD', '').strip() == '1':
         return True
     if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() == '1':
@@ -132,11 +159,12 @@ def _reset_index() -> None:
     SQLite file under its own ``MESH_MEM_STATE_DIR`` tmp_path. Production
     code does not call this.
 
-    Also restores ``_rebuild_on_init_default`` to its module default so a
-    test that exercised the CLI (which flips the flag to False) does not
-    leak that policy into the next test.
+    Also restores ``_rebuild_on_init_default`` and the explicit override
+    to their module defaults so a test that exercised the CLI (which
+    flips the flag to False or sets the explicit override) does not leak
+    that policy into the next test.
     """
-    global _index, _rebuild_on_init_default
+    global _index, _rebuild_on_init_default, _rebuild_explicit_override
     _reset_subscribers()
     if _index is not None:
         try:
@@ -145,6 +173,7 @@ def _reset_index() -> None:
             pass
     _index = None
     _rebuild_on_init_default = True
+    _rebuild_explicit_override = None
 
 
 class QueryErrorReply(Exception):
@@ -677,11 +706,16 @@ def gc_expired_tombstones(
     (conservative — never delete on ambiguity).
 
     Project-scoped path (``project != ''``) uses the local SQLite index
-    (#32). On a fresh state dir the index is empty, so we trigger a one-
-    time ``rebuild_from_zenoh`` before the SQLite query — the rebuild is
-    idempotent (long-lived processes already aligned by the subscriber
-    skip it via the ``row_count() == 0`` gate). This avoids the ~60s
-    full ``mem/tomb/**`` scan that the legacy global path paid.
+    (#32). gc is a batch operation, so correctness outranks the rebuild
+    cost — we **always** ``rebuild_from_zenoh`` before the SQLite query
+    rather than trusting that a non-empty sidecar reflects the full mesh.
+    A previous ``row_count() == 0`` gate (codex review P1) silently
+    missed older tombstones whenever the index had been partially
+    populated by short-lived runs that did not align with zenoh. The
+    rebuild is idempotent — repeat callers within the same process pay
+    for two ``mem/{obs,tomb}/**`` scans, but no per-id Zenoh fallback,
+    so total cost is still well below the legacy ``_list_tombstones``
+    + per-id ``find_observation_by_id`` path on populated meshes.
 
     Returns:
         Count of tombstones purged. The matching observation key is also
@@ -698,8 +732,7 @@ def gc_expired_tombstones(
         idx = get_index()
         if not idx.disabled:
             try:
-                if idx.row_count() == 0:
-                    idx.rebuild_from_zenoh(get_session())
+                idx.rebuild_from_zenoh(get_session())
                 return _gc_via_sqlite_index(idx, cutoff_iso, project)
             except Exception as e:  # noqa: BLE001
                 log.warning(
