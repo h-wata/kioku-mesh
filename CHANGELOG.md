@@ -10,6 +10,30 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Performance
+
+- **Project-scoped gc switches to the SQLite local index** (#32-A).
+  ``gc_expired_tombstones(project=...)`` previously enumerated the entire
+  Zenoh ``mem/tomb/**`` namespace (~60s on production data with months
+  of test residue) regardless of how few tombstones actually matched the
+  project. The new fast path queries the local index for
+  ``(project, deleted_at)`` rows, then issues exact-key deletes — O(N)
+  on the project-scoped subset, not O(M) on the global tombstone count.
+  Triggers a one-time ``rebuild_from_zenoh`` when the SQLite is empty
+  (typical for one-shot CLI on a fresh state dir) so correctness is
+  preserved without warm-up. Falls through to the legacy global scan
+  when the index is disabled (``MESH_MEM_DISABLE_INDEX=1``) or the fast
+  path raises.
+- **SQLite WAL bounded checkpoint policy** (#32-B). Long-running
+  ``mesh-mem-mcp`` processes hold the index connection open
+  indefinitely, which blocks SQLite's automatic checkpoint from
+  completing the truncate phase — observed WAL grew to 130 MB (≈ same
+  size as the main DB) on a host that had been writing for weeks.
+  ``LocalIndex`` now issues an explicit
+  ``PRAGMA wal_checkpoint(TRUNCATE)`` every 256 upserts and once on
+  ``close()``, keeping the WAL bounded without introducing a
+  background thread.
+
 ### Documentation
 
 - **README Windows quick start refreshed** (#36): drop the misleading

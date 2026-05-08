@@ -633,6 +633,30 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
     return (obs_removed, bool(tomb_keys))
 
 
+def _gc_via_sqlite_index(idx: LocalIndex, cutoff_iso: str, project: str) -> int:
+    """Project-scoped gc that drives deletes from the local SQLite index.
+
+    Bypasses the global ``mem/tomb/**`` scan and the per-id Zenoh fallback
+    that the legacy path pays. Each obs+tomb is removed by the exact key
+    expression derived from the cached payload, so the cost is O(N) on
+    the project-scoped subset (#32). Orphan tombstones (no obs row) are
+    silently skipped — same semantic as the legacy path's
+    ``log.warning('skip orphan tomb ... under project filter')`` branch.
+    """
+    purged = 0
+    for obs_id, payload_json in idx.list_tombstoned_obs_in_project(project, cutoff_iso):
+        try:
+            obs = Observation.from_json(payload_json)
+        except Exception as e:  # noqa: BLE001
+            log.warning('gc fast-path skip malformed payload for %s: %s', obs_id, e)
+            continue
+        delete_key(obs.key_expr)
+        delete_key(obs.tombstone_key_expr())
+        idx.physical_delete(obs_id)
+        purged += 1
+    return purged
+
+
 def gc_expired_tombstones(
     retention_days: int = 30,
     now: datetime | None = None,
@@ -652,6 +676,13 @@ def gc_expired_tombstones(
     Tombstones whose ``deleted_at`` cannot be parsed are left in place
     (conservative — never delete on ambiguity).
 
+    Project-scoped path (``project != ''``) uses the local SQLite index
+    (#32). On a fresh state dir the index is empty, so we trigger a one-
+    time ``rebuild_from_zenoh`` before the SQLite query — the rebuild is
+    idempotent (long-lived processes already aligned by the subscriber
+    skip it via the ``row_count() == 0`` gate). This avoids the ~60s
+    full ``mem/tomb/**`` scan that the legacy global path paid.
+
     Returns:
         Count of tombstones purged. The matching observation key is also
         deleted when present, but the return value counts tomb sweeps only.
@@ -661,6 +692,21 @@ def gc_expired_tombstones(
     if now is None:
         now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=retention_days)
+    cutoff_iso = cutoff.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    if project:
+        idx = get_index()
+        if not idx.disabled:
+            try:
+                if idx.row_count() == 0:
+                    idx.rebuild_from_zenoh(get_session())
+                return _gc_via_sqlite_index(idx, cutoff_iso, project)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    'gc project-scoped fast path failed (%s); falling through to global Zenoh scan',
+                    e,
+                )
+
     purged = 0
     for tomb_key, tomb in _list_tombstones():
         deleted_dt = _parse_iso(tomb.deleted_at)

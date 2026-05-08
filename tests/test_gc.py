@@ -364,3 +364,65 @@ def test_gc_force_id_with_project_ignores_project(single_zenohd: Any) -> None:  
     time.sleep(_INGEST_SETTLE)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #32 — project-scoped gc fast path via SQLite index
+# ---------------------------------------------------------------------------
+
+
+def test_gc_project_filter_skips_global_tomb_scan(
+    single_zenohd: Any,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gc --project X must NOT enumerate the full mem/tomb/** Zenoh namespace (#32).
+
+    Spy on ``_list_tombstones`` and assert it is *not* called when the
+    SQLite-backed fast path can answer the project-scoped query. This
+    is what unlocks O(N) on the project subset instead of O(M) on the
+    global tombstone count.
+    """
+    obs = _mk_obs('proj-X tombed', project='proj-fast')
+    store.put_observation(obs)
+    _mk_aged_tombstone(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    list_tomb_calls: list[bool] = []
+    real_list = store._list_tombstones
+
+    def spy() -> Any:
+        list_tomb_calls.append(True)
+        return real_list()
+
+    monkeypatch.setattr(store, '_list_tombstones', spy)
+
+    purged = store.gc_expired_tombstones(retention_days=30, project='proj-fast')
+    assert purged == 1
+    assert not list_tomb_calls, 'project-scoped gc must not invoke _list_tombstones (full mem/tomb/** scan)'
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(obs.observation_id)
+    assert _tomb_keys_for(obs.observation_id) == []
+
+
+def test_gc_project_filter_falls_back_when_index_disabled(
+    single_zenohd: Any,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gc fast path silently falls through to the global Zenoh scan when the index is disabled.
+
+    With ``MESH_MEM_DISABLE_INDEX=1`` the SQLite-fast path cannot run;
+    correctness is preserved by the legacy ``_list_tombstones`` sweep.
+    """
+    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    store._reset_index()  # reopen as disabled
+
+    obs = _mk_obs('disabled-index gc fallback', project='proj-fb')
+    store.put_observation(obs)
+    _mk_aged_tombstone(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    purged = store.gc_expired_tombstones(retention_days=30, project='proj-fb')
+    assert purged == 1
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(obs.observation_id)
+    assert _tomb_keys_for(obs.observation_id) == []

@@ -42,6 +42,14 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+# Issue #32: long-running processes (mesh-mem-mcp) keep the index connection
+# open indefinitely, which blocks SQLite's automatic WAL checkpoint from
+# completing the truncate phase. The WAL therefore grows unbounded — observed
+# 130 MB on a host that had been writing for weeks. Issue an explicit
+# ``PRAGMA wal_checkpoint(TRUNCATE)`` every N upserts and once at close so
+# the WAL stays bounded without introducing a checkpoint thread.
+_CHECKPOINT_EVERY_N_UPSERTS = 256
+
 
 @dataclasses.dataclass
 class RebuildStats:
@@ -144,6 +152,9 @@ class LocalIndex:
         self._disabled = disabled
         self._conn: sqlite3.Connection | None = conn
         self._lock = threading.Lock()
+        # Counter for the periodic ``PRAGMA wal_checkpoint(TRUNCATE)`` (#32).
+        # Reset every checkpoint and on close.
+        self._upserts_since_checkpoint = 0
 
     @property
     def db_path(self) -> str:
@@ -174,6 +185,24 @@ class LocalIndex:
             return cls(db_path=path, disabled=True)
         return cls(db_path=path, disabled=False, conn=conn)
 
+    def _maybe_checkpoint_locked(self) -> None:
+        """Issue ``PRAGMA wal_checkpoint(TRUNCATE)`` every N upserts (#32).
+
+        Caller must hold ``self._lock``. Errors are logged at DEBUG (the
+        checkpoint is a housekeeping pragma, not a correctness step) so a
+        transient failure cannot stall the write path.
+        """
+        if self._conn is None:
+            return
+        self._upserts_since_checkpoint += 1
+        if self._upserts_since_checkpoint < _CHECKPOINT_EVERY_N_UPSERTS:
+            return
+        self._upserts_since_checkpoint = 0
+        try:
+            self._conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        except sqlite3.Error as e:
+            log.debug('LocalIndex.wal_checkpoint failed: %s', e)
+
     def upsert(self, obs: Observation) -> None:
         """Insert or replace ``obs`` in the index. No-op when disabled."""
         if self._disabled or self._conn is None:
@@ -192,6 +221,7 @@ class LocalIndex:
             try:
                 self._conn.execute(_UPSERT_SQL, row)
                 self._conn.commit()
+                self._maybe_checkpoint_locked()
             except sqlite3.Error as e:
                 log.warning('LocalIndex.upsert failed for %s: %s', obs.observation_id, e)
 
@@ -315,6 +345,35 @@ class LocalIndex:
                 self._conn.commit()
             except sqlite3.Error as e:
                 log.warning('LocalIndex.physical_delete failed for %s: %s', observation_id, e)
+
+    def list_tombstoned_obs_in_project(
+        self,
+        project: str,
+        cutoff_iso: str,
+    ) -> list[tuple[str, str]]:
+        """Return ``(observation_id, payload_json)`` for project-scoped tombs older than cutoff.
+
+        Drives the project-scoped gc fast path (#32): O(N) on the project
+        subset via the ``(project, created_at)`` secondary index plus a
+        deleted_at scan, instead of the legacy ``mem/tomb/**`` Zenoh full
+        scan that paid O(M) on the global tombstone count. Returns the
+        payload alongside the id so the caller can derive the exact key
+        expression for surgical deletes without another Zenoh round-trip.
+        """
+        if self._disabled or self._conn is None:
+            return []
+        sql = (
+            'SELECT observation_id, payload_json '
+            'FROM obs_index '
+            'WHERE project = ? AND deleted_at IS NOT NULL AND deleted_at < ?'
+        )
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, (project, cutoff_iso)).fetchall()
+            except sqlite3.Error as e:
+                log.warning('list_tombstoned_obs_in_project failed: %s', e)
+                return []
+        return [(row[0], row[1]) for row in rows]
 
     def find_by_id(self, observation_id: str, include_deleted: bool = False) -> Observation | None:
         """Return the observation with id ``observation_id`` or None.
@@ -440,13 +499,22 @@ class LocalIndex:
         return RebuildStats(added=added, marked_deleted=marked_deleted, unchanged=unchanged)
 
     def close(self) -> None:
-        """Close the underlying connection. Safe to call multiple times."""
+        """Close the underlying connection. Safe to call multiple times.
+
+        Issues a final ``PRAGMA wal_checkpoint(TRUNCATE)`` so the WAL does
+        not survive the process at full size on disk (#32).
+        """
         if self._conn is None:
             return
         with self._lock:
             try:
+                try:
+                    self._conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                except sqlite3.Error as e:
+                    log.debug('LocalIndex.close wal_checkpoint failed: %s', e)
                 self._conn.close()
             except sqlite3.Error as e:
                 log.warning('LocalIndex.close failed: %s', e)
             finally:
                 self._conn = None
+                self._upserts_since_checkpoint = 0

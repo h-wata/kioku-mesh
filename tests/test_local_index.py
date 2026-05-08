@@ -446,3 +446,123 @@ def test_rebuild_from_zenoh_handles_partial_index(tmp_path: Path) -> None:
         assert new_obs.observation_id in ids
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #32 — project-scoped tombstone enumeration + WAL checkpoint
+# ---------------------------------------------------------------------------
+
+
+def test_list_tombstoned_obs_in_project_isolates_by_project(tmp_path: Path) -> None:
+    """Project filter restricts results to matching ``project`` column.
+
+    Validates the query that drives ``store.gc_expired_tombstones`` fast
+    path (#32) — wrong-project tombs must not appear in the result set.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'list_tomb.db'))
+    try:
+        live = _mk_obs('live in proj-A', project='proj-a')
+        idx.upsert(live)
+
+        tombed_a = _mk_obs('tombed in proj-A', project='proj-a')
+        idx.upsert(tombed_a)
+        idx.mark_deleted(tombed_a.observation_id, '2026-01-01T00:00:00.000000Z')
+
+        tombed_b = _mk_obs('tombed in proj-B', project='proj-b')
+        idx.upsert(tombed_b)
+        idx.mark_deleted(tombed_b.observation_id, '2026-01-01T00:00:00.000000Z')
+
+        cutoff = '2026-04-01T00:00:00.000000Z'
+
+        a_rows = idx.list_tombstoned_obs_in_project('proj-a', cutoff)
+        a_ids = {row[0] for row in a_rows}
+        assert a_ids == {tombed_a.observation_id}, f'proj-a result must contain only tombed_a, got {a_ids}'
+
+        b_rows = idx.list_tombstoned_obs_in_project('proj-b', cutoff)
+        b_ids = {row[0] for row in b_rows}
+        assert b_ids == {tombed_b.observation_id}
+
+        empty = idx.list_tombstoned_obs_in_project('proj-c', cutoff)
+        assert empty == []
+    finally:
+        idx.close()
+
+
+def test_list_tombstoned_obs_in_project_respects_cutoff(tmp_path: Path) -> None:
+    """Tombs newer than cutoff must NOT appear in the result set."""
+    idx = LocalIndex.connect(str(tmp_path / 'list_tomb_cutoff.db'))
+    try:
+        old = _mk_obs('aged tomb', project='p')
+        idx.upsert(old)
+        idx.mark_deleted(old.observation_id, '2026-01-01T00:00:00.000000Z')
+
+        fresh = _mk_obs('fresh tomb', project='p')
+        idx.upsert(fresh)
+        idx.mark_deleted(fresh.observation_id, '2026-05-01T00:00:00.000000Z')
+
+        cutoff = '2026-03-01T00:00:00.000000Z'
+        rows = idx.list_tombstoned_obs_in_project('p', cutoff)
+        ids = {row[0] for row in rows}
+        assert ids == {old.observation_id}, 'fresh tomb (after cutoff) must be excluded'
+    finally:
+        idx.close()
+
+
+def test_list_tombstoned_obs_in_project_skips_live_rows(tmp_path: Path) -> None:
+    """Live rows (``deleted_at IS NULL``) must not appear regardless of project."""
+    idx = LocalIndex.connect(str(tmp_path / 'list_tomb_live.db'))
+    try:
+        live = _mk_obs('still live', project='p')
+        idx.upsert(live)
+
+        rows = idx.list_tombstoned_obs_in_project('p', '2099-01-01T00:00:00.000000Z')
+        assert rows == []
+    finally:
+        idx.close()
+
+
+def test_list_tombstoned_obs_in_project_returns_empty_when_disabled() -> None:
+    """Disabled instance returns empty list without touching SQLite."""
+    idx = LocalIndex(db_path='', disabled=True)
+    assert idx.list_tombstoned_obs_in_project('any', '2026-01-01T00:00:00.000000Z') == []
+
+
+def test_close_runs_wal_checkpoint(tmp_path: Path) -> None:
+    """``close()`` truncates the WAL so the file does not stay full on disk (#32).
+
+    Drive enough upserts to grow the WAL, then close — afterwards the WAL
+    file should be small (or absent), proving the explicit
+    ``PRAGMA wal_checkpoint(TRUNCATE)`` ran.
+    """
+    db_path = tmp_path / 'wal_close.db'
+    idx = LocalIndex.connect(str(db_path))
+    for i in range(50):
+        idx.upsert(_mk_obs(f'wal-fill-{i}', project='wal-test'))
+    wal_path = tmp_path / 'wal_close.db-wal'
+    # The WAL file may or may not exist mid-flight (auto-checkpoint can land
+    # before our manual close); the assertion that matters is post-close.
+    idx.close()
+    if wal_path.exists():
+        assert (
+            wal_path.stat().st_size == 0
+        ), f'WAL must be truncated to zero by close(), got {wal_path.stat().st_size} bytes'
+
+
+def test_periodic_wal_checkpoint_resets_counter(tmp_path: Path) -> None:
+    """The internal upsert counter rolls over after the configured cadence (#32).
+
+    Drives more than ``_CHECKPOINT_EVERY_N_UPSERTS`` upserts and asserts
+    the counter wrapped — proves the periodic checkpoint path actually
+    fired without depending on filesystem timing of WAL truncation.
+    """
+    from mesh_mem.local_index import _CHECKPOINT_EVERY_N_UPSERTS
+
+    idx = LocalIndex.connect(str(tmp_path / 'wal_cadence.db'))
+    try:
+        for i in range(_CHECKPOINT_EVERY_N_UPSERTS + 5):
+            idx.upsert(_mk_obs(f'cadence-{i}', project='cadence-test'))
+        # Counter resets to 0 at the checkpoint boundary, then increments
+        # by the trailing upserts (5 here).
+        assert idx._upserts_since_checkpoint == 5  # noqa: SLF001
+    finally:
+        idx.close()
