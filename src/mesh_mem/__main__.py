@@ -22,6 +22,7 @@ from .store import physical_delete_observation
 from .store import put_observation
 from .store import put_tombstone
 from .store import search_observations
+from .store import set_rebuild_on_init_default
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -177,6 +178,16 @@ def _cmd_gc(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='mesh-mem', description='mesh-mem CLI')
     parser.add_argument('--version', action='version', version=f'mesh-mem {__version__}')
+    parser.add_argument(
+        '--rebuild',
+        action='store_true',
+        help=(
+            '初回起動時に zenoh から SQLite index を再構築する。'
+            'CLI は one-shot 想定でデフォルト skip (#38)。'
+            'index が空の状態で search したい場合や CI 検証時に明示指定する。'
+            '環境変数 MESH_MEM_FORCE_REBUILD=1 でも同等。'
+        ),
+    )
     sub = parser.add_subparsers(dest='command', required=True)
 
     _MEMORY_TYPES = sorted(VALID_MEMORY_TYPES)  # noqa: N806
@@ -264,9 +275,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse argv and dispatch to the matching subcommand handler."""
+    """Parse argv and dispatch to the matching subcommand handler.
+
+    The CLI is a one-shot process; the per-startup ``rebuild_from_zenoh``
+    scan adds ~15s on a populated mesh (#38) and the local SQLite index
+    converges via the replication subscriber anyway. Default to skipping
+    that rebuild and only opt back in via ``--rebuild`` (or
+    ``MESH_MEM_FORCE_REBUILD=1`` at the env layer).
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if not args.rebuild:
+        set_rebuild_on_init_default(False)
     return args.func(args)
 
 

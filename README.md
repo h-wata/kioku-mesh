@@ -48,6 +48,34 @@ fewer results until peer alignment completes (typically 5-10 s, up
 to ~3 min for cold-era data). Use `mesh-mem status` to check
 readiness (`mesh_ready: yes` when alignment is complete).
 
+### CLI startup: `--rebuild` and `MESH_MEM_FORCE_REBUILD`
+
+`mesh-mem` (the CLI) is a one-shot process. Since v0.2.4 it **skips**
+the startup `rebuild_from_zenoh` scan by default — on a populated mesh
+that scan can add ~15 s to *every* CLI invocation, which made interactive
+use unworkable (#38). The local SQLite index still converges via the
+replication subscriber while the process is running, so `save` /
+`search` / `get-memory` / `delete` / `status` all see live writes from
+this and other peers.
+
+Long-running processes (`mesh-mem-mcp`, autonomous agents) keep the
+default — they pay the rebuild cost once at startup, which is exactly
+what the index is designed for.
+
+Opt back in for a single CLI run when you need the index aligned with
+the on-disk zenoh storage (e.g., after the SQLite sidecar has been
+deleted, or before a one-shot `gc --project ...` against historical
+data on a peer this host never received via replication):
+
+```bash
+mesh-mem --rebuild status               # explicit per-invocation flag
+MESH_MEM_FORCE_REBUILD=1 mesh-mem search hello   # env-level equivalent
+```
+
+`MESH_MEM_FORCE_REBUILD=1` outranks `MESH_MEM_SKIP_REBUILD=1` when both
+are set — that combination is unusual but the precedence is fixed so
+scripts can layer overrides without reasoning about resolution order.
+
 ## Multi-agent identity (single host, multiple agents)
 
 A single PC often runs several agents simultaneously — two Claude Code

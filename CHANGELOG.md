@@ -10,6 +10,22 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- **CLI skips `rebuild_from_zenoh` on startup by default** (#38). The
+  one-shot `mesh-mem` process previously paid the full ~15 s zenoh
+  scan + JSON-parse + SQLite-membership-check on every invocation
+  against a populated mesh, which made interactive use unworkable on
+  busy peers (~117k records observed). The local SQLite index still
+  converges via the replication subscriber within the process
+  lifetime, so `save` / `search` / `get-memory` / `delete` / `status`
+  see live writes without the rebuild. Long-running processes
+  (`mesh-mem-mcp`, autonomous agents) keep the previous behavior —
+  the rebuild cost amortizes across their uptime.
+  Opt back in per-invocation with `mesh-mem --rebuild ...` or via the
+  new `MESH_MEM_FORCE_REBUILD=1` env var. The latter outranks
+  `MESH_MEM_SKIP_REBUILD=1` when both are set.
+
 ## [0.2.3] - 2026-05-08
 
 ### Added

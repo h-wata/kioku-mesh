@@ -44,6 +44,33 @@ _subscribers: list | None = None
 _mesh_first_probe_success: float | None = None
 _mesh_session_start_time: float | None = None
 
+# Default rebuild-on-init policy. Long-lived processes (mesh-mem-mcp) keep
+# the default ``True`` so the local SQLite index aligns with zenoh once at
+# startup. One-shot CLI invocations call ``set_rebuild_on_init_default(False)``
+# from ``__main__.main`` so each ``mesh-mem save/search/...`` does not pay
+# the rebuild_from_zenoh cost on a populated mesh (#38). Env vars
+# MESH_MEM_FORCE_REBUILD=1 and MESH_MEM_SKIP_REBUILD=1 override this default.
+_rebuild_on_init_default: bool = True
+
+
+def set_rebuild_on_init_default(rebuild: bool) -> None:
+    """Override the default rebuild-on-first-init policy in this process.
+
+    Reset by ``_reset_index()`` (test path); production CLI calls this once
+    from ``main`` before any ``get_index()`` invocation.
+    """
+    global _rebuild_on_init_default
+    _rebuild_on_init_default = rebuild
+
+
+def _should_rebuild_on_init() -> bool:
+    """Resolve the effective rebuild policy for the current process."""
+    if os.environ.get('MESH_MEM_FORCE_REBUILD', '').strip() == '1':
+        return True
+    if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() == '1':
+        return False
+    return _rebuild_on_init_default
+
 
 def get_index() -> LocalIndex:
     """Return the cached LocalIndex sidecar, opening it on first use.
@@ -54,10 +81,14 @@ def get_index() -> LocalIndex:
     disabled (``MESH_MEM_DISABLE_INDEX=1``) — in that case the returned
     instance is a no-op so callers do not need to branch.
 
-    Phase 4: on first init, runs rebuild_from_zenoh then starts the
-    replication subscriber (unless MESH_MEM_DISABLE_INDEX=1 or
-    MESH_MEM_SKIP_REBUILD=1 for the rebuild step). Zenoh errors are
-    logged and swallowed so a missing router cannot block reads/writes.
+    Phase 4: on first init, optionally runs ``rebuild_from_zenoh`` then
+    starts the replication subscriber. The rebuild gate is the policy
+    returned by :func:`_should_rebuild_on_init` — long-lived processes
+    (default ``True``) align once at startup, while one-shot CLI invocations
+    skip the ~15s scan on a populated mesh (#38). Set
+    ``MESH_MEM_FORCE_REBUILD=1`` to opt back in for a CLI run, or pass
+    ``--rebuild`` to ``mesh-mem``. Zenoh errors are logged and swallowed
+    so a missing router cannot block reads/writes.
     """
     global _index, _subscribers
     if _index is None:
@@ -65,7 +96,7 @@ def get_index() -> LocalIndex:
         if not _index.disabled:
             try:
                 session = get_session()
-                if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() != '1':
+                if _should_rebuild_on_init():
                     try:
                         stats = _index.rebuild_from_zenoh(session)
                         log.info('LocalIndex rebuild: %s', stats)
@@ -100,8 +131,12 @@ def _reset_index() -> None:
     Used by tests via ``conftest.py`` to ensure each test gets a fresh
     SQLite file under its own ``MESH_MEM_STATE_DIR`` tmp_path. Production
     code does not call this.
+
+    Also restores ``_rebuild_on_init_default`` to its module default so a
+    test that exercised the CLI (which flips the flag to False) does not
+    leak that policy into the next test.
     """
-    global _index
+    global _index, _rebuild_on_init_default
     _reset_subscribers()
     if _index is not None:
         try:
@@ -109,6 +144,7 @@ def _reset_index() -> None:
         except Exception:  # noqa: BLE001
             pass
     _index = None
+    _rebuild_on_init_default = True
 
 
 class QueryErrorReply(Exception):
