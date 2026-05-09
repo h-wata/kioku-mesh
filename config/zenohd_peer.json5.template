@@ -1,24 +1,45 @@
-// zenoh-mem: N-peer mesh router config template
+// zenoh-mem: N-peer mesh router config template (hub-spoke pattern)
 //
 // Copy this file once per peer and replace the placeholders below. The
 // zenohd_home.json5 / zenohd_office.json5 configs are the 2-peer instance of
 // the same pattern; use this template when you want 3+ peers without
 // hand-rolling each side from scratch.
 //
+// Topology recommendation: 1 hub + N spokes.
+//   - Pick one peer (typically the always-on home machine) as the hub.
+//   - The hub `listen`s on every IP that any spoke can reach (LAN, Tailscale,
+//     VPN — aggregate them all). Spokes never need to be reachable from each
+//     other.
+//   - Each spoke `connect`s to the hub ONLY. Zenoh router transit lets two
+//     spokes talk through the hub without a direct link, so adding a new
+//     spoke does NOT require touching any existing peer's config or
+//     restarting them. Verified empirically 2026-05-10 with 3-PC test
+//     (see docs/poc-reports/topology-2026-05-10.md).
+//
 // Placeholders:
-//   {SELF_IP}   — this peer's LAN IP (the one OTHER peers will dial)
-//   {PEER_N_IP} — every OTHER peer in the mesh, one entry each
+//   {SELF_IP} — this peer's LAN IP (the one the hub will accept incoming on,
+//               or the IP MCP clients on the same host will dial)
+//   {HUB_IP}  — hub peer's IP that THIS peer can reach
 //
 // Operational notes:
-//   - 127.0.0.1 stays in `listen` so MCP clients on the same host can connect.
-//   - `connect.endpoints` lists every peer EXCEPT this one. Zenoh's link layer
-//     deduplicates the resulting graph; redundant edges are fine.
+//   - 127.0.0.1 stays in `listen` so MCP clients on the same host connect via
+//     loopback. EXCEPTION on WSL2: the loopback is shared with the Windows
+//     host (mirrored networking), so 127.0.0.1:7447 may already be bound;
+//     drop the loopback line and pick a non-conflicting port (e.g. 7448) for
+//     the LAN listen instead. See add-mesh-peer skill §WSL2.
+//   - When THIS peer is itself the hub, replace `connect.endpoints` with [] —
+//     the hub doesn't dial anyone. Spokes dial in.
 //   - storage / replication blocks must match across all peers byte-for-byte:
 //     mismatched `interval` / `sub_intervals` / `hot` / `warm` will silently
 //     prevent digest convergence.
 //   - Set `ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"` before
 //     starting zenohd, and ensure the parent directory exists.
-//   - Open TCP/7447 between every peer pair. See README §Multi-host mesh setup.
+//   - Open TCP/7447 (or your chosen port) from every spoke to the hub. The
+//     reverse direction is not required (Zenoh sessions are bidirectional
+//     once the spoke dials in). See README §Multi-host mesh setup.
+//   - Replication digest convergence requires per-peer clock skew < 500 ms.
+//     Run NTP/chrony on every host. WSL2 hosts often need a manual `step`
+//     after Windows hibernation — see add-mesh-peer skill §WSL2.
 
 {
   mode: "router",
@@ -31,13 +52,11 @@
     ],
   },
 
-  // Every OTHER peer. Drop unused lines if your mesh is smaller.
+  // Spoke peer: dial the hub only. Zenoh router transit handles the rest.
+  // (If THIS peer is the hub, set `endpoints: []` instead.)
   connect: {
     endpoints: [
-      "tcp/{PEER_1_IP}:7447",
-      "tcp/{PEER_2_IP}:7447",
-      "tcp/{PEER_3_IP}:7447",
-      "tcp/{PEER_4_IP}:7447",
+      "tcp/{HUB_IP}:7447",
     ],
   },
 
