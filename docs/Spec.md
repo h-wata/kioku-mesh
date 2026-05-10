@@ -4,7 +4,15 @@
 
 関連図:
 
-- [mesh-mem-state-transitions.drawio](./mesh-mem-state-transitions.drawio): Observation のライフサイクルと SQLite index 同期・rebuild の状態遷移図。
+- draw.io 編集元: [mesh-mem-state-transitions.drawio](./mesh-mem-state-transitions.drawio)
+
+### Observation lifecycle
+
+![Observation lifecycle](./mesh-mem-observation-lifecycle.svg)
+
+### SQLite sidecar index sync
+
+![SQLite sidecar index sync](./mesh-mem-index-sync.svg)
 
 ## 1. 目的と前提
 
