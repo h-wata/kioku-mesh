@@ -10,6 +10,35 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **`mesh-mem gc --by-pc-id PCID [--session-prefix X] [--execute] [--yes]`**:
+  bulk physical purge of every observation that was saved under a given
+  ``pc_id``, optionally narrowed by ``session_id`` prefix. Use case: a
+  benchmark / smoke run on a peer host saved tens of thousands of
+  synthetic observations under throwaway sessions and they are now
+  flooding the mesh. ``--execute`` is required to actually delete; the
+  default is dry-run with a per-session histogram. With ``--execute`` the
+  CLI also gates on an interactive ``yes`` prompt (skip with ``--yes``
+  for CI / scripted use; non-interactive ``--execute`` without ``--yes``
+  is rejected with exit 2 so an operator cannot pipe the command into a
+  background job and have it auto-destroy). For every matched obs the
+  mirrored ``mem/tomb/...`` slot is also exact-key deleted, so legitimate
+  tombstones under the same ``pc_id`` are cleaned up at O(1)/match
+  without falling back to the ``mem/tomb/**`` global sweep that
+  ``--force-id`` performs (the sweep stalls on ``GET_TIMEOUT`` past 30k
+  tombstones). Backed by ``store.scan_obs_by_pc_id`` +
+  ``store.execute_bulk_purge``.
+
+### Changed
+
+- **One-off migration scripts moved under ``scripts/migrations/``**.
+  ``cleanup_legacy_memory_types.py`` (v0.2.2 → v0.2.3 enum migration)
+  is operator tooling that should not be shipped as a CLI subcommand,
+  but should still travel with the repo for any peer that has not yet
+  migrated. The ad-hoc ``scripts/purge_observations_by_pc_id.py`` is
+  removed in favor of the CLI flag above.
+
 ### Performance
 
 - **Project-scoped gc switches to the SQLite local index** (#32-A).
