@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">Observation lifecycle</title>
+  <desc id="desc">State transition diagram for mesh-mem observations from input to creation, Zenoh storage, search visibility, tombstone deletion, and physical purge.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#495057" />
+    </marker>
+    <style>
+      .title { font: 700 22px sans-serif; fill: #212529; }
+      .box-title { font: 700 14px sans-serif; fill: #212529; }
+      .box-text { font: 13px sans-serif; fill: #343a40; }
+      .edge-text { font: 12px sans-serif; fill: #495057; }
+      .note-text { font: 13px sans-serif; fill: #343a40; }
+      .edge { stroke: #495057; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1120" height="560" fill="#ffffff" />
+  <text class="title" x="40" y="48">Observation lifecycle</text>
+
+  <g transform="translate(40 110)">
+    <rect width="180" height="70" rx="6" fill="#f8f9fa" stroke="#495057" />
+    <text class="box-title" x="18" y="28">Draft / input</text>
+    <text class="box-text" x="18" y="50">CLI or MCP tool args</text>
+  </g>
+
+  <g transform="translate(280 105)">
+    <rect width="220" height="80" rx="6" fill="#e7f5ff" stroke="#1c7ed6" />
+    <text class="box-title" x="18" y="26">Observation created</text>
+    <text class="box-text" x="18" y="48">32-char id, UTC created_at</text>
+    <text class="box-text" x="18" y="66">server-side identity</text>
+  </g>
+
+  <g transform="translate(570 105)">
+    <rect width="260" height="80" rx="6" fill="#ebfbee" stroke="#2b8a3e" />
+    <text class="box-title" x="18" y="26">Zenoh put</text>
+    <text class="box-text" x="18" y="48">mem/obs/{agent}/{client}</text>
+    <text class="box-text" x="18" y="66">/{pc}/{session}/{id}</text>
+  </g>
+
+  <g transform="translate(900 105)">
+    <rect width="190" height="80" rx="6" fill="#fff9db" stroke="#f08c00" />
+    <text class="box-title" x="18" y="26">Visible in search</text>
+    <text class="box-text" x="18" y="48">SQLite index row exists</text>
+    <text class="box-text" x="18" y="66">deleted_at is NULL</text>
+  </g>
+
+  <g transform="translate(900 280)">
+    <rect width="190" height="70" rx="6" fill="#fff0f6" stroke="#c2255c" />
+    <text class="box-title" x="18" y="28">Tombstone published</text>
+    <text class="box-text" x="18" y="50">mem/tomb/.../{id}</text>
+  </g>
+
+  <g transform="translate(570 275)">
+    <rect width="220" height="80" rx="6" fill="#f3f0ff" stroke="#6741d9" />
+    <text class="box-title" x="18" y="26">Logically deleted</text>
+    <text class="box-text" x="18" y="48">hidden from search</text>
+    <text class="box-text" x="18" y="66">obs may still be stored</text>
+  </g>
+
+  <g transform="translate(290 275)">
+    <rect width="220" height="80" rx="6" fill="#f1f3f5" stroke="#343a40" />
+    <text class="box-title" x="18" y="26">Physical purge</text>
+    <text class="box-text" x="18" y="48">gc retention or --force-id</text>
+    <text class="box-text" x="18" y="66">obs + tomb exact-key delete</text>
+  </g>
+
+  <g transform="translate(40 280)">
+    <rect width="180" height="70" rx="6" fill="#ffffff" stroke="#868e96" />
+    <text class="box-title" x="18" y="28">Absent from mesh</text>
+    <text class="box-text" x="18" y="50">local index row deleted</text>
+  </g>
+
+  <path class="edge" d="M220 145 H272" />
+  <path class="edge" d="M500 145 H562" />
+  <path class="edge" d="M830 145 H892" />
+  <text class="edge-text" x="842" y="128">subscriber / local upsert</text>
+  <path class="edge" d="M995 185 V272" />
+  <text class="edge-text" x="1006" y="238">delete_memory / CLI delete</text>
+  <path class="edge" d="M900 315 H798" />
+  <text class="edge-text" x="802" y="298">tombstone exists</text>
+  <path class="edge" d="M570 315 H518" />
+  <path class="edge" d="M290 315 H228" />
+
+  <g transform="translate(40 440)">
+    <path d="M0 0 H460 V76 H0 Z M430 0 V30 H460" fill="#fff4e6" stroke="#f08c00" />
+    <text class="note-text" x="18" y="30">Updates are new observations with new observation_id values.</text>
+    <text class="note-text" x="18" y="52">Existing observations are not modified in place.</text>
+  </g>
+
+  <g transform="translate(570 440)">
+    <path d="M0 0 H520 V76 H0 Z M490 0 V30 H520" fill="#fff0f6" stroke="#c2255c" />
+    <text class="note-text" x="18" y="30">Tombstones are existence-based.</text>
+    <text class="note-text" x="18" y="52">Delete wins are not decided by created_at / deleted_at ordering.</text>
+  </g>
+</svg>

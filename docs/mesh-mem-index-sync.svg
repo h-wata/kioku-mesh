@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="560" viewBox="0 0 1120 560" role="img" aria-labelledby="title desc">
+  <title id="title">SQLite sidecar index sync</title>
+  <desc id="desc">State transition diagram for opening the SQLite sidecar index, optional rebuild from Zenoh, live subscriber sync, search reads, and disabled fallback mode.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#495057" />
+    </marker>
+    <marker id="green-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2b8a3e" />
+    </marker>
+    <marker id="pink-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#c2255c" />
+    </marker>
+    <style>
+      .title { font: 700 22px sans-serif; fill: #212529; }
+      .box-title { font: 700 14px sans-serif; fill: #212529; }
+      .box-text { font: 13px sans-serif; fill: #343a40; }
+      .edge-text { font: 12px sans-serif; fill: #495057; }
+      .edge { stroke: #495057; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .green-edge { stroke: #2b8a3e; stroke-width: 2; fill: none; marker-end: url(#green-arrow); }
+      .pink-edge { stroke: #c2255c; stroke-width: 2; fill: none; marker-end: url(#pink-arrow); }
+    </style>
+  </defs>
+
+  <rect width="1120" height="560" fill="#ffffff" />
+  <text class="title" x="40" y="48">SQLite sidecar index sync</text>
+
+  <g transform="translate(430 90)">
+    <rect width="260" height="80" rx="6" fill="#ebfbee" stroke="#2b8a3e" />
+    <text class="box-title" x="18" y="30">Zenoh + RocksDB</text>
+    <text class="box-text" x="18" y="54">source of truth</text>
+  </g>
+
+  <g transform="translate(60 240)">
+    <rect width="170" height="60" rx="6" fill="#f8f9fa" stroke="#495057" />
+    <text class="box-title" x="18" y="36">Index unopened</text>
+  </g>
+
+  <g transform="translate(300 230)">
+    <rect width="190" height="80" rx="6" fill="#e7f5ff" stroke="#1c7ed6" />
+    <text class="box-title" x="18" y="28">Connected SQLite</text>
+    <text class="box-text" x="18" y="50">schema + WAL PRAGMA</text>
+  </g>
+
+  <g transform="translate(570 230)">
+    <rect width="200" height="80" rx="6" fill="#fff9db" stroke="#f08c00" />
+    <text class="box-title" x="18" y="26">Rebuild from Zenoh</text>
+    <text class="box-text" x="18" y="48">optional for CLI</text>
+    <text class="box-text" x="18" y="66">default for MCP</text>
+  </g>
+
+  <g transform="translate(850 230)">
+    <rect width="220" height="80" rx="6" fill="#f3f0ff" stroke="#6741d9" />
+    <text class="box-title" x="18" y="28">Subscriber active</text>
+    <text class="box-text" x="18" y="50">mem/obs/** and mem/tomb/**</text>
+  </g>
+
+  <g transform="translate(430 420)">
+    <rect width="260" height="90" rx="6" fill="#ffffff" stroke="#868e96" />
+    <text class="box-title" x="18" y="28">Search reads index</text>
+    <text class="box-text" x="18" y="50">fallback to Zenoh only when</text>
+    <text class="box-text" x="18" y="68">disabled or missed by id lookup</text>
+  </g>
+
+  <g transform="translate(60 420)">
+    <rect width="230" height="90" rx="6" fill="#fff0f6" stroke="#c2255c" />
+    <text class="box-title" x="18" y="26">Disabled mode</text>
+    <text class="box-text" x="18" y="48">MESH_MEM_DISABLE_INDEX=1</text>
+    <text class="box-text" x="18" y="66">methods become no-op</text>
+  </g>
+
+  <path class="edge" d="M230 270 H292" />
+  <path class="edge" d="M490 270 H562" />
+  <text class="edge-text" x="500" y="252">if rebuild policy true</text>
+  <path class="edge" d="M770 270 H842" />
+  <text class="edge-text" x="780" y="252">then subscribe</text>
+  <path class="edge" d="M490 232 C610 180 780 180 900 224" />
+  <text class="edge-text" x="640" y="184">if rebuild skipped</text>
+  <path class="green-edge" d="M560 170 V222" />
+  <text class="edge-text" x="575" y="205">scan mem/obs + mem/tomb</text>
+  <path class="green-edge" d="M690 130 C860 130 960 170 960 222" />
+  <text class="edge-text" x="832" y="144">live puts</text>
+  <path class="edge" d="M960 310 C900 405 720 430 698 452" />
+  <path class="pink-edge" d="M145 300 V412" />
+  <text class="edge-text" x="156" y="364">env disables index</text>
+  <path class="pink-edge" d="M290 460 C380 540 690 530 560 178" />
+  <text class="edge-text" x="314" y="498">Zenoh fallback search</text>
+</svg>
