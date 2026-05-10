@@ -188,19 +188,33 @@ The Quick start above ran two PCs (`home` / `office`) using
 `config/zenohd_home.json5` and `config/zenohd_office.json5`. For 3+ peers,
 use `config/zenohd_peer.json5.template` and replicate it once per host.
 
+The recommended layout is **1 hub + N spokes**: one always-on peer acts as
+the hub and listens on every IP that any spoke can reach (LAN, Tailscale,
+VPN). Each spoke dials only the hub. Zenoh router transit then carries
+traffic between spokes without a direct link, so adding a new spoke does
+**not** require touching any existing peer's config or restarting them.
+Verified empirically with a 3-PC test on 2026-05-10
+(`docs/poc-reports/topology-2026-05-10.md`).
+
 ### Steps
 
-1. **Plan the topology.** Pick a stable LAN IP for each peer. VPN-routed
-   peers (Wireguard, Tailscale) work — confirm the tunnel comes up before
-   `zenohd` does.
-2. **Per-peer config.** Copy the template, replace `{SELF_IP}` with the
-   host's own IP, and list every other peer's IP in `connect.endpoints`.
+1. **Pick the hub.** Choose the always-on peer (typically a desktop /
+   home server). Make sure its `listen.endpoints` cover every network
+   that any spoke can reach: LAN, Tailscale, VPN — aggregate them now so
+   later spokes don't force a hub restart.
+2. **Per-peer config.**
+   - On the hub, copy `config/zenohd_home.json5` (or the template) and
+     keep `connect.endpoints: []`.
+   - On each spoke, copy `config/zenohd_peer.json5.template`, replace
+     `{SELF_IP}` with the spoke's own IP, and `{HUB_IP}` with the hub's
+     reachable IP. Spokes do **not** list each other.
    The full walkthrough lives at
    [config/peers/example_5peer.md](config/peers/example_5peer.md).
-3. **Open the firewall.** TCP/7447 between every peer pair (see Firewall
-   section below for `ufw` / `iptables` recipes).
-4. **Start zenohd on each peer.** Order does not matter; each router
-   retries `connect` endpoints until they answer.
+3. **Open the firewall.** TCP/7447 from every spoke to the hub (the hub's
+   inbound rule is what matters; spokes typically only need outbound). See
+   Firewall section below for `ufw` / `iptables` recipes.
+4. **Start zenohd on each peer.** Hub first is convenient but not
+   required; spokes retry their `connect` until the hub answers.
 5. **Verify connectivity.**
 
 ```bash
@@ -343,8 +357,9 @@ Tighten `-RemoteAddress` to the actual LAN/VPN range you mesh with.
 
 A peer that only **initiates outbound** zenoh connections (i.e., never
 needs other peers to dial in) can skip this step entirely — Windows
-Firewall lets the return traffic flow on the established socket. The
-inbound rule is only required when this host appears in some other
+Firewall lets the return traffic flow on the established socket. In the
+hub-and-spoke layout that means **spokes do not need this inbound rule**;
+only the hub does. Add the rule when this host appears in some other
 peer's `connect.endpoints` list.
 
 ### 6. Time sync (w32time)
