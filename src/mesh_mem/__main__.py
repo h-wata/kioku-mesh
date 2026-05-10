@@ -14,6 +14,7 @@ from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
+from .store import _reset_session
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
 from .store import MAX_SEARCH
@@ -295,7 +296,14 @@ def main(argv: list[str] | None = None) -> int:
         set_rebuild_on_init_explicit(True)
     else:
         set_rebuild_on_init_default(False)
-    return args.func(args)
+    try:
+        return args.func(args)
+    finally:
+        # Explicitly close the cached Zenoh session before sys.exit. Without
+        # this, the CLI hangs after printing output because the session's
+        # replication subscriber thread keeps the interpreter alive past
+        # the command's return; users had to ctrl-c to escape.
+        _reset_session()
 
 
 if __name__ == '__main__':
