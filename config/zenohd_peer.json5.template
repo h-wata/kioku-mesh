@@ -48,10 +48,18 @@
 //   - Replication digest convergence requires per-peer clock skew < 500 ms.
 //     Run NTP/chrony on every host. WSL2 hosts in particular often need
 //     a manual `step` after Windows hibernation; `systemd-timesyncd`
-//     only slews. Recovery one-liner from the hub side:
-//       `sudo timedatectl set-ntp false && sudo date -u -s "@$(date -u +%s.%3N)" && sudo timedatectl set-ntp true`
-//     See `docs/poc-reports/topology-2026-05-10.md` §B for the full
-//     bias-compensation procedure.
+//     only slews. Source the reference time from the **hub** (the local
+//     `date` on the drifting host is the wrong source by definition),
+//     then push it to the WSL2 guest:
+//       # on the hub
+//       HUB_NOW=$(awk -v t="$(date -u +%s.%3N)" 'BEGIN{printf "%.3f", t+1.0}')   # +1s ssh latency bias
+//       ssh wsl2 "sudo timedatectl set-ntp false \
+//                  && sudo date -u -s @$HUB_NOW \
+//                  && sudo timedatectl set-ntp true"
+//     Then re-check skew with `ssh wsl2 'date -u +%s.%3N'` against the
+//     hub's `date -u +%s.%3N` and adjust the bias if needed. See
+//     `docs/poc-reports/topology-2026-05-10.md` §B for the full
+//     procedure.
 
 {
   mode: "router",
