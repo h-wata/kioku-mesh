@@ -27,10 +27,14 @@
 //     host (mirrored networking), so 127.0.0.1:7447 may already be bound;
 //     drop the loopback line and pick a non-conflicting port (e.g. 7448) for
 //     the LAN listen instead. When you do this, **also point local clients
-//     at the new endpoint** — `mesh-mem` and the MCP server default to
-//     `tcp/127.0.0.1:7447`, so export `ZENOH_CONNECT=tcp/<SELF_IP>:7448`
-//     (or update `~/.config/mesh-mem/config.json5` accordingly). See
-//     add-mesh-peer skill §WSL2.
+//     at the new endpoint** — `mesh-mem` and the MCP server read
+//     `ZENOH_CONNECT` (default `tcp/127.0.0.1:7447`), so:
+//       - For shell use, export `ZENOH_CONNECT=tcp/<SELF_IP>:7448` in the
+//         shell or your shell rc.
+//       - For Claude Code MCP, pass it on registration:
+//           `claude mcp add mesh_mem ... -e ZENOH_CONNECT=tcp/<SELF_IP>:7448 ...`
+//     See `docs/poc-reports/topology-2026-05-10.md` §A for the empirical
+//     context.
 //   - When THIS peer is itself the hub, replace `connect.endpoints` with [] —
 //     the hub doesn't dial anyone. Spokes dial in.
 //   - storage / replication blocks must match across all peers byte-for-byte:
@@ -42,8 +46,12 @@
 //     reverse direction is not required (Zenoh sessions are bidirectional
 //     once the spoke dials in). See README §Multi-host mesh setup.
 //   - Replication digest convergence requires per-peer clock skew < 500 ms.
-//     Run NTP/chrony on every host. WSL2 hosts often need a manual `step`
-//     after Windows hibernation — see add-mesh-peer skill §WSL2.
+//     Run NTP/chrony on every host. WSL2 hosts in particular often need
+//     a manual `step` after Windows hibernation; `systemd-timesyncd`
+//     only slews. Recovery one-liner from the hub side:
+//       `sudo timedatectl set-ntp false && sudo date -u -s "@$(date -u +%s.%3N)" && sudo timedatectl set-ntp true`
+//     See `docs/poc-reports/topology-2026-05-10.md` §B for the full
+//     bias-compensation procedure.
 
 {
   mode: "router",

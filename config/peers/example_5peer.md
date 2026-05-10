@@ -154,7 +154,9 @@ peers see it, check (in order):
    the loopback or Docker bridge IP.
 4. **Clock drift** — `chronyc tracking` on each peer; >500 ms skew breaks
    replication digests (Zenoh hardcodes the tolerance — see README
-   §Time sync, and add-mesh-peer skill §9-b for WSL2 manual-step).
+   §Time sync, and
+   [`docs/poc-reports/topology-2026-05-10.md`](../../docs/poc-reports/topology-2026-05-10.md) §B
+   for the WSL2 manual-step recipe).
 5. **Index disabled** — if the receiving peer has `MESH_MEM_DISABLE_INDEX=1`
    the search reads via Zenoh full scan; results should still match.
 6. **Storage volume mismatch** — confirm every peer's config has the same
