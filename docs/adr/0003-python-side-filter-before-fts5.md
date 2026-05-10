@@ -1,6 +1,6 @@
 # ADR-0003: 検索実装を全件取得→Python側フィルタで先行実装（FTS5導入前）
 
-- Status: Accepted
+- Status: Superseded by ADR-0007
 - Date: 2026-04-27
 - Supersedes: なし
 
