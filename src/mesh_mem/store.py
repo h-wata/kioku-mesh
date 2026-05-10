@@ -676,6 +676,7 @@ class BulkPurgeResult:
     matches: list[tuple[str, str, str]] = field(default_factory=list)
     sessions: 'Counter[str]' = field(default_factory=Counter)
     purged: int = 0
+    tombs_purged: int = 0
     failures: int = 0
     executed: bool = False
 
@@ -711,6 +712,68 @@ def _scan_obs_by_pc_id(
     return out
 
 
+def scan_obs_by_pc_id(
+    pc_id: str,
+    *,
+    session_prefix: str = '',
+) -> tuple[list[tuple[str, str, str]], 'Counter[str]']:
+    """Return ``(matches, per-session counter)`` for a pc-scoped scan.
+
+    Public scan-only entrypoint. The CLI calls this first (dry-run output +
+    confirm prompt), then hands the same ``matches`` list to
+    :func:`execute_bulk_purge` to avoid re-scanning ``mem/obs/**`` a second
+    time on the destructive pass.
+    """
+    matches = _scan_obs_by_pc_id(pc_id, session_prefix)
+    sessions: Counter[str] = Counter(sid for _, _, sid in matches)
+    return matches, sessions
+
+
+def execute_bulk_purge(
+    matches: list[tuple[str, str, str]],
+    *,
+    progress_every: int = 500,
+    on_progress: Callable[[int, int, int, int], None] | None = None,
+) -> tuple[int, int, int]:
+    """Delete every ``(obs_key, obs_id, _)`` in ``matches`` plus mirrored tombs.
+
+    Returns ``(purged_obs, purged_tombs, failures)``. See
+    :func:`bulk_purge_by_pc_id` for the rationale on skipping the global
+    tomb sweep + wildcard broadcast and on the lexical obs→tomb mirror.
+    """
+    if not matches:
+        return (0, 0, 0)
+    session = get_session()
+    idx = get_index()
+    purged = 0
+    tombs_purged = 0
+    failures = 0
+    total = len(matches)
+    for i, (obs_key, obs_id, _sid) in enumerate(matches, start=1):
+        try:
+            session.delete(obs_key)
+            if not idx.disabled:
+                idx.physical_delete(obs_id)
+            purged += 1
+        except Exception as e:  # noqa: BLE001 — one bad key must not abort the sweep
+            failures += 1
+            log.warning('bulk purge failed for %s: %s', obs_id, e)
+        # Mirror-delete the tomb slot. Lexical replace because keys share the
+        # ``mem/{obs|tomb}/{ident}/{obs_id}`` layout. Counted separately and
+        # wrapped in its own try so an obs-side success is never invalidated
+        # by a tomb-side transport hiccup. The Zenoh ``delete`` is a no-op
+        # when the tomb slot is absent (bench-obs case), so always safe.
+        tomb_key = 'mem/tomb/' + obs_key[len('mem/obs/') :]
+        try:
+            session.delete(tomb_key)
+            tombs_purged += 1
+        except Exception as e:  # noqa: BLE001 — best-effort tomb cleanup
+            log.debug('bulk purge tomb delete failed for %s: %s', tomb_key, e)
+        if on_progress is not None and i % progress_every == 0:
+            on_progress(i, total, purged, failures)
+    return (purged, tombs_purged, failures)
+
+
 def bulk_purge_by_pc_id(
     pc_id: str,
     *,
@@ -727,47 +790,37 @@ def bulk_purge_by_pc_id(
     further narrow with ``session_prefix`` so legitimate working memory on
     that host is not destroyed.
 
-    Skips both the ``mem/tomb/**`` orphan sweep and the wildcard broadcast
-    that :func:`physical_delete_observation` performs. Bench obs were never
-    tombstoned (so the tomb sweep is wasted work) and at 30k+ records the
-    sweep stalls on ``GET_TIMEOUT``; the wildcard broadcast targets a single
-    ``observation_id`` suffix and is irrelevant to a multi-id bulk path.
+    Skips the global ``mem/tomb/**`` orphan sweep and the per-id wildcard
+    broadcast that :func:`physical_delete_observation` performs. The global
+    sweep stalls on ``GET_TIMEOUT`` past 30k tombstones, and the wildcard
+    broadcast targets a single ``observation_id`` suffix — both are wrong
+    primitives for a multi-id bulk path. Instead, for every matched obs we
+    additionally exact-key delete the mirrored ``mem/tomb/...`` slot via
+    :func:`execute_bulk_purge`, so any legitimate tombstones that happen to
+    fall under the same ``pc_id`` are also cleaned up at O(1)/match.
 
     ``execute=False`` returns the match list + per-session histogram without
     issuing deletes (dry-run). ``progress_every`` / ``on_progress`` give the
     CLI a hook for streaming progress without coupling I/O into store.py.
-    """
-    matches = _scan_obs_by_pc_id(pc_id, session_prefix)
-    sessions: Counter[str] = Counter(sid for _, _, sid in matches)
-    if not execute or not matches:
-        return BulkPurgeResult(
-            matches=matches,
-            sessions=sessions,
-            purged=0,
-            failures=0,
-            executed=False,
-        )
 
-    session = get_session()
-    idx = get_index()
-    purged = 0
-    failures = 0
-    total = len(matches)
-    for i, (obs_key, obs_id, _sid) in enumerate(matches, start=1):
-        try:
-            session.delete(obs_key)
-            if not idx.disabled:
-                idx.physical_delete(obs_id)
-            purged += 1
-        except Exception as e:  # noqa: BLE001 — one bad key must not abort the sweep
-            failures += 1
-            log.warning('bulk purge failed for %s: %s', obs_id, e)
-        if on_progress is not None and i % progress_every == 0:
-            on_progress(i, total, purged, failures)
+    Convenience wrapper that runs both phases back-to-back. The CLI uses
+    :func:`scan_obs_by_pc_id` + :func:`execute_bulk_purge` directly so it
+    can interpose a user-confirm prompt between the two phases without
+    paying for a second scan.
+    """
+    matches, sessions = scan_obs_by_pc_id(pc_id, session_prefix=session_prefix)
+    if not execute or not matches:
+        return BulkPurgeResult(matches=matches, sessions=sessions, executed=False)
+    purged, tombs_purged, failures = execute_bulk_purge(
+        matches,
+        progress_every=progress_every,
+        on_progress=on_progress,
+    )
     return BulkPurgeResult(
         matches=matches,
         sessions=sessions,
         purged=purged,
+        tombs_purged=tombs_purged,
         failures=failures,
         executed=True,
     )

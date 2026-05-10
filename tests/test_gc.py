@@ -551,3 +551,29 @@ def test_bulk_purge_by_pc_id_no_match_returns_empty(
     assert result.matches == []
     assert result.executed is False
     assert result.purged == 0
+
+
+def test_bulk_purge_by_pc_id_also_purges_mirrored_tombstone(
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """Legitimate tombstones under the targeted pc_id are cleaned up too.
+
+    The bulk path skips the global ``mem/tomb/**`` sweep but mirrors each
+    matched obs into ``mem/tomb/...`` exact-key delete (codex review
+    IMPORTANT 2). Without this, a legitimate ``mesh-mem delete`` call that
+    happened earlier on the targeted pc_id would leave its tomb behind,
+    and a later ``rebuild_from_zenoh`` could resurrect bookkeeping.
+    """
+    pc = 'f' * 32
+    obs = _mk_pc_obs('legit-then-tombed', pc_id=pc, session_id='real-1')
+    store.put_observation(obs)
+    store.put_tombstone(obs, reason='user-deleted')
+    time.sleep(_INGEST_SETTLE)
+    assert _tomb_keys_for(obs.observation_id) != []
+
+    result = store.bulk_purge_by_pc_id(pc, execute=True)
+    assert result.purged == 1
+    assert result.tombs_purged == 1
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(obs.observation_id)
+    assert _tomb_keys_for(obs.observation_id) == []

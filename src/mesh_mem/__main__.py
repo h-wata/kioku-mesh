@@ -15,7 +15,7 @@ from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import _reset_session
-from .store import bulk_purge_by_pc_id
+from .store import execute_bulk_purge
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
 from .store import MAX_SEARCH
@@ -23,6 +23,7 @@ from .store import mesh_ready_label
 from .store import physical_delete_observation
 from .store import put_observation
 from .store import put_tombstone
+from .store import scan_obs_by_pc_id
 from .store import search_observations
 from .store import set_rebuild_on_init_default
 from .store import set_rebuild_on_init_explicit
@@ -185,34 +186,54 @@ def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
         print('--by-pc-id は 32 文字の pc_id が必要です。', file=sys.stderr)
         return 2
 
-    def _on_progress(i: int, total: int, purged: int, failures: int) -> None:
-        print(f'  進捗: {i}/{total} (purged={purged}, fail={failures})', file=sys.stderr)
-
     print(
         f'mem/obs/** をスキャン中 pc_id={args.by_pc_id!r}'
         + (f' session_prefix={args.session_prefix!r}' if args.session_prefix else ''),
         file=sys.stderr,
     )
-    result = bulk_purge_by_pc_id(
-        args.by_pc_id,
-        session_prefix=args.session_prefix or '',
-        execute=args.execute,
-        on_progress=_on_progress,
-    )
-    print(f'マッチした obs: {len(result.matches)} 件', file=sys.stderr)
-    if not result.matches:
+    matches, sessions = scan_obs_by_pc_id(args.by_pc_id, session_prefix=args.session_prefix or '')
+    print(f'マッチした obs: {len(matches)} 件', file=sys.stderr)
+    if not matches:
         print('対象なし — pc_id にマッチする observation がありませんでした。')
         return 0
     print('セッション内訳:', file=sys.stderr)
-    for sid, count in result.sessions.most_common():
+    for sid, count in sessions.most_common():
         print(f'  {sid!r:>40}: {count}', file=sys.stderr)
-    if not result.executed:
+    if not args.execute:
         print('Dry run — --execute を付けると実際に削除します。')
         return 0
+
+    # Interactive confirm gate before any destructive call. ``--yes`` skips
+    # it for non-interactive ops (CI, scripted bulk purges where the
+    # operator already audited the dry-run output upstream).
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                '--execute は対話的確認が必要です。非対話環境では --yes を併用してください。',
+                file=sys.stderr,
+            )
+            return 2
+        prompt = (
+            f'本当に pc_id={args.by_pc_id} の {len(matches)} 件の obs を物理削除しますか？ '
+            "確認のため 'yes' と入力してください: "
+        )
+        try:
+            answer = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print('\nキャンセルしました。', file=sys.stderr)
+            return 1
+        if answer != 'yes':
+            print('キャンセルしました。', file=sys.stderr)
+            return 1
+
+    def _on_progress(i: int, total: int, purged: int, failures: int) -> None:
+        print(f'  進捗: {i}/{total} (purged={purged}, fail={failures})', file=sys.stderr)
+
+    purged, tombs_purged, failures = execute_bulk_purge(matches, on_progress=_on_progress)
     print(
-        f'物理削除完了: purged={result.purged}, failures={result.failures} (tomb sweep / broadcast はスキップ)',
+        f'物理削除完了: obs={purged}, tombs={tombs_purged}, failures={failures} (tomb sweep / broadcast はスキップ)',
     )
-    return 0 if result.failures == 0 else 1
+    return 0 if failures == 0 else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -324,6 +345,11 @@ def _build_parser() -> argparse.ArgumentParser:
         '--execute',
         action='store_true',
         help='--by-pc-id の dry-run を解除して実際に削除する',
+    )
+    p_gc.add_argument(
+        '--yes',
+        action='store_true',
+        help='--by-pc-id --execute 時の対話確認をスキップ (CI / 自動化用)',
     )
     p_gc.set_defaults(func=_cmd_gc)
 
