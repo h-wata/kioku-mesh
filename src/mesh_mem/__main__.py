@@ -15,6 +15,7 @@ from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import _reset_session
+from .store import bulk_purge_by_pc_id
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
 from .store import MAX_SEARCH
@@ -171,10 +172,47 @@ def _cmd_gc(args: argparse.Namespace) -> int:
                 '完全を期すなら他 PC でも同コマンドを実行してください。',
             )
         return 0
+    if args.by_pc_id:
+        return _cmd_gc_by_pc_id(args)
     purged = gc_expired_tombstones(retention_days=args.retention_days, project=args.project or '')
     project_note = f' (project={args.project})' if args.project else ''
     print(f'retention {args.retention_days} 日超の tombstone{project_note}: {purged} 件を物理削除しました')
     return 0
+
+
+def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
+    if len(args.by_pc_id) != 32:
+        print('--by-pc-id は 32 文字の pc_id が必要です。', file=sys.stderr)
+        return 2
+
+    def _on_progress(i: int, total: int, purged: int, failures: int) -> None:
+        print(f'  進捗: {i}/{total} (purged={purged}, fail={failures})', file=sys.stderr)
+
+    print(
+        f'mem/obs/** をスキャン中 pc_id={args.by_pc_id!r}'
+        + (f' session_prefix={args.session_prefix!r}' if args.session_prefix else ''),
+        file=sys.stderr,
+    )
+    result = bulk_purge_by_pc_id(
+        args.by_pc_id,
+        session_prefix=args.session_prefix or '',
+        execute=args.execute,
+        on_progress=_on_progress,
+    )
+    print(f'マッチした obs: {len(result.matches)} 件', file=sys.stderr)
+    if not result.matches:
+        print('対象なし — pc_id にマッチする observation がありませんでした。')
+        return 0
+    print('セッション内訳:', file=sys.stderr)
+    for sid, count in result.sessions.most_common():
+        print(f'  {sid!r:>40}: {count}', file=sys.stderr)
+    if not result.executed:
+        print('Dry run — --execute を付けると実際に削除します。')
+        return 0
+    print(
+        f'物理削除完了: purged={result.purged}, failures={result.failures} (tomb sweep / broadcast はスキップ)',
+    )
+    return 0 if result.failures == 0 else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -247,7 +285,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser('status', help='メモリ状態を表示')
     p_status.set_defaults(func=_cmd_status)
 
-    p_gc = sub.add_parser('gc', help='tombstone 対象の物理削除 (retention or --force-id)')
+    p_gc = sub.add_parser('gc', help='tombstone 対象の物理削除 (retention / --force-id / --by-pc-id)')
     p_gc.add_argument(
         '--force-id',
         dest='force_id',
@@ -266,6 +304,26 @@ def _build_parser() -> argparse.ArgumentParser:
         '--project',
         default='',
         help='指定したプロジェクトの tombstone のみを削除対象にする (未指定時は全プロジェクト対象)',
+    )
+    p_gc.add_argument(
+        '--by-pc-id',
+        dest='by_pc_id',
+        default='',
+        help=(
+            '32文字の pc_id にマッチする obs を一括物理削除する (bench / spam 掃除用)。'
+            'デフォルトは dry-run; --execute で実削除。tomb sweep / broadcast はスキップ。'
+        ),
+    )
+    p_gc.add_argument(
+        '--session-prefix',
+        dest='session_prefix',
+        default='',
+        help='--by-pc-id と併用。session_id の先頭一致でさらに絞り込む (例: "bench")',
+    )
+    p_gc.add_argument(
+        '--execute',
+        action='store_true',
+        help='--by-pc-id の dry-run を解除して実際に削除する',
     )
     p_gc.set_defaults(func=_cmd_gc)
 

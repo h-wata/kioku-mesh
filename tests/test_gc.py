@@ -465,3 +465,89 @@ def test_gc_project_filter_falls_back_when_index_disabled(
     time.sleep(_INGEST_SETTLE)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
+
+
+def _mk_pc_obs(content: str, *, pc_id: str, session_id: str) -> Observation:
+    return Observation(
+        content=content,
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id=pc_id,
+        session_id=session_id,
+        project='bulk-pc-test',
+    )
+
+
+def test_bulk_purge_by_pc_id_dry_run_lists_matches_without_deleting(
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    target_pc = 'a' * 32
+    other_pc = 'b' * 32
+    target_obs = [_mk_pc_obs(f'bench-{i}', pc_id=target_pc, session_id='bench-tier4-x') for i in range(3)]
+    keep_obs = _mk_pc_obs('legit', pc_id=other_pc, session_id='real-sess')
+    for o in target_obs:
+        store.put_observation(o)
+    store.put_observation(keep_obs)
+    time.sleep(_INGEST_SETTLE)
+
+    result = store.bulk_purge_by_pc_id(target_pc, execute=False)
+    assert result.executed is False
+    assert len(result.matches) == 3
+    assert result.purged == 0
+    assert result.sessions['bench-tier4-x'] == 3
+
+    # All target obs still present after dry-run.
+    for o in target_obs:
+        assert _obs_present(o.observation_id)
+    assert _obs_present(keep_obs.observation_id)
+
+
+def test_bulk_purge_by_pc_id_execute_deletes_only_matching_pc(
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    target_pc = 'c' * 32
+    other_pc = 'd' * 32
+    target_obs = [_mk_pc_obs(f'bench-{i}', pc_id=target_pc, session_id='bench-A') for i in range(2)]
+    keep_obs = _mk_pc_obs('survivor', pc_id=other_pc, session_id='real')
+    for o in target_obs:
+        store.put_observation(o)
+    store.put_observation(keep_obs)
+    time.sleep(_INGEST_SETTLE)
+
+    result = store.bulk_purge_by_pc_id(target_pc, execute=True)
+    assert result.executed is True
+    assert result.purged == 2
+    assert result.failures == 0
+    time.sleep(_INGEST_SETTLE)
+
+    for o in target_obs:
+        assert not _obs_present(o.observation_id)
+    assert _obs_present(keep_obs.observation_id), 'unrelated pc_id must survive purge'
+
+
+def test_bulk_purge_by_pc_id_session_prefix_narrows_scope(
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    pc = 'e' * 32
+    bench_obs = _mk_pc_obs('bench', pc_id=pc, session_id='bench-tier4-7')
+    real_obs = _mk_pc_obs('real work', pc_id=pc, session_id='engineering-1')
+    store.put_observation(bench_obs)
+    store.put_observation(real_obs)
+    time.sleep(_INGEST_SETTLE)
+
+    result = store.bulk_purge_by_pc_id(pc, session_prefix='bench', execute=True)
+    assert result.purged == 1
+    assert result.failures == 0
+    time.sleep(_INGEST_SETTLE)
+
+    assert not _obs_present(bench_obs.observation_id)
+    assert _obs_present(real_obs.observation_id), 'session_prefix must shield non-bench sessions'
+
+
+def test_bulk_purge_by_pc_id_no_match_returns_empty(
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    result = store.bulk_purge_by_pc_id('9' * 32, execute=True)
+    assert result.matches == []
+    assert result.executed is False
+    assert result.purged == 0

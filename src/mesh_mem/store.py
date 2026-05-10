@@ -13,8 +13,11 @@ errors (``zenoh.ZError``, ``ConnectionError``, ``TimeoutError``,
 bugs are not hidden by a retry loop.
 """
 
+from collections import Counter
 from collections.abc import Callable
 from collections.abc import Iterator
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -660,6 +663,114 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
     get_index().physical_delete(observation_id)
 
     return (obs_removed, bool(tomb_keys))
+
+
+@dataclass
+class BulkPurgeResult:
+    """Outcome of :func:`bulk_purge_by_pc_id`.
+
+    ``matches`` is always populated (used for the dry-run histogram); the
+    delete counters are zero when ``executed=False``.
+    """
+
+    matches: list[tuple[str, str, str]] = field(default_factory=list)
+    sessions: 'Counter[str]' = field(default_factory=Counter)
+    purged: int = 0
+    failures: int = 0
+    executed: bool = False
+
+
+@with_retry
+def _scan_obs_by_pc_id(
+    pc_id: str,
+    session_prefix: str,
+) -> list[tuple[str, str, str]]:
+    """Return ``(obs_key, observation_id, session_id)`` for matching obs.
+
+    Reads ``mem/obs/**`` raw JSON instead of ``Observation.from_json`` so a
+    payload with a now-invalid ``memory_type`` (legacy v0.2.2 enum) does not
+    spam the per-record clamping WARNING during the scan — the bulk-purge
+    callers do not need a parsed Observation, only the identity fields.
+    """
+    session = get_session()
+    out: list[tuple[str, str, str]] = []
+    for ok in _iter_ok_replies(session, 'mem/obs/**', timeout=30.0):
+        try:
+            payload = json.loads(ok.payload.to_string())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if payload.get('pc_id') != pc_id:
+            continue
+        sid = payload.get('session_id', '')
+        if session_prefix and not sid.startswith(session_prefix):
+            continue
+        obs_id = payload.get('observation_id')
+        if not isinstance(obs_id, str) or len(obs_id) != 32:
+            continue
+        out.append((str(ok.key_expr), obs_id, sid))
+    return out
+
+
+def bulk_purge_by_pc_id(
+    pc_id: str,
+    *,
+    session_prefix: str = '',
+    execute: bool = False,
+    progress_every: int = 500,
+    on_progress: Callable[[int, int, int, int], None] | None = None,
+) -> BulkPurgeResult:
+    """Purge every obs that matches ``pc_id`` (and optionally a session prefix).
+
+    Use case: a benchmark / smoke run on a peer host saved tens of thousands
+    of synthetic observations under a throwaway ``session_id`` and they are
+    now flooding the mesh. Operators scope the purge by ``pc_id`` and may
+    further narrow with ``session_prefix`` so legitimate working memory on
+    that host is not destroyed.
+
+    Skips both the ``mem/tomb/**`` orphan sweep and the wildcard broadcast
+    that :func:`physical_delete_observation` performs. Bench obs were never
+    tombstoned (so the tomb sweep is wasted work) and at 30k+ records the
+    sweep stalls on ``GET_TIMEOUT``; the wildcard broadcast targets a single
+    ``observation_id`` suffix and is irrelevant to a multi-id bulk path.
+
+    ``execute=False`` returns the match list + per-session histogram without
+    issuing deletes (dry-run). ``progress_every`` / ``on_progress`` give the
+    CLI a hook for streaming progress without coupling I/O into store.py.
+    """
+    matches = _scan_obs_by_pc_id(pc_id, session_prefix)
+    sessions: Counter[str] = Counter(sid for _, _, sid in matches)
+    if not execute or not matches:
+        return BulkPurgeResult(
+            matches=matches,
+            sessions=sessions,
+            purged=0,
+            failures=0,
+            executed=False,
+        )
+
+    session = get_session()
+    idx = get_index()
+    purged = 0
+    failures = 0
+    total = len(matches)
+    for i, (obs_key, obs_id, _sid) in enumerate(matches, start=1):
+        try:
+            session.delete(obs_key)
+            if not idx.disabled:
+                idx.physical_delete(obs_id)
+            purged += 1
+        except Exception as e:  # noqa: BLE001 — one bad key must not abort the sweep
+            failures += 1
+            log.warning('bulk purge failed for %s: %s', obs_id, e)
+        if on_progress is not None and i % progress_every == 0:
+            on_progress(i, total, purged, failures)
+    return BulkPurgeResult(
+        matches=matches,
+        sessions=sessions,
+        purged=purged,
+        failures=failures,
+        executed=True,
+    )
 
 
 def _gc_via_sqlite_index(idx: LocalIndex, cutoff_iso: str, project: str) -> int:
