@@ -1,0 +1,125 @@
+<mxfile host="app.diagrams.net" modified="2026-05-10T00:00:00.000Z" agent="Codex" version="24.7.17" type="device">
+  <diagram id="observation-lifecycle" name="Observation Lifecycle">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title1" value="Observation lifecycle" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=20;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="60" y="40" width="320" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="s1" value="Draft / input&lt;br&gt;CLI or MCP tool arguments" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f8f9fa;strokeColor=#495057;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="70" y="130" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="s2" value="Observation created&lt;br&gt;32-char id, UTC created_at,&lt;br&gt;server-side identity" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#e7f5ff;strokeColor=#1c7ed6;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="310" y="130" width="210" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" value="Zenoh put&lt;br&gt;mem/obs/{agent}/{client}/{pc}/{session}/{id}" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ebfbee;strokeColor=#2b8a3e;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="590" y="130" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s4" value="Visible in search&lt;br&gt;SQLite index row exists&lt;br&gt;deleted_at is NULL" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fff9db;strokeColor=#f08c00;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="920" y="130" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s5" value="Tombstone published&lt;br&gt;mem/tomb/.../{id}" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fff0f6;strokeColor=#c2255c;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="920" y="300" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="s6" value="Logically deleted&lt;br&gt;hidden from search&lt;br&gt;obs may still be stored" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f3f0ff;strokeColor=#6741d9;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="590" y="300" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s7" value="Physical purge&lt;br&gt;gc retention or --force-id&lt;br&gt;obs + tomb exact-key delete" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f1f3f5;strokeColor=#343a40;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="310" y="300" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="s8" value="Absent from mesh&lt;br&gt;local index row hard-deleted" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#868e96;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="70" y="305" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="endArrow=block;html=1;rounded=0;strokeColor=#495057" edge="1" parent="1" source="s1" target="s2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="endArrow=block;html=1;rounded=0;strokeColor=#495057" edge="1" parent="1" source="s2" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="subscriber / local upsert" style="endArrow=block;html=1;rounded=0;strokeColor=#495057;fontSize=12" edge="1" parent="1" source="s3" target="s4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="delete_memory / CLI delete" style="endArrow=block;html=1;rounded=0;strokeColor=#495057;fontSize=12" edge="1" parent="1" source="s4" target="s5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" value="tombstone exists" style="endArrow=block;html=1;rounded=0;strokeColor=#495057;fontSize=12" edge="1" parent="1" source="s5" target="s6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="endArrow=block;html=1;rounded=0;strokeColor=#495057" edge="1" parent="1" source="s6" target="s7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="endArrow=block;html=1;rounded=0;strokeColor=#495057" edge="1" parent="1" source="s7" target="s8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="note1" value="更新は既存 Observation の変更ではなく、新しい observation_id の保存として扱う。" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fff4e6;strokeColor=#f08c00;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="70" y="470" width="460" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="note2" value="Tombstone は existence-based。created_at / deleted_at の大小で削除勝敗を決めない。" style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;fillColor=#fff0f6;strokeColor=#c2255c;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="590" y="470" width="530" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="index-sync" name="SQLite Index Sync">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title2" value="SQLite sidecar index sync" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=20;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="60" y="40" width="360" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="z1" value="Zenoh + RocksDB&lt;br&gt;source of truth" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ebfbee;strokeColor=#2b8a3e;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="450" y="100" width="250" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="i1" value="Index unopened" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f8f9fa;strokeColor=#495057;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="80" y="250" width="170" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="i2" value="Connected SQLite&lt;br&gt;schema + WAL PRAGMA" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#e7f5ff;strokeColor=#1c7ed6;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="320" y="240" width="190" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="i3" value="Rebuild from Zenoh&lt;br&gt;optional for CLI&lt;br&gt;default for MCP" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fff9db;strokeColor=#f08c00;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="590" y="240" width="200" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="i4" value="Subscriber active&lt;br&gt;mem/obs/** and mem/tomb/**" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#f3f0ff;strokeColor=#6741d9;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="870" y="240" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="i5" value="Search reads index&lt;br&gt;fallback to Zenoh only when disabled or missed by id lookup" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#ffffff;strokeColor=#868e96;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="450" y="430" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="i6" value="Disabled mode&lt;br&gt;MESH_MEM_DISABLE_INDEX=1&lt;br&gt;methods become no-op" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;fillColor=#fff0f6;strokeColor=#c2255c;fontSize=13" vertex="1" parent="1">
+          <mxGeometry x="80" y="430" width="230" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ie1" style="endArrow=block;html=1;rounded=0;strokeColor=#495057" edge="1" parent="1" source="i1" target="i2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie2" value="if rebuild policy true" style="endArrow=block;html=1;rounded=0;strokeColor=#495057;fontSize=12" edge="1" parent="1" source="i2" target="i3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie3" value="then subscribe" style="endArrow=block;html=1;rounded=0;strokeColor=#495057;fontSize=12" edge="1" parent="1" source="i3" target="i4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie4" value="if rebuild skipped" style="endArrow=block;html=1;rounded=0;strokeColor=#495057;fontSize=12" edge="1" parent="1" source="i2" target="i4">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="710" y="200" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="ie5" value="scan mem/obs + mem/tomb" style="endArrow=block;html=1;rounded=0;strokeColor=#2b8a3e;fontSize=12" edge="1" parent="1" source="z1" target="i3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie6" value="live puts" style="endArrow=block;html=1;rounded=0;strokeColor=#2b8a3e;fontSize=12" edge="1" parent="1" source="z1" target="i4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie7" style="endArrow=block;html=1;rounded=0;strokeColor=#495057" edge="1" parent="1" source="i4" target="i5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie8" value="env disables index" style="endArrow=block;html=1;rounded=0;strokeColor=#c2255c;fontSize=12" edge="1" parent="1" source="i1" target="i6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ie9" value="Zenoh fallback search" style="endArrow=block;html=1;rounded=0;strokeColor=#c2255c;fontSize=12" edge="1" parent="1" source="i6" target="z1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

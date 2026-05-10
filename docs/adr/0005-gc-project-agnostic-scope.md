@@ -1,6 +1,6 @@
 # ADR-0005: GC の初期実装を project 非依存スコープで先行実装
 
-- Status: Accepted
+- Status: Superseded by ADR-0008
 - Date: 2026-04-27
 - Supersedes: なし
 
