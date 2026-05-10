@@ -26,7 +26,11 @@
 //     loopback. EXCEPTION on WSL2: the loopback is shared with the Windows
 //     host (mirrored networking), so 127.0.0.1:7447 may already be bound;
 //     drop the loopback line and pick a non-conflicting port (e.g. 7448) for
-//     the LAN listen instead. See add-mesh-peer skill §WSL2.
+//     the LAN listen instead. When you do this, **also point local clients
+//     at the new endpoint** — `mesh-mem` and the MCP server default to
+//     `tcp/127.0.0.1:7447`, so export `ZENOH_CONNECT=tcp/<SELF_IP>:7448`
+//     (or update `~/.config/mesh-mem/config.json5` accordingly). See
+//     add-mesh-peer skill §WSL2.
 //   - When THIS peer is itself the hub, replace `connect.endpoints` with [] —
 //     the hub doesn't dial anyone. Spokes dial in.
 //   - storage / replication blocks must match across all peers byte-for-byte:
