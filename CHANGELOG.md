@@ -10,6 +10,8 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-05-11
+
 ### Added
 
 - **`mesh-mem gc --by-pc-id PCID [--session-prefix X] [--execute] [--yes]`**:
@@ -32,12 +34,38 @@ versions without a migration path until `1.0.0`.
 
 ### Changed
 
+- **CLI skips `rebuild_from_zenoh` on startup by default** (#38). The
+  one-shot `mesh-mem` process previously paid the full ~15 s zenoh
+  scan + JSON-parse + SQLite-membership-check on every invocation
+  against a populated mesh, which made interactive use unworkable on
+  busy peers (~117k records observed). The local SQLite index still
+  converges via the replication subscriber within the process
+  lifetime, so `save` / `search` / `get-memory` / `delete` / `status`
+  see live writes without the rebuild. Long-running processes
+  (`mesh-mem-mcp`, autonomous agents) keep the previous behavior —
+  the rebuild cost amortizes across their uptime.
+  Opt back in per-invocation with `mesh-mem --rebuild ...` or via the
+  new `MESH_MEM_FORCE_REBUILD=1` env var. ``--rebuild`` uses the new
+  explicit-override channel (codex review P2) so it outranks even an
+  ambient ``MESH_MEM_SKIP_REBUILD=1`` exported from a shell profile or
+  wrapper script — direct user intent on the typed invocation always
+  wins over env-level config. Resolution order: explicit override >
+  ``MESH_MEM_FORCE_REBUILD`` > ``MESH_MEM_SKIP_REBUILD`` > module default.
 - **One-off migration scripts moved under ``scripts/migrations/``**.
   ``cleanup_legacy_memory_types.py`` (v0.2.2 → v0.2.3 enum migration)
   is operator tooling that should not be shipped as a CLI subcommand,
   but should still travel with the repo for any peer that has not yet
   migrated. The ad-hoc ``scripts/purge_observations_by_pc_id.py`` is
   removed in favor of the CLI flag above.
+
+### Fixed
+
+- **CLI commands no longer hang on exit** (#44). ``mesh-mem`` short-lived
+  invocations now explicitly close the Zenoh session on exit (including
+  on early returns / exceptions). Previously the session lingered until
+  process teardown, which on some hosts left the CLI waiting on its own
+  background tasks and made shell scripts that chain mesh-mem commands
+  unusable.
 
 ### Performance
 
@@ -78,26 +106,11 @@ versions without a migration path until `1.0.0`.
   (`~/.venv/mesh-mem/bin/<bin>` → `Scripts\<bin>.exe`); cross-link the
   new `--rebuild` opt-in (#38) for first-time alignment on a populated
   mesh.
-
-### Changed
-
-- **CLI skips `rebuild_from_zenoh` on startup by default** (#38). The
-  one-shot `mesh-mem` process previously paid the full ~15 s zenoh
-  scan + JSON-parse + SQLite-membership-check on every invocation
-  against a populated mesh, which made interactive use unworkable on
-  busy peers (~117k records observed). The local SQLite index still
-  converges via the replication subscriber within the process
-  lifetime, so `save` / `search` / `get-memory` / `delete` / `status`
-  see live writes without the rebuild. Long-running processes
-  (`mesh-mem-mcp`, autonomous agents) keep the previous behavior —
-  the rebuild cost amortizes across their uptime.
-  Opt back in per-invocation with `mesh-mem --rebuild ...` or via the
-  new `MESH_MEM_FORCE_REBUILD=1` env var. ``--rebuild`` uses the new
-  explicit-override channel (codex review P2) so it outranks even an
-  ambient ``MESH_MEM_SKIP_REBUILD=1`` exported from a shell profile or
-  wrapper script — direct user intent on the typed invocation always
-  wins over env-level config. Resolution order: explicit override >
-  ``MESH_MEM_FORCE_REBUILD`` > ``MESH_MEM_SKIP_REBUILD`` > module default.
+- **Spec.md, ADR-0006..0009, hub-and-spoke topology PoC report**
+  (#41–#43): canonical specification, four new ADRs (hub-and-spoke
+  topology, SQLite local index sidecar, project-aware O(N) gc, MCP
+  server instructions protocol — supersedes ADR-0003 and ADR-0005),
+  and an empirical 3-PC topology verification report.
 
 ## [0.2.3] - 2026-05-08
 
