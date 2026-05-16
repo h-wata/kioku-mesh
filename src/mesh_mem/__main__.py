@@ -7,6 +7,8 @@ sides converge.
 """
 
 import argparse
+from datetime import datetime
+from datetime import timezone
 import sys
 
 from . import __version__
@@ -31,6 +33,50 @@ from .store import set_rebuild_on_init_explicit
 
 def _parse_csv(value: str) -> list[str]:
     return [s.strip() for s in value.split(',') if s.strip()]
+
+
+def _parse_iso_or_none(value: str) -> datetime | None:
+    """Parse an ISO8601 timestamp, treating naive datetimes as UTC."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _delete_has_bulk_selector(args: argparse.Namespace) -> bool:
+    """Return True when any bulk-delete narrowing flag is present."""
+    return bool(args.project or args.pc_id or args.since or args.until)
+
+
+def _select_delete_targets(args: argparse.Namespace) -> tuple[list[Observation], str | None]:
+    """Resolve bulk-delete targets from search filters.
+
+    Returns ``(matches, error_message)`` where ``error_message`` is suitable
+    for stderr output and an exit-code-2 caller path.
+    """
+    until_dt = _parse_iso_or_none(args.until or '')
+    if args.until and until_dt is None:
+        return [], '--until は ISO8601 形式で指定してください。'
+
+    matches = search_observations(
+        project=args.project or '',
+        pc_id=args.pc_id or '',
+        since_iso=args.since or '',
+        limit=MAX_SEARCH,
+    )
+    if len(matches) >= MAX_SEARCH:
+        return [], (
+            f'bulk delete 対象が上限 {MAX_SEARCH} 件に到達しました。'
+            ' --project/--pc-id/--since/--until でさらに絞り込んでください。'
+        )
+    if until_dt is not None:
+        matches = [obs for obs in matches if (_parse_iso_or_none(obs.created_at) or until_dt) <= until_dt]
+    return matches, None
 
 
 def _cmd_save(args: argparse.Namespace) -> int:
@@ -109,6 +155,70 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
 
 
 def _cmd_delete(args: argparse.Namespace) -> int:
+    if args.observation_id and _delete_has_bulk_selector(args):
+        print(
+            'observation_id と bulk selector (--project/--pc-id/--since/--until) は同時指定できません。',
+            file=sys.stderr,
+        )
+        return 2
+    if args.observation_id and args.dry_run:
+        print('--dry-run は bulk delete でのみ指定できます。', file=sys.stderr)
+        return 2
+    if args.observation_id and args.yes:
+        print('--yes は bulk delete でのみ指定できます。', file=sys.stderr)
+        return 2
+
+    if not args.observation_id:
+        if not _delete_has_bulk_selector(args):
+            print(
+                'bulk delete では --project/--pc-id/--since/--until のいずれかが必要です。',
+                file=sys.stderr,
+            )
+            return 2
+        matches, error = _select_delete_targets(args)
+        if error:
+            print(error, file=sys.stderr)
+            return 2
+
+        selector_parts = []
+        if args.project:
+            selector_parts.append(f'project={args.project!r}')
+        if args.pc_id:
+            selector_parts.append(f'pc_id={args.pc_id!r}')
+        if args.since:
+            selector_parts.append(f'since={args.since!r}')
+        if args.until:
+            selector_parts.append(f'until={args.until!r}')
+        selector_text = ', '.join(selector_parts)
+        print(f'bulk delete 対象: {len(matches)} 件 ({selector_text})', file=sys.stderr)
+        if not matches:
+            print('対象なし — 指定条件にマッチする observation がありませんでした。')
+            return 0
+        if args.dry_run:
+            print('Dry run — --yes なしでは削除しません。')
+            return 0
+        if not args.yes:
+            if not sys.stdin.isatty():
+                print(
+                    'bulk delete 実行は対話的確認が必要です。非対話環境では --yes を併用してください。',
+                    file=sys.stderr,
+                )
+                return 2
+            prompt = f'本当に {len(matches)} 件を tombstone 化しますか？ ' "確認のため 'yes' と入力してください: "
+            try:
+                answer = input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                print('\nキャンセルしました。', file=sys.stderr)
+                return 1
+            if answer != 'yes':
+                print('キャンセルしました。', file=sys.stderr)
+                return 1
+
+        for obs in matches:
+            put_tombstone(obs, reason=args.reason or '')
+        print(f'削除（tombstone）完了: {len(matches)} 件')
+        return 0
+
     if len(args.observation_id) != 32:
         print('observation_id は 32 文字の完全一致が必要です。', file=sys.stderr)
         return 2
@@ -299,7 +409,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.set_defaults(func=_cmd_search)
 
     p_delete = sub.add_parser('delete', help='Observation を論理削除 (tombstone)')
-    p_delete.add_argument('observation_id', help='32文字の完全一致 observation_id')
+    p_delete.add_argument('observation_id', nargs='?', default='', help='32文字の完全一致 observation_id')
+    p_delete.add_argument('-p', '--project', default='', help='指定 project の observation を tombstone 化')
+    p_delete.add_argument('--pc-id', dest='pc_id', default='', help='指定 pc_id の observation を tombstone 化')
+    p_delete.add_argument('--since', default='', help='ISO8601 時刻以降に限定')
+    p_delete.add_argument('--until', default='', help='ISO8601 時刻以前に限定')
+    p_delete.add_argument('--dry-run', action='store_true', help='件数だけ表示して削除しない')
+    p_delete.add_argument('--yes', action='store_true', help='bulk delete 時の対話確認をスキップ')
     p_delete.add_argument('-r', '--reason', default='')
     p_delete.set_defaults(func=_cmd_delete)
 

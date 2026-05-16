@@ -29,6 +29,7 @@ from fastmcp import Client  # noqa: E402 — must follow importorskip
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
 from mesh_mem import store  # noqa: E402
+from mesh_mem.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
 
@@ -238,3 +239,91 @@ def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture)
     obs = store.find_observation_by_id(obs_id)
     assert obs is not None
     assert obs.source_files == ['a.py', 'b.py']
+
+
+def test_cli_bulk_delete_dry_run_by_project(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """Bulk delete dry-run reports the count and leaves matching rows visible."""
+    target_a = Observation(content='bulk-dry-a', project='bulk-dry')
+    target_b = Observation(content='bulk-dry-b', project='bulk-dry')
+    other = Observation(content='bulk-dry-other', project='other-project')
+    store.put_observation(target_a)
+    store.put_observation(target_b)
+    store.put_observation(other)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(['delete', '--project', 'bulk-dry', '--dry-run'])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "bulk delete 対象: 2 件 (project='bulk-dry')" in captured.err
+    assert 'Dry run' in captured.out
+
+    visible = {obs.observation_id for obs in store.search_observations(project='bulk-dry')}
+    assert target_a.observation_id in visible
+    assert target_b.observation_id in visible
+    assert other.observation_id not in visible
+
+
+def test_cli_bulk_delete_requires_yes_in_noninteractive(
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Non-interactive bulk delete must require ``--yes`` before mutating state."""
+    target = Observation(content='bulk-needs-yes', project='bulk-needs-yes')
+    store.put_observation(target)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(['delete', '--project', 'bulk-needs-yes'])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert '非対話環境では --yes を併用してください。' in captured.err
+
+    visible = {obs.observation_id for obs in store.search_observations(project='bulk-needs-yes')}
+    assert target.observation_id in visible
+
+
+def test_cli_bulk_delete_executes_with_until_filter(
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Bulk delete honors ``--until`` and tombstones only matching rows."""
+    old_obs = Observation(
+        content='bulk-until-old',
+        project='bulk-until',
+        created_at='2026-05-01T00:00:00.000000Z',
+    )
+    new_obs = Observation(
+        content='bulk-until-new',
+        project='bulk-until',
+        created_at='2026-05-20T00:00:00.000000Z',
+    )
+    store.put_observation(old_obs)
+    store.put_observation(new_obs)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(
+        [
+            'delete',
+            '--project',
+            'bulk-until',
+            '--until',
+            '2026-05-10T00:00:00Z',
+            '--yes',
+        ]
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "bulk delete 対象: 1 件 (project='bulk-until', until='2026-05-10T00:00:00Z')" in captured.err
+    assert '削除（tombstone）完了: 1 件' in captured.out
+    time.sleep(_INGEST_SETTLE)
+
+    visible = {obs.observation_id for obs in store.search_observations(project='bulk-until')}
+    assert old_obs.observation_id not in visible
+    assert new_obs.observation_id in visible
+
+
+def test_cli_bulk_delete_requires_selector(capsys: pytest.CaptureFixture) -> None:
+    """Bulk mode without id or narrowing selector is rejected."""
+    rc = cli_main(['delete'])
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert 'bulk delete では --project/--pc-id/--since/--until のいずれかが必要です。' in captured.err

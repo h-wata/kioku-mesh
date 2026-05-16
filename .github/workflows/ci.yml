@@ -24,6 +24,13 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Install zenohd
+        run: |
+          echo "deb [trusted=yes] https://download.eclipse.org/zenoh/debian-repo/ /" \
+            | sudo tee /etc/apt/sources.list.d/zenoh.list
+          sudo apt update
+          sudo apt install -y zenoh
+
       - name: Install package + dev/test extras
         run: |
           python -m pip install --upgrade pip
