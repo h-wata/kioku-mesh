@@ -626,11 +626,24 @@ def find_observation_by_id(observation_id: str) -> Observation | None:
     return _find_by_id_via_zenoh(observation_id)
 
 
+def _is_valid_observation_id(observation_id: str) -> bool:
+    """Return True when ``observation_id`` is a 32-character hex string."""
+    if len(observation_id) != 32:
+        return False
+    try:
+        int(observation_id, 16)
+    except ValueError:
+        return False
+    return True
+
+
 @with_retry
 def _find_by_id_via_zenoh(observation_id: str) -> Observation | None:
-    """Direct Zenoh ``mem/obs/**`` scan, retained for fallback / index-miss."""
+    """Query Zenoh by leaf id, retained for fallback / index-miss."""
+    if not _is_valid_observation_id(observation_id):
+        return None
     session = get_session()
-    for ok in _iter_ok_replies(session, 'mem/obs/**'):
+    for ok in _iter_ok_replies(session, f'mem/obs/**/{observation_id}'):
         try:
             obs = Observation.from_json(ok.payload.to_string())
         except Exception:  # noqa: BLE001
