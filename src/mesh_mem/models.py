@@ -97,14 +97,15 @@ class Observation:
 
         A peer running a future schema may emit a ``memory_type`` value not
         in this version's :data:`VALID_MEMORY_TYPES`. To preserve forward-
-        compat, we clamp such values to ``"note"`` and log at WARNING — the
+        compat, we clamp such values to ``"note"`` and log at DEBUG so
+        full scans of legacy data do not spam WARNING-level logs. The
         observation is still ingested, just relabelled. The original value
         is lost on the receiver, which is acceptable for v0.x.
         """
         parsed = json.loads(data)
         raw_type = parsed.get('memory_type')
         if raw_type is not None and raw_type not in VALID_MEMORY_TYPES:
-            log.warning(
+            log.debug(
                 'Observation.from_json: clamping unknown memory_type %r to "note" (peer may be on a newer schema)',
                 raw_type,
             )

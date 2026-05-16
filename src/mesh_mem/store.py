@@ -14,6 +14,7 @@ bugs are not hidden by a retry loop.
 """
 
 from collections import Counter
+from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ import functools
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any
 
@@ -46,6 +48,12 @@ _index: LocalIndex | None = None
 _subscribers: list | None = None
 _mesh_first_probe_success: float | None = None
 _mesh_session_start_time: float | None = None
+_PUT_HISTORY_LIMIT = 20
+_transport_status_lock = threading.Lock()
+_zenoh_session_state = 'unknown'
+_last_put_at_iso = ''
+_last_put_status = 'never'
+_recent_put_results: deque[str] = deque(maxlen=_PUT_HISTORY_LIMIT)
 
 # Default rebuild-on-init policy. Long-lived processes (mesh-mem-mcp) keep
 # the default ``True`` so the local SQLite index aligns with zenoh once at
@@ -57,6 +65,65 @@ _mesh_session_start_time: float | None = None
 # ``--rebuild`` flag) outranks both env vars.
 _rebuild_on_init_default: bool = True
 _rebuild_explicit_override: bool | None = None
+
+
+@dataclass(frozen=True)
+class TransportStatus:
+    """Ephemeral transport-health snapshot for status reporting."""
+
+    zenoh_session: str
+    last_put_at_iso: str
+    last_put_status: str
+    recent_put_ok: int
+    recent_put_error: int
+    recent_put_window: int
+
+
+def _now_iso_utc() -> str:
+    """Return the current UTC timestamp in the project's compact ISO form."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+def _set_zenoh_session_state(state: str) -> None:
+    """Update the last-known Zenoh session connectivity label."""
+    global _zenoh_session_state
+    with _transport_status_lock:
+        _zenoh_session_state = state
+
+
+def _record_put_result(status: str) -> None:
+    """Record the final outcome of a high-level put operation."""
+    global _last_put_at_iso, _last_put_status
+    at_iso = _now_iso_utc()
+    with _transport_status_lock:
+        _last_put_at_iso = at_iso
+        _last_put_status = status
+        _recent_put_results.append(status)
+
+
+def get_transport_status() -> TransportStatus:
+    """Return lightweight in-memory transport / put health for diagnostics."""
+    with _transport_status_lock:
+        ok_count = sum(1 for status in _recent_put_results if status == 'ok')
+        err_count = len(_recent_put_results) - ok_count
+        return TransportStatus(
+            zenoh_session=_zenoh_session_state,
+            last_put_at_iso=_last_put_at_iso,
+            last_put_status=_last_put_status,
+            recent_put_ok=ok_count,
+            recent_put_error=err_count,
+            recent_put_window=len(_recent_put_results),
+        )
+
+
+def _reset_transport_status() -> None:
+    """Clear in-memory transport diagnostics (test-only reset path)."""
+    global _zenoh_session_state, _last_put_at_iso, _last_put_status
+    with _transport_status_lock:
+        _zenoh_session_state = 'unknown'
+        _last_put_at_iso = ''
+        _last_put_status = 'never'
+        _recent_put_results.clear()
 
 
 def set_rebuild_on_init_default(rebuild: bool) -> None:
@@ -177,6 +244,7 @@ def _reset_index() -> None:
     _index = None
     _rebuild_on_init_default = True
     _rebuild_explicit_override = None
+    _reset_transport_status()
 
 
 class QueryErrorReply(Exception):
@@ -223,8 +291,13 @@ def get_session() -> zenoh.Session:
     """Return the cached Zenoh session, opening it on first use or after reset."""
     global _session, _mesh_session_start_time
     if _session is None:
-        _session = _open_session()
+        try:
+            _session = _open_session()
+        except _RETRYABLE_EXC:
+            _set_zenoh_session_state('disconnected')
+            raise
         _mesh_session_start_time = time.monotonic()
+        _set_zenoh_session_state('connected')
     return _session
 
 
@@ -275,16 +348,30 @@ def with_retry(func: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(func)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         last_exc: BaseException | None = None
+        track_put = func.__name__ in {'put_observation', 'put_tombstone'}
         for attempt in range(2):
             try:
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                if track_put:
+                    _set_zenoh_session_state('connected')
+                    _record_put_result('ok')
+                return result
             except _RETRYABLE_EXC as e:
                 last_exc = e
                 log.warning('%s retryable failure (attempt %d): %s', func.__name__, attempt + 1, e)
+                if track_put:
+                    _set_zenoh_session_state('disconnected')
                 _reset_session()
                 time.sleep(0.2 * (attempt + 1))
+            except Exception as e:
+                if track_put:
+                    _record_put_result(f'error: {type(e).__name__}')
+                raise
             # Any exception not in _RETRYABLE_EXC propagates untouched.
-        raise RuntimeError(f'{func.__name__} failed after retry') from last_exc
+        assert last_exc is not None  # for type-checkers; loop always sets this on final failure
+        if track_put:
+            _record_put_result(f'error: {type(last_exc).__name__}')
+        raise RuntimeError(f'{func.__name__} failed after retry: {type(last_exc).__name__}: {last_exc}') from last_exc
 
     return wrapped
 

@@ -6,6 +6,9 @@ arguments to ``save_observation`` so an LLM cannot contaminate the id
 space by guessing values. Narrow-down is allowed on ``search_memory``.
 """
 
+from contextlib import closing
+import os
+import socket
 import sys
 
 from fastmcp import FastMCP
@@ -16,6 +19,7 @@ from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import find_observation_by_id
+from .store import get_transport_status
 from .store import MAX_SEARCH
 from .store import put_observation
 from .store import put_tombstone
@@ -56,6 +60,58 @@ search results stay scannable.
 """
 
 mcp = FastMCP('mesh-mem', instructions=_INSTRUCTIONS)
+
+
+def _split_zenoh_connect_endpoints(raw: str | None) -> list[str]:
+    """Split ZENOH_CONNECT into endpoint strings.
+
+    The project historically uses a single endpoint string such as
+    ``tcp/127.0.0.1:7447``. For startup diagnostics we also tolerate a
+    comma-separated list and treat any reachable endpoint as healthy.
+    """
+    if raw is None:
+        return []
+    return [part.strip() for part in raw.split(',') if part.strip()]
+
+
+def _parse_tcp_endpoint(endpoint: str) -> tuple[str, int] | None:
+    """Extract a TCP host/port pair from ``tcp/<host>:<port>``."""
+    if not endpoint.startswith('tcp/'):
+        return None
+    host_port = endpoint.removeprefix('tcp/')
+    host, sep, port_text = host_port.rpartition(':')
+    if not sep or not host or not port_text:
+        return None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    return host.strip('[]'), port
+
+
+def _warn_if_zenoh_connect_unreachable() -> None:
+    """Emit a startup warning when every configured TCP endpoint is unreachable."""
+    raw = os.environ.get('ZENOH_CONNECT')
+    if raw is None:
+        return
+    endpoints = _split_zenoh_connect_endpoints(raw)
+    parsed = [_parse_tcp_endpoint(endpoint) for endpoint in endpoints]
+    targets = [target for target in parsed if target is not None]
+    if not targets:
+        return
+
+    last_error = 'unreachable'
+    for host, port in targets:
+        try:
+            with closing(socket.create_connection((host, port), timeout=0.5)):
+                return
+        except OSError as e:
+            last_error = str(e).strip() or type(e).__name__
+
+    print(
+        f'WARNING: ZENOH_CONNECT={raw} is unreachable ({last_error}). ' 'Saves will fail until the router is up.',
+        file=sys.stderr,
+    )
 
 
 @mcp.tool()
@@ -213,6 +269,7 @@ def get_memory_status() -> str:
     """
     try:
         recent = search_observations(limit=MAX_SEARCH)
+        transport = get_transport_status()
         by_family: dict[str, int] = {}
         by_pc: dict[str, int] = {}
         for obs in recent:
@@ -224,6 +281,10 @@ def get_memory_status() -> str:
             f'python: {sys.executable}',
             f'pc_id: {get_pc_id()}',
             f'session_id: {get_session_id()}',
+            f'zenoh_session: {transport.zenoh_session}',
+            f'last_put_at_iso: {transport.last_put_at_iso or "-"}',
+            f'last_put_status: {transport.last_put_status}',
+            f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error',
             f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}'
             + (' ※上限到達の可能性あり、絞り込み推奨' if truncated else ''),
         ]
@@ -238,6 +299,7 @@ def get_memory_status() -> str:
 
 def main() -> None:
     """Entry point for the ``mesh-mem-mcp`` console script."""
+    _warn_if_zenoh_connect_unreachable()
     mcp.run()
 
 
