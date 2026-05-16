@@ -1,13 +1,13 @@
 """Unit tests for mesh-mem data models."""
 
 import json
-import logging
 
 import pytest
 
 from mesh_mem.models import Observation
 from mesh_mem.models import Tombstone
 from mesh_mem.models import VALID_MEMORY_TYPES
+import mesh_mem.models as models_module
 
 
 def test_observation_key_expr_contains_all_identity_fragments() -> None:
@@ -179,19 +179,24 @@ def test_observation_accepts_all_documented_memory_types() -> None:
         assert obs.memory_type == mt
 
 
-def test_observation_from_json_clamps_unknown_memory_type(caplog: pytest.LogCaptureFixture) -> None:
+def test_observation_from_json_clamps_unknown_memory_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clamp unknown memory_type to 'note' for forward-compat.
 
     A peer on a future schema may emit a value not in VALID_MEMORY_TYPES.
     ``from_json`` must clamp to 'note' rather than raise so replication
     does not stall on schema drift.
     """
+    debug_msgs: list[str] = []
+
+    def _debug(msg: str, *args: object) -> None:
+        debug_msgs.append(msg % args if args else msg)
+
+    monkeypatch.setattr(models_module.log, 'debug', _debug)
     raw = {
         'content': 'from a future peer',
         'memory_type': 'feature',  # not in VALID_MEMORY_TYPES
         'observation_id': 'a' * 32,
     }
-    with caplog.at_level(logging.WARNING, logger='mesh_mem.models'):
-        obs = Observation.from_json(json.dumps(raw))
+    obs = Observation.from_json(json.dumps(raw))
     assert obs.memory_type == 'note'
-    assert any('feature' in rec.message for rec in caplog.records)
+    assert any('feature' in msg for msg in debug_msgs)

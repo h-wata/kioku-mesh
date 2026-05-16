@@ -120,8 +120,44 @@ def test_search_final_failure_preserves_cause(monkeypatch: pytest.MonkeyPatch) -
 
     with pytest.raises(RuntimeError) as ei:
         store.search_observations()
+    message = str(ei.value)
+    assert 'failed after retry' in message
+    assert 'QueryErrorReply' in message
+    assert 'still broken' in message
     assert ei.value.__cause__ is not None
     assert isinstance(ei.value.__cause__, QueryErrorReply)
+
+
+def test_put_failure_updates_transport_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed put must surface as disconnected transport health (#48)."""
+
+    class _BrokenSession:
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            raise ConnectionError('router down')
+
+        def close(self) -> None:
+            pass
+
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, '_open_session', lambda: _BrokenSession())
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    store._reset_session()
+    store._reset_index()
+
+    with pytest.raises(RuntimeError) as ei:
+        store.put_observation(Observation(content='fails'))
+
+    assert 'ConnectionError' in str(ei.value)
+    status = store.get_transport_status()
+    assert status.zenoh_session == 'disconnected'
+    assert status.last_put_status == 'error: ConnectionError'
+    assert status.last_put_at_iso.endswith('Z')
+    assert status.recent_put_ok == 0
+    assert status.recent_put_error == 1
+    assert status.recent_put_window == 1
 
 
 def test_search_via_zenoh_deduplicates_by_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:

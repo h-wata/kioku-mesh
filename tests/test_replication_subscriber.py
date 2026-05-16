@@ -7,7 +7,6 @@ is a pure unit test and does not need a router.
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 
@@ -76,7 +75,7 @@ def test_subscriber_picks_up_remote_tombstone(single_zenohd: Any) -> None:
 
 def test_subscriber_demotes_non_json_payload_to_debug(
     single_zenohd: Any,  # noqa: ARG001
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Issue #31: non-JSON payloads must log DEBUG, not WARNING.
 
@@ -84,26 +83,34 @@ def test_subscriber_demotes_non_json_payload_to_debug(
     with non-Observation bytes. The subscriber must absorb those without
     emitting WARNING-level noise — DEBUG is the new contract.
     """
+    debug_msgs: list[str] = []
+    warning_msgs: list[str] = []
+
+    def _debug(msg: str, *args: object) -> None:
+        debug_msgs.append(msg % args if args else msg)
+
+    def _warning(msg: str, *args: object) -> None:
+        warning_msgs.append(msg % args if args else msg)
+
+    monkeypatch.setattr(store.log, 'debug', _debug)
+    monkeypatch.setattr(store.log, 'warning', _warning)
+
     # Make sure the subscriber is registered.
     store.get_index()
 
     remote = _remote_session(single_zenohd.endpoint)
     try:
-        with caplog.at_level(logging.DEBUG, logger='mesh_mem.store'):
-            # Publish gibberish under both keyspaces the subscriber watches.
-            remote.put('mem/obs/x/y/z/sess/garbage', 'not json at all')
-            remote.put('mem/tomb/x/y/z/sess/garbage', '{not json either')
-            time.sleep(_SETTLE)
+        # Publish gibberish under both keyspaces the subscriber watches.
+        remote.put('mem/obs/x/y/z/sess/garbage', 'not json at all')
+        remote.put('mem/tomb/x/y/z/sess/garbage', '{not json either')
+        time.sleep(_SETTLE)
     finally:
         remote.close()
 
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == 'mesh_mem.store']
-    assert not warnings, f'non-JSON payloads must NOT log WARNING; got {[w.message for w in warnings]}'
-
-    debug_msgs = [r.message for r in caplog.records if r.levelno == logging.DEBUG and r.name == 'mesh_mem.store']
     assert any(
         'non-JSON payload' in m for m in debug_msgs
     ), 'expected DEBUG log for non-JSON payload (one of on_obs/on_tomb)'
+    assert not warning_msgs, f'non-JSON payloads must NOT log WARNING; got {warning_msgs}'
 
 
 def test_startup_rebuild_runs_when_index_empty(single_zenohd: Any) -> None:  # noqa: ARG001

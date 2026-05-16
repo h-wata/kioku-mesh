@@ -27,6 +27,7 @@ from fastmcp import Client  # noqa: E402 — must follow importorskip
 
 from mesh_mem import store  # noqa: E402
 from mesh_mem.mcp_server import mcp  # noqa: E402
+import mesh_mem.mcp_server as mcp_server_module  # noqa: E402
 from mesh_mem.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
@@ -202,8 +203,96 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'mesh-mem version' in text
     assert 'pc_id' in text
     assert 'session_id' in text
+    assert 'zenoh_session: connected' in text
+    assert 'last_put_status: ok' in text
+    assert 'recent_puts: 2 ok / 0 error' in text
     # At least the 2 we put show up in the count summary.
     assert '件数' in text
+
+
+def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mcp_server_module, 'search_observations', lambda limit=store.MAX_SEARCH: [])
+    monkeypatch.setattr(
+        mcp_server_module,
+        'get_transport_status',
+        lambda: store.TransportStatus(
+            zenoh_session='disconnected',
+            last_put_at_iso='2026-05-16T00:00:00.000000Z',
+            last_put_status='error: ZError',
+            recent_put_ok=18,
+            recent_put_error=2,
+            recent_put_window=20,
+        ),
+    )
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'zenoh_session: disconnected' in text
+    assert 'last_put_at_iso: 2026-05-16T00:00:00.000000Z' in text
+    assert 'last_put_status: error: ZError' in text
+    assert 'recent_puts: 18 ok / 2 error' in text
+
+
+def test_main_warns_when_zenoh_connect_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setenv('ZENOH_CONNECT', 'tcp/127.0.0.1:65534')
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: None)
+
+    def _fail(addr: tuple[str, int], timeout: float = 0.5) -> Any:  # noqa: ARG001
+        raise ConnectionRefusedError('connect refused')
+
+    monkeypatch.setattr(mcp_server_module.socket, 'create_connection', _fail)
+
+    mcp_server_module.main()
+    err = capsys.readouterr().err
+    assert 'WARNING: ZENOH_CONNECT=tcp/127.0.0.1:65534 is unreachable' in err
+    assert 'connect refused' in err
+
+
+def test_main_skips_warning_when_any_zenoh_endpoint_is_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setenv('ZENOH_CONNECT', 'tcp/127.0.0.1:1,tcp/127.0.0.1:7447')
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: None)
+
+    class _DummySocket:
+        def close(self) -> None:
+            pass
+
+    calls: list[tuple[str, int]] = []
+
+    def _probe(addr: tuple[str, int], timeout: float = 0.5) -> Any:  # noqa: ARG001
+        calls.append(addr)
+        if addr[1] == 1:
+            raise ConnectionRefusedError('first down')
+        return _DummySocket()
+
+    monkeypatch.setattr(mcp_server_module.socket, 'create_connection', _probe)
+
+    mcp_server_module.main()
+    captured = capsys.readouterr()
+    assert captured.err == ''
+    assert calls == [('127.0.0.1', 1), ('127.0.0.1', 7447)]
+
+
+def test_main_skips_warning_when_zenoh_connect_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: None)
+
+    mcp_server_module.main()
+    captured = capsys.readouterr()
+    assert captured.err == ''
 
 
 def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # noqa: ARG001
