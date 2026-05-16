@@ -128,6 +128,30 @@ def test_search_final_failure_preserves_cause(monkeypatch: pytest.MonkeyPatch) -
     assert isinstance(ei.value.__cause__, QueryErrorReply)
 
 
+def test_find_by_id_via_zenoh_uses_leaf_selector(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #40 stage 1: fallback lookup must query by leaf observation_id."""
+    obs = Observation(content='needle')
+    fake = _FakeSession([[_ok_reply(obs)]])
+    _install_fake_session(monkeypatch, fake)
+
+    hit = store.find_observation_by_id(obs.observation_id)
+
+    assert hit is not None
+    assert hit.observation_id == obs.observation_id
+    assert fake.calls == [f'mem/obs/**/{obs.observation_id}']
+
+
+def test_find_by_id_via_zenoh_rejects_invalid_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid ids must not be interpolated into a Zenoh key expression."""
+    fake = _FakeSession([])
+    _install_fake_session(monkeypatch, fake)
+
+    hit = store.find_observation_by_id('../not-a-hex-id')
+
+    assert hit is None
+    assert fake.calls == []
+
+
 def test_put_failure_updates_transport_status(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed put must surface as disconnected transport health (#48)."""
 
