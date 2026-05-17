@@ -20,6 +20,7 @@ from .store import _reset_session
 from .store import execute_bulk_purge
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
+from .store import get_transport_status
 from .store import MAX_SEARCH
 from .store import mesh_ready_label
 from .store import physical_delete_observation
@@ -237,6 +238,7 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     except Exception as e:  # noqa: BLE001
         print(f'共有メモリ取得失敗 [{type(e).__name__}]: {e}', file=sys.stderr)
         return 1
+    transport = get_transport_status()
     by_family: dict[str, int] = {}
     by_pc: dict[str, int] = {}
     for obs in recent:
@@ -246,6 +248,11 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f'mesh-mem version: {__version__}')
     print(f'pc_id: {get_pc_id()}')
     print(f'session_id: {get_session_id()}')
+    print(f'zenoh_session: {transport.zenoh_session}')
+    print(f'last_put_at_iso: {transport.last_put_at_iso or "-"}')
+    print(f'last_put_status: {transport.last_put_status}')
+    print(f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error')
+    print(f'pending_puts: {transport.pending_puts}')
     print(f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}{" ※上限到達の可能性あり" if truncated else ""}')
     for family, count in sorted(by_family.items()):
         print(f'  family {family}: {count}件')

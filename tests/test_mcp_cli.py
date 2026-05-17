@@ -29,6 +29,7 @@ from fastmcp import Client  # noqa: E402 — must follow importorskip
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
 from mesh_mem import store  # noqa: E402
+import mesh_mem.__main__ as cli_module  # noqa: E402
 from mesh_mem.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
@@ -216,6 +217,39 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
     assert 'short-summary' in out
     assert f'<id={obs_id}>' in out
     assert '[note][2]' in out
+
+
+def test_cli_status_reports_transport_and_pending_puts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(cli_module, 'search_observations', lambda limit=store.MAX_SEARCH: [])
+    monkeypatch.setattr(cli_module, 'get_pc_id', lambda: 'p' * 32)
+    monkeypatch.setattr(cli_module, 'get_session_id', lambda: 'test-session')
+    monkeypatch.setattr(cli_module, 'mesh_ready_label', lambda: 'yes')
+    monkeypatch.setattr(
+        cli_module,
+        'get_transport_status',
+        lambda: store.TransportStatus(
+            zenoh_session='disconnected',
+            last_put_at_iso='2026-05-17T00:00:00.000000Z',
+            last_put_status='error: ConnectionError',
+            recent_put_ok=4,
+            recent_put_error=1,
+            recent_put_window=5,
+            pending_puts=2,
+        ),
+    )
+
+    rc = cli_main(['status'])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'zenoh_session: disconnected' in out
+    assert 'last_put_at_iso: 2026-05-17T00:00:00.000000Z' in out
+    assert 'last_put_status: error: ConnectionError' in out
+    assert 'recent_puts: 4 ok / 1 error' in out
+    assert 'pending_puts: 2' in out
 
 
 def test_cli_save_importance_out_of_range(capsys: pytest.CaptureFixture) -> None:

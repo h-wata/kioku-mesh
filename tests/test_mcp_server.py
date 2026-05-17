@@ -206,6 +206,7 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'zenoh_session: connected' in text
     assert 'last_put_status: ok' in text
     assert 'recent_puts: 2 ok / 0 error' in text
+    assert 'pending_puts: 0' in text
     # At least the 2 we put show up in the count summary.
     assert '件数' in text
 
@@ -222,6 +223,7 @@ def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.Mo
             recent_put_ok=18,
             recent_put_error=2,
             recent_put_window=20,
+            pending_puts=3,
         ),
     )
 
@@ -236,6 +238,7 @@ def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.Mo
     assert 'last_put_at_iso: 2026-05-16T00:00:00.000000Z' in text
     assert 'last_put_status: error: ZError' in text
     assert 'recent_puts: 18 ok / 2 error' in text
+    assert 'pending_puts: 3' in text
 
 
 def test_main_warns_when_zenoh_connect_unreachable(
