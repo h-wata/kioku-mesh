@@ -99,6 +99,8 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 `pc_id` の初回生成は一時ファイルと hard link publish により、複数プロセスの同時起動でも空ファイルや不一致 ID を避けます。`MESH_MEM_STATE_DIR` は POSIX hard link をサポートするファイルシステム上に置く必要があります。
 
+複数 agent を 1 ホストで同時に動かす場合の `agent_family` / `client_id` の付け方、`direnv` でのスコープ化、MCP-launched agent への env 渡し方は [docs/multi-agent.md](multi-agent.md) を参照。
+
 状態ディレクトリ:
 
 - `MESH_MEM_STATE_DIR` が非空ならそれを使用。
@@ -265,6 +267,8 @@ MCP 初期化時の instructions には、エージェントが能動的に `sav
 
 MCP tool は identity を引数に持ちません。検索 tool だけは narrowing 用に identity フィルタを受け付けます。
 
+クライアント別の MCP 登録手順（Claude Code / Claude Desktop / Gemini CLI / Codex CLI / ChatGPT Desktop）と、Claude Code の SessionStart hook で起動時に直近メモリを注入する運用は [docs/mcp-clients.md](mcp-clients.md) を参照。
+
 ## 11. レプリケーションと整合性
 
 複数 zenohd router を接続し、RocksDB storage backend の replication によって Observation と Tombstone を eventual-consistent に同期します。
@@ -299,7 +303,7 @@ MCP tool は identity を引数に持ちません。検索 tool だけは narrow
 - FTS5 による全文検索は未実装。現在の SQLite 検索は `payload_json` への substring match。
 - CLI は one-shot 起動で rebuild を skip するため、新規 host が既存 mesh の過去データをすぐ検索したい場合は `mesh-mem --rebuild ...` を明示する。
 - `gc --force-id` の wildcard purge は best-effort。到達不能 peer への完了確認はない。
-- Native Windows は実験的扱い。CI は Linux 前提。
+- Native Windows は実験的扱い。CI は Linux 前提。WSL2 を強く推奨。ネイティブ Windows ホストの zenohd / RocksDB / Firewall / 時刻同期セットアップ手順は [docs/windows-setup.md](windows-setup.md) を参照。
 - 0.x 系のため、API や on-disk schema は 1.0 まで互換性維持が保証されない。
 
 ## 14. テストで確認されている範囲
@@ -314,4 +318,4 @@ MCP tool は identity を引数に持ちません。検索 tool だけは narrow
 - 2 router の offline diff sync と tombstone propagation。
 - GC retention、project filter、`--force-id`、wildcard delete 失敗時の耐性。
 
-実機・運用手順の詳細は `README.md`、設計判断の背景は `docs/adr/`、PoC 検証結果は `docs/poc-reports/` を参照してください。
+実機・運用手順の概要は `README.md`、プラットフォーム別・マルチエージェント・MCP クライアント別の詳細手順は `docs/` 配下（[windows-setup.md](windows-setup.md) / [multi-agent.md](multi-agent.md) / [mcp-clients.md](mcp-clients.md) / [migration.md](migration.md)）、設計判断の背景は `docs/adr/`、PoC 検証結果は `docs/poc-reports/` を参照してください。
