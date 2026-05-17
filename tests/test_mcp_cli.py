@@ -12,6 +12,7 @@ an environment without ``pip install -e .`` should not fail here.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import shutil
@@ -217,6 +218,116 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
     assert 'short-summary' in out
     assert f'<id={obs_id}>' in out
     assert '[note][2]' in out
+
+
+def test_cli_search_markdown_fallbacks(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """Markdown output is one bullet per row with subject/summary/content fallback."""
+    with_subject = Observation(
+        content='body-subject',
+        project='proj-search-md',
+        subject='issue-58',
+        summary='accepted plan',
+    )
+    with_summary = Observation(
+        content='body-summary',
+        project='proj-search-md',
+        summary='summary-only',
+    )
+    with_content = Observation(
+        content='x' * 90,
+        project='proj-search-md',
+    )
+    store.put_observation(with_subject)
+    store.put_observation(with_summary)
+    store.put_observation(with_content)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(['search', '--project', 'proj-search-md', '--format', 'markdown'])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 3
+    assert all(line.startswith('- **[') for line in lines)
+    assert f'issue-58 — accepted plan <id={with_subject.observation_id}>' in out
+    assert f'summary-only <id={with_summary.observation_id}>' in out
+    assert f'{"x" * 80}… <id={with_content.observation_id}>' in out
+
+
+def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """JSON output returns full observation objects."""
+    rc = cli_main(
+        [
+            'save',
+            'json-body',
+            '--memory-type',
+            'decision',
+            '--importance',
+            '4',
+            '--subject',
+            'json-subject',
+            '--summary',
+            'json-summary',
+            '--source-files',
+            'a.py,b.py',
+            '--supersedes',
+            'a' * 32,
+            '--tags',
+            'x,y',
+            '-p',
+            'proj-search-json',
+        ]
+    )
+    assert rc == 0
+    obs_id = capsys.readouterr().out.strip().split()[-1]
+
+    time.sleep(_INGEST_SETTLE)
+    rc2 = cli_main(['search', '--project', 'proj-search-json', '--format', 'json'])
+
+    assert rc2 == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    row = payload[0]
+    assert set(row) >= {
+        'content',
+        'agent_family',
+        'client_id',
+        'pc_id',
+        'session_id',
+        'project',
+        'tags',
+        'observation_id',
+        'created_at',
+        'memory_type',
+        'importance',
+        'subject',
+        'summary',
+        'source_files',
+        'supersedes',
+    }
+    assert row['observation_id'] == obs_id
+    assert row['memory_type'] == 'decision'
+    assert row['importance'] == 4
+    assert row['subject'] == 'json-subject'
+    assert row['summary'] == 'json-summary'
+    assert row['source_files'] == ['a.py', 'b.py']
+    assert row['supersedes'] == ['a' * 32]
+    assert row['tags'] == ['x', 'y']
+
+
+def test_cli_search_empty_format_variants(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    """Empty search results follow the per-format output contract."""
+    monkeypatch.setattr(cli_module, 'search_observations', lambda **kwargs: [])
+
+    assert cli_main(['search']) == 0
+    assert capsys.readouterr().out == '該当するメモリはありません。\n'
+
+    assert cli_main(['search', '--format', 'markdown']) == 0
+    assert capsys.readouterr().out == ''
+
+    assert cli_main(['search', '--format', 'json']) == 0
+    assert capsys.readouterr().out == '[]\n'
 
 
 def test_cli_status_reports_transport_and_pending_puts(

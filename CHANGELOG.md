@@ -18,6 +18,13 @@ versions without a migration path until `1.0.0`.
   `pending_puts` count is exposed in CLI `status` and MCP
   `get_memory_status`. Recovery trigger is currently bound to the next
   successful save; startup / manual drain to be added as a follow-up.
+- **`mesh-mem search --format {text,markdown,json}`** (#58). Search now
+  supports stable machine-oriented JSON output plus single-line markdown
+  bullets suitable for SessionStart hooks, while preserving the previous
+  human-readable text output as the default.
+- **Sample Claude Code SessionStart hook script** (#58). Added
+  `scripts/hooks/session-start.sh` plus README setup instructions for
+  loading recent mesh-mem context into a new Claude Code session.
 
 ### Changed
 
