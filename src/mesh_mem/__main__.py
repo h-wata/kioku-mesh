@@ -9,6 +9,7 @@ sides converge.
 import argparse
 from datetime import datetime
 from datetime import timezone
+import json
 import sys
 
 from . import __version__
@@ -30,6 +31,8 @@ from .store import scan_obs_by_pc_id
 from .store import search_observations
 from .store import set_rebuild_on_init_default
 from .store import set_rebuild_on_init_explicit
+
+_SEARCH_FORMATS = ('text', 'markdown', 'json')
 
 
 def _parse_csv(value: str) -> list[str]:
@@ -100,6 +103,52 @@ def _cmd_save(args: argparse.Namespace) -> int:
     return 0
 
 
+def _truncate_search_content(content: str, limit: int = 80) -> str:
+    """Return ``content`` truncated for compact search-style summaries."""
+    if len(content) <= limit:
+        return content
+    return content[:limit] + '…'
+
+
+def _format_search_text_entry(obs: Observation) -> str:
+    """Render one search result in the legacy human-readable text format."""
+    body = obs.summary if obs.summary else obs.content[:80]
+    subject_part = f' {obs.subject}' if obs.subject else ''
+    project_part = f' ({obs.project})' if obs.project else ''
+    return (
+        f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
+        f'{project_part}{subject_part}\n'
+        f'{body} <id={obs.observation_id}>'
+    )
+
+
+def _format_search_markdown_body(obs: Observation) -> str:
+    """Render the markdown-mode body with subject/summary/content fallback."""
+    if obs.subject:
+        if obs.summary:
+            return f'{obs.subject} — {obs.summary}'
+        return obs.subject
+    if obs.summary:
+        return obs.summary
+    return _truncate_search_content(obs.content)
+
+
+def _format_search_markdown_entry(obs: Observation) -> str:
+    """Render one search result as a single markdown bullet."""
+    project_part = f' ({obs.project})' if obs.project else ''
+    body = _format_search_markdown_body(obs)
+    return (
+        f'- **[{obs.memory_type}][{obs.importance}]** '
+        f'{obs.created_at[:16]}{project_part} '
+        f'{body} <id={obs.observation_id}>'
+    )
+
+
+def _format_search_json(results: list[Observation]) -> str:
+    """Render search results as a JSON array using the full observation schema."""
+    return json.dumps([json.loads(obs.to_json()) for obs in results], ensure_ascii=False)
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     results = search_observations(
         query=args.query or '',
@@ -112,19 +161,18 @@ def _cmd_search(args: argparse.Namespace) -> int:
         limit=args.limit,
     )
     if not results:
-        print('該当するメモリはありません。')
+        if args.format == 'text':
+            print('該当するメモリはありません。')
+        elif args.format == 'json':
+            print('[]')
         return 0
-    entries = []
-    for obs in results:
-        body = obs.summary if obs.summary else obs.content[:80]
-        subject_part = f' {obs.subject}' if obs.subject else ''
-        project_part = f' ({obs.project})' if obs.project else ''
-        entries.append(
-            f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
-            f'{project_part}{subject_part}\n'
-            f'{body} <id={obs.observation_id}>'
-        )
-    print('\n---\n'.join(entries))
+    if args.format == 'text':
+        print('\n---\n'.join(_format_search_text_entry(obs) for obs in results))
+        return 0
+    if args.format == 'markdown':
+        print('\n'.join(_format_search_markdown_entry(obs) for obs in results))
+        return 0
+    print(_format_search_json(results))
     return 0
 
 
@@ -413,6 +461,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument('-p', '--project', default='')
     p_search.add_argument('--since', default='', help='ISO8601 時刻以降に限定')
     p_search.add_argument('-n', '--limit', type=int, default=50, help='最大件数 (default: 50)')
+    p_search.add_argument('--format', choices=_SEARCH_FORMATS, default='text', help='出力形式 (default: text)')
     p_search.set_defaults(func=_cmd_search)
 
     p_delete = sub.add_parser('delete', help='Observation を論理削除 (tombstone)')
