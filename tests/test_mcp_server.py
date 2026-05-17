@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -48,14 +49,21 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
-def test_list_tools_registers_all_four(single_zenohd: Any) -> None:  # noqa: ARG001
+def test_list_tools_registers_all_tools(single_zenohd: Any) -> None:  # noqa: ARG001
     async def _go() -> list[str]:
         async with Client(mcp) as client:
             tools = await client.list_tools()
             return [t.name for t in tools]
 
     names = _run(_go())
-    assert set(names) >= {'save_observation', 'search_memory', 'delete_memory', 'get_memory_status', 'get_memory'}
+    assert set(names) >= {
+        'save_observation',
+        'search_memory',
+        'delete_memory',
+        'get_memory_status',
+        'get_memory',
+        'drain_pending_puts',
+    }
 
 
 def test_server_advertises_proactive_instructions(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -207,6 +215,7 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'last_put_status: ok' in text
     assert 'recent_puts: 2 ok / 0 error' in text
     assert 'pending_puts: 0' in text
+    assert 'drain_in_progress: no' in text
     # At least the 2 we put show up in the count summary.
     assert '件数' in text
 
@@ -224,6 +233,9 @@ def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.Mo
             recent_put_error=2,
             recent_put_window=20,
             pending_puts=3,
+            drain_in_progress=True,
+            drain_last_run_iso='2026-05-16T00:00:05.000000Z',
+            drain_total_succeeded=9,
         ),
     )
 
@@ -239,6 +251,57 @@ def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.Mo
     assert 'last_put_status: error: ZError' in text
     assert 'recent_puts: 18 ok / 2 error' in text
     assert 'pending_puts: 3' in text
+    assert 'drain_in_progress: yes' in text
+    assert 'drain_last_run_iso: 2026-05-16T00:00:05.000000Z' in text
+    assert 'drain_total_succeeded: 9' in text
+
+
+def test_drain_pending_puts_tool_replays_queued_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _WorkingSession:
+        def __init__(self) -> None:
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+
+        def close(self) -> None:
+            pass
+
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    working = _WorkingSession()
+    monkeypatch.setattr(store, '_open_session', lambda: working)
+    store._reset_session()
+    store._reset_index()
+
+    queued = [Observation(content=f'mcp-drain-{i}', project='mcp-drain') for i in range(2)]
+    for obs in queued:
+        store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('drain_pending_puts', {'limit': 1})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'pending_puts drain 完了: drained=1, remaining=1' in text
+    assert working.put_calls == [queued[0].key_expr]
+
+
+def test_main_starts_and_stops_pending_drain_around_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module, 'start_pending_drain_background', lambda: calls.append('start'))
+    monkeypatch.setattr(mcp_server_module, 'stop_pending_drain_background', lambda: calls.append('stop'))
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: calls.append('run'))
+
+    mcp_server_module.main()
+
+    assert calls == ['start', 'run', 'stop']
 
 
 def test_main_warns_when_zenoh_connect_unreachable(

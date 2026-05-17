@@ -53,11 +53,18 @@ _mesh_session_start_time: float | None = None
 _PUT_HISTORY_LIMIT = 20
 _PENDING_PUTS_LIMIT = 1000
 _PENDING_DRAIN_BATCH = 10
+_PENDING_DRAIN_JOIN_TIMEOUT = 0.2
 _transport_status_lock = threading.Lock()
+_pending_drain_lock = threading.Lock()
 _zenoh_session_state = 'unknown'
 _last_put_at_iso = ''
 _last_put_status = 'never'
 _recent_put_results: deque[str] = deque(maxlen=_PUT_HISTORY_LIMIT)
+_pending_drain_thread: threading.Thread | None = None
+_pending_drain_stop_event: threading.Event | None = None
+_pending_drain_in_progress = False
+_pending_drain_last_run_iso = ''
+_pending_drain_total_succeeded = 0
 
 # Default rebuild-on-init policy. Long-lived processes (mesh-mem-mcp) keep
 # the default ``True`` so the local SQLite index aligns with zenoh once at
@@ -82,6 +89,9 @@ class TransportStatus:
     recent_put_error: int
     recent_put_window: int
     pending_puts: int
+    drain_in_progress: bool
+    drain_last_run_iso: str
+    drain_total_succeeded: int
 
 
 def _now_iso_utc() -> str:
@@ -106,6 +116,23 @@ def _record_put_result(status: str) -> None:
         _recent_put_results.append(status)
 
 
+def _set_pending_drain_in_progress(in_progress: bool) -> None:
+    """Publish whether a background pending-drain worker is active."""
+    global _pending_drain_in_progress
+    with _transport_status_lock:
+        _pending_drain_in_progress = in_progress
+
+
+def _record_pending_drain_success(drained: int) -> None:
+    """Accumulate successful replay counts for status reporting."""
+    global _pending_drain_last_run_iso, _pending_drain_total_succeeded
+    if drained <= 0:
+        return
+    with _transport_status_lock:
+        _pending_drain_last_run_iso = _now_iso_utc()
+        _pending_drain_total_succeeded += drained
+
+
 def get_transport_status() -> TransportStatus:
     """Return lightweight in-memory transport / put health for diagnostics."""
     with _transport_status_lock:
@@ -119,17 +146,24 @@ def get_transport_status() -> TransportStatus:
             recent_put_error=err_count,
             recent_put_window=len(_recent_put_results),
             pending_puts=_count_pending_puts(),
+            drain_in_progress=_pending_drain_in_progress,
+            drain_last_run_iso=_pending_drain_last_run_iso,
+            drain_total_succeeded=_pending_drain_total_succeeded,
         )
 
 
 def _reset_transport_status() -> None:
     """Clear in-memory transport diagnostics (test-only reset path)."""
     global _zenoh_session_state, _last_put_at_iso, _last_put_status
+    global _pending_drain_in_progress, _pending_drain_last_run_iso, _pending_drain_total_succeeded
     with _transport_status_lock:
         _zenoh_session_state = 'unknown'
         _last_put_at_iso = ''
         _last_put_status = 'never'
         _recent_put_results.clear()
+        _pending_drain_in_progress = False
+        _pending_drain_last_run_iso = ''
+        _pending_drain_total_succeeded = 0
 
 
 def set_rebuild_on_init_default(rebuild: bool) -> None:
@@ -241,6 +275,7 @@ def _reset_index() -> None:
     that policy into the next test.
     """
     global _index, _rebuild_on_init_default, _rebuild_explicit_override
+    stop_pending_drain_background()
     _reset_subscribers()
     if _index is not None:
         try:
@@ -558,7 +593,7 @@ def _apply_replayed_put_to_index(replayed: Observation | Tombstone) -> None:
     get_index().mark_deleted(replayed.observation_id, replayed.deleted_at)
 
 
-def _drain_pending_puts_best_effort(limit: int | None = None) -> int:
+def _drain_pending_puts_once_locked(limit: int | None = None) -> int:
     """Replay locally queued puts after a successful live write.
 
     Best-effort only: failures are logged and leave the remaining rows queued.
@@ -567,6 +602,9 @@ def _drain_pending_puts_best_effort(limit: int | None = None) -> int:
     """
     if limit is None:
         limit = _PENDING_DRAIN_BATCH
+    if limit < 1:
+        raise ValueError('limit must be >= 1')
+
     try:
         conn = _open_pending_puts_db()
     except (OSError, sqlite3.Error) as e:
@@ -616,11 +654,109 @@ def _drain_pending_puts_best_effort(limit: int | None = None) -> int:
             log.warning('pending_puts drop malformed row for %s: %s', key_expr, e)
             _delete_pending_put(key_expr)
     remaining = _count_pending_puts()
+    _record_pending_drain_success(drained)
     if drained:
-        log.info('drained %d pending puts (%d remaining)', drained, remaining)
+        log.info(
+            'drained %d pending puts (%d remaining, total_succeeded=%d)',
+            drained,
+            remaining,
+            get_transport_status().drain_total_succeeded,
+        )
     if total_rows > len(rows):
         log.info('pending_puts drain capped at %d rows this call (%d still queued)', len(rows), remaining)
     return drained
+
+
+def _drain_pending_puts_best_effort(limit: int | None = None) -> int:
+    """Replay locally queued puts while holding the shared single-flight lock."""
+    with _pending_drain_lock:
+        return _drain_pending_puts_once_locked(limit=limit)
+
+
+def drain_pending_puts(limit: int | None = None, *, wait: bool = True) -> int:
+    """Drain queued failed puts, optionally skipping when another drain is active."""
+    if wait:
+        return _drain_pending_puts_best_effort(limit=limit)
+    if not _pending_drain_lock.acquire(blocking=False):
+        log.info('pending_puts drain skipped because another drain is already in progress')
+        return 0
+    try:
+        return _drain_pending_puts_once_locked(limit=limit)
+    finally:
+        _pending_drain_lock.release()
+
+
+def _run_pending_drain_background(limit: int | None, stop_event: threading.Event) -> None:
+    """Drain queued puts in bounded batches until empty, blocked, or asked to stop."""
+    _set_pending_drain_in_progress(True)
+    try:
+        log.info('pending_puts background drain started (%d queued)', _count_pending_puts())
+        while not stop_event.is_set():
+            drained = drain_pending_puts(limit=limit, wait=True)
+            remaining = _count_pending_puts()
+            if remaining == 0:
+                log.info('pending_puts background drain finished (0 remaining)')
+                return
+            if drained == 0:
+                log.info('pending_puts background drain paused (%d still queued)', remaining)
+                return
+        log.info('pending_puts background drain stop requested (%d remaining)', _count_pending_puts())
+    finally:
+        global _pending_drain_thread, _pending_drain_stop_event
+        _set_pending_drain_in_progress(False)
+        with _transport_status_lock:
+            if _pending_drain_thread is threading.current_thread():
+                _pending_drain_thread = None
+                _pending_drain_stop_event = None
+
+
+def start_pending_drain_background(limit: int | None = None) -> bool:
+    """Start a daemon worker that drains queued puts if transport is reachable."""
+    global _pending_drain_thread, _pending_drain_stop_event
+    if _count_pending_puts() <= 0:
+        return False
+    try:
+        get_session()
+    except _RETRYABLE_EXC as e:
+        log.info('pending_puts background drain skipped (transport unreachable): %s', e)
+        return False
+    with _transport_status_lock:
+        if _pending_drain_thread is not None and _pending_drain_thread.is_alive():
+            return False
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=_run_pending_drain_background,
+            args=(limit, stop_event),
+            name='mesh-mem-pending-drain',
+            daemon=True,
+        )
+        _pending_drain_stop_event = stop_event
+        _pending_drain_thread = thread
+    thread.start()
+    return True
+
+
+def stop_pending_drain_background(join_timeout: float = _PENDING_DRAIN_JOIN_TIMEOUT) -> bool:
+    """Request shutdown of the background drain worker without blocking long on exit."""
+    global _pending_drain_thread, _pending_drain_stop_event
+    with _transport_status_lock:
+        thread = _pending_drain_thread
+        stop_event = _pending_drain_stop_event
+    if stop_event is not None:
+        stop_event.set()
+    if thread is None:
+        return True
+    if thread is threading.current_thread():
+        return False
+    thread.join(timeout=max(0.0, join_timeout))
+    if thread.is_alive():
+        log.info('pending_puts background drain still running after %.2fs; leaving daemon thread alive', join_timeout)
+        return False
+    with _transport_status_lock:
+        if _pending_drain_thread is thread:
+            _pending_drain_thread = None
+            _pending_drain_stop_event = None
+    return True
 
 
 def start_index_subscriber(session: zenoh.Session) -> list:
@@ -683,7 +819,7 @@ def put_observation(obs: Observation) -> None:
     # zenoh-side write is the contract for callers. The index is a read-
     # acceleration layer; Phase 4 will reconcile it from zenoh on demand.
     get_index().upsert(obs)
-    _drain_pending_puts_best_effort()
+    drain_pending_puts(wait=False)
 
 
 @with_retry
@@ -705,7 +841,7 @@ def put_tombstone(obs: Observation, reason: str = '') -> None:
     _delete_pending_put(key_expr)
     # Keep the row live locally until the tombstone has actually reached the mesh.
     get_index().mark_deleted(obs.observation_id, tomb.deleted_at)
-    _drain_pending_puts_best_effort()
+    drain_pending_puts(wait=False)
 
 
 def search_observations(

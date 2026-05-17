@@ -16,8 +16,12 @@ versions without a migration path until `1.0.0`.
   `put_tombstone` retryable failures are now persisted to
   `state_dir()/pending_puts.db` and replayed on the next successful save.
   `pending_puts` count is exposed in CLI `status` and MCP
-  `get_memory_status`. Recovery trigger is currently bound to the next
-  successful save; startup / manual drain to be added as a follow-up.
+  `get_memory_status`.
+- **Startup and manual drain for pending puts** (#57). `mesh-mem-mcp`
+  now starts a daemon background drain on startup when transport is
+  reachable and queued `pending_puts` exist. Operators can also trigger
+  replay explicitly via `mesh-mem drain --pending [--limit N]` or the MCP
+  `drain_pending_puts` tool.
 - **`mesh-mem search --format {text,markdown,json}`** (#58). Search now
   supports stable machine-oriented JSON output plus single-line markdown
   bullets suitable for SessionStart hooks, while preserving the previous
@@ -30,6 +34,10 @@ versions without a migration path until `1.0.0`.
 
 - **`TransportStatus` schema gained `pending_puts: int`**. Callers that
   destructure the dataclass need to pick up the new field.
+- **Drain progress is surfaced in status output**. CLI `status` and MCP
+  `get_memory_status` now report whether a drain is in progress, the last
+  drain timestamp, and the cumulative number of queued rows replayed by
+  the current process.
 
 ## [0.2.4] - 2026-05-11
 
