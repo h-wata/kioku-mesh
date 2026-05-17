@@ -10,6 +10,20 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Local fallback queue for failed puts** (#50). `put_observation` /
+  `put_tombstone` retryable failures are now persisted to
+  `state_dir()/pending_puts.db` and replayed on the next successful save.
+  `pending_puts` count is exposed in CLI `status` and MCP
+  `get_memory_status`. Recovery trigger is currently bound to the next
+  successful save; startup / manual drain to be added as a follow-up.
+
+### Changed
+
+- **`TransportStatus` schema gained `pending_puts: int`**. Callers that
+  destructure the dataclass need to pick up the new field.
+
 ## [0.2.4] - 2026-05-11
 
 ### Added
