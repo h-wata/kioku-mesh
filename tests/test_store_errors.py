@@ -182,6 +182,205 @@ def test_put_failure_updates_transport_status(monkeypatch: pytest.MonkeyPatch) -
     assert status.recent_put_ok == 0
     assert status.recent_put_error == 1
     assert status.recent_put_window == 1
+    assert status.pending_puts == 1
+
+
+def test_failed_put_is_queued_and_replayed_on_next_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #50: failed puts survive transport loss and drain on later success."""
+
+    class _BrokenSession:
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            raise ConnectionError('router down')
+
+        def close(self) -> None:
+            pass
+
+    class _WorkingSession:
+        def __init__(self) -> None:
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+
+        def close(self) -> None:
+            pass
+
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    monkeypatch.setattr(store, '_open_session', lambda: _BrokenSession())
+    store._reset_session()
+    store._reset_index()
+
+    queued = Observation(content='queued')
+    with pytest.raises(RuntimeError):
+        store.put_observation(queued)
+    assert store.get_transport_status().pending_puts == 1
+
+    working = _WorkingSession()
+    monkeypatch.setattr(store, '_open_session', lambda: working)
+    store._reset_session()
+
+    fresh = Observation(content='fresh')
+    store.put_observation(fresh)
+
+    assert working.put_calls == [fresh.key_expr, queued.key_expr]
+    status = store.get_transport_status()
+    assert status.pending_puts == 0
+    assert status.recent_put_ok == 2
+    assert status.recent_put_error == 1
+
+
+def test_pending_drain_is_capped_per_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drain replays only a bounded number of queued rows per successful put."""
+
+    class _WorkingSession:
+        def __init__(self) -> None:
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+
+        def close(self) -> None:
+            pass
+
+    ticks = {'n': 0}
+
+    def _fake_now() -> str:
+        ticks['n'] += 1
+        return f'2026-05-17T00:00:{ticks["n"]:02d}.000000Z'
+
+    monkeypatch.setattr(store, '_PENDING_DRAIN_BATCH', 2)
+    monkeypatch.setattr(store, '_now_iso_utc', _fake_now)
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    working = _WorkingSession()
+    monkeypatch.setattr(store, '_open_session', lambda: working)
+    store._reset_session()
+    store._reset_index()
+
+    queued = [Observation(content=f'queued-{i}') for i in range(3)]
+    for obs in queued:
+        store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+
+    fresh = Observation(content='fresh-cap')
+    store.put_observation(fresh)
+
+    assert working.put_calls == [fresh.key_expr, queued[0].key_expr, queued[1].key_expr]
+    assert store.get_transport_status().pending_puts == 1
+
+
+def test_pending_drain_retryable_failure_keeps_remaining_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A drain transport failure stops replay and leaves queued rows intact."""
+
+    class _FlakyDrainSession:
+        def __init__(self, fail_key: str) -> None:
+            self.fail_key = fail_key
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+            if key_expr == self.fail_key:
+                raise ConnectionError('drain flap')
+
+        def close(self) -> None:
+            pass
+
+    ticks = {'n': 0}
+
+    def _fake_now() -> str:
+        ticks['n'] += 1
+        return f'2026-05-17T00:10:{ticks["n"]:02d}.000000Z'
+
+    monkeypatch.setattr(store, '_now_iso_utc', _fake_now)
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    queued = [Observation(content=f'queued-{i}') for i in range(2)]
+    for obs in queued:
+        store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+
+    flaky = _FlakyDrainSession(queued[0].key_expr)
+    monkeypatch.setattr(store, '_open_session', lambda: flaky)
+    store._reset_session()
+    store._reset_index()
+
+    fresh = Observation(content='fresh-retryable')
+    store.put_observation(fresh)
+
+    assert flaky.put_calls == [fresh.key_expr, queued[0].key_expr]
+    status = store.get_transport_status()
+    assert status.pending_puts == 2
+    assert status.recent_put_ok == 1
+    assert status.recent_put_error == 1
+
+
+def test_malformed_pending_row_is_dropped_before_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Malformed queued payloads must be discarded without publishing garbage."""
+
+    class _WorkingSession:
+        def __init__(self) -> None:
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+
+        def close(self) -> None:
+            pass
+
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    bad_id = 'a' * 32
+    store._enqueue_pending_put('observation', f'mem/obs/x/y/z/s/{bad_id}', bad_id, '{not-json')
+
+    working = _WorkingSession()
+    monkeypatch.setattr(store, '_open_session', lambda: working)
+    store._reset_session()
+    store._reset_index()
+
+    fresh = Observation(content='fresh-malformed')
+    store.put_observation(fresh)
+
+    assert working.put_calls == [fresh.key_expr]
+    assert store.get_transport_status().pending_puts == 0
+
+
+def test_pending_puts_limit_trims_oldest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Queue size is capped by dropping the oldest queued rows."""
+    ticks = {'n': 0}
+
+    def _fake_now() -> str:
+        ticks['n'] += 1
+        return f'2026-05-17T00:20:{ticks["n"]:02d}.000000Z'
+
+    monkeypatch.setattr(store, '_PENDING_PUTS_LIMIT', 3)
+    monkeypatch.setattr(store, '_now_iso_utc', _fake_now)
+    store._reset_session()
+    store._reset_index()
+
+    queued = [Observation(content=f'queued-{i}') for i in range(5)]
+    for obs in queued:
+        store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+
+    assert store.get_transport_status().pending_puts == 3
+    conn = store._open_pending_puts_db()
+    try:
+        keys = [
+            row[0] for row in conn.execute('SELECT key_expr FROM pending_puts ORDER BY queued_at ASC, key_expr ASC')
+        ]
+    finally:
+        conn.close()
+    assert keys == [queued[2].key_expr, queued[3].key_expr, queued[4].key_expr]
 
 
 def test_search_via_zenoh_deduplicates_by_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -285,6 +285,7 @@ def get_memory_status() -> str:
             f'last_put_at_iso: {transport.last_put_at_iso or "-"}',
             f'last_put_status: {transport.last_put_status}',
             f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error',
+            f'pending_puts: {transport.pending_puts}',
             f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}'
             + (' ※上限到達の可能性あり、絞り込み推奨' if truncated else ''),
         ]
