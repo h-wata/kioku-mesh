@@ -18,6 +18,7 @@ from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import _reset_session
+from .store import drain_pending_puts
 from .store import execute_bulk_purge
 from .store import find_observation_by_id
 from .store import gc_expired_tombstones
@@ -31,6 +32,7 @@ from .store import scan_obs_by_pc_id
 from .store import search_observations
 from .store import set_rebuild_on_init_default
 from .store import set_rebuild_on_init_explicit
+from .store import stop_pending_drain_background
 
 _SEARCH_FORMATS = ('text', 'markdown', 'json')
 
@@ -55,6 +57,14 @@ def _parse_iso_or_none(value: str) -> datetime | None:
 def _delete_has_bulk_selector(args: argparse.Namespace) -> bool:
     """Return True when any bulk-delete narrowing flag is present."""
     return bool(args.project or args.pc_id or args.since or args.until)
+
+
+def _positive_int(value: str) -> int:
+    """Argparse type that rejects zero / negative integers."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError('1 以上の整数を指定してください。')
+    return parsed
 
 
 def _select_delete_targets(args: argparse.Namespace) -> tuple[list[Observation], str | None]:
@@ -301,6 +311,9 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f'last_put_status: {transport.last_put_status}')
     print(f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error')
     print(f'pending_puts: {transport.pending_puts}')
+    print(f'drain_in_progress: {"yes" if transport.drain_in_progress else "no"}')
+    print(f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}')
+    print(f'drain_total_succeeded: {transport.drain_total_succeeded}')
     print(f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}{" ※上限到達の可能性あり" if truncated else ""}')
     for family, count in sorted(by_family.items()):
         print(f'  family {family}: {count}件')
@@ -312,6 +325,16 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
         print(
             '警告: ピアアライメントが未完了です。再起動直後は検索件数が少なく見えることがあります。', file=sys.stderr
         )
+    return 0
+
+
+def _cmd_drain(args: argparse.Namespace) -> int:
+    if not args.pending:
+        print('現状の drain 対象は --pending のみです。', file=sys.stderr)
+        return 2
+    drained = drain_pending_puts(limit=args.limit, wait=True)
+    remaining = get_transport_status().pending_puts
+    print(f'pending_puts drain 完了: drained={drained}, remaining={remaining}')
     return 0
 
 
@@ -478,6 +501,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser('status', help='メモリ状態を表示')
     p_status.set_defaults(func=_cmd_status)
 
+    p_drain = sub.add_parser('drain', help='保留中の pending_puts を drain')
+    p_drain.add_argument('--pending', action='store_true', help='pending_puts.db の保留 row を replay する')
+    p_drain.add_argument('--limit', type=_positive_int, default=None, help='1 回の drain 上限件数')
+    p_drain.set_defaults(func=_cmd_drain)
+
     p_gc = sub.add_parser('gc', help='tombstone 対象の物理削除 (retention / --force-id / --by-pc-id)')
     p_gc.add_argument(
         '--force-id',
@@ -555,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     finally:
+        stop_pending_drain_background()
         # Explicitly close the cached Zenoh session before sys.exit. Without
         # this, the CLI hangs after printing output because the session's
         # replication subscriber thread keeps the interpreter alive past

@@ -18,6 +18,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -55,7 +56,7 @@ MESH_MEM_MCP = _find_mesh_mem_mcp()
     reason='mesh-mem-mcp console script not installed — run `pip install -e .[dev]` to enable',
 )
 def test_subprocess_list_tools() -> None:
-    """``mesh-mem-mcp`` spawns cleanly and exposes the four tool definitions.
+    """``mesh-mem-mcp`` spawns cleanly and exposes the registered tool definitions.
 
     Deliberately does NOT depend on ``single_zenohd`` — ``list_tools`` only
     exercises MCP startup and the decorator-based tool registry, never
@@ -76,6 +77,8 @@ def test_subprocess_list_tools() -> None:
         'search_memory',
         'delete_memory',
         'get_memory_status',
+        'get_memory',
+        'drain_pending_puts',
     }
 
 
@@ -349,6 +352,9 @@ def test_cli_status_reports_transport_and_pending_puts(
             recent_put_error=1,
             recent_put_window=5,
             pending_puts=2,
+            drain_in_progress=True,
+            drain_last_run_iso='2026-05-17T00:00:02.000000Z',
+            drain_total_succeeded=7,
         ),
     )
 
@@ -361,6 +367,78 @@ def test_cli_status_reports_transport_and_pending_puts(
     assert 'last_put_status: error: ConnectionError' in out
     assert 'recent_puts: 4 ok / 1 error' in out
     assert 'pending_puts: 2' in out
+    assert 'drain_in_progress: yes' in out
+    assert 'drain_last_run_iso: 2026-05-17T00:00:02.000000Z' in out
+    assert 'drain_total_succeeded: 7' in out
+
+
+def test_cli_drain_pending_replays_queued_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    class _WorkingSession:
+        def __init__(self) -> None:
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+
+        def close(self) -> None:
+            pass
+
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    working = _WorkingSession()
+    monkeypatch.setattr(store, '_open_session', lambda: working)
+    store._reset_session()
+    store._reset_index()
+
+    queued = [Observation(content=f'cli-drain-{i}') for i in range(3)]
+    for obs in queued:
+        store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+
+    rc = cli_main(['drain', '--pending', '--limit', '2'])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'pending_puts drain 完了: drained=2, remaining=1' in out
+    assert working.put_calls == [queued[0].key_expr, queued[1].key_expr]
+
+
+def test_cli_main_requests_background_drain_shutdown_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, 'search_observations', lambda limit=store.MAX_SEARCH: [])
+    monkeypatch.setattr(cli_module, 'get_pc_id', lambda: 'p' * 32)
+    monkeypatch.setattr(cli_module, 'get_session_id', lambda: 'test-session')
+    monkeypatch.setattr(cli_module, 'mesh_ready_label', lambda: 'yes')
+    monkeypatch.setattr(
+        cli_module,
+        'get_transport_status',
+        lambda: store.TransportStatus(
+            zenoh_session='connected',
+            last_put_at_iso='',
+            last_put_status='never',
+            recent_put_ok=0,
+            recent_put_error=0,
+            recent_put_window=0,
+            pending_puts=0,
+            drain_in_progress=False,
+            drain_last_run_iso='',
+            drain_total_succeeded=0,
+        ),
+    )
+    monkeypatch.setattr(cli_module, 'stop_pending_drain_background', lambda: calls.append('stop'))
+    monkeypatch.setattr(cli_module, '_reset_session', lambda: calls.append('reset'))
+
+    assert cli_main(['status']) == 0
+    capsys.readouterr()
+    assert calls == ['stop', 'reset']
 
 
 def test_cli_save_importance_out_of_range(capsys: pytest.CaptureFixture) -> None:

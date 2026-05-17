@@ -16,6 +16,8 @@ retry semantics under test are actually reachable.
 
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -381,6 +383,74 @@ def test_pending_puts_limit_trims_oldest(monkeypatch: pytest.MonkeyPatch) -> Non
     finally:
         conn.close()
     assert keys == [queued[2].key_expr, queued[3].key_expr, queued[4].key_expr]
+
+
+def test_start_pending_drain_background_drains_queued_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Startup-style background drain replays queued rows until the backlog is empty."""
+
+    class _WorkingSession:
+        def __init__(self) -> None:
+            self.put_calls: list[str] = []
+
+        def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+            self.put_calls.append(key_expr)
+
+        def close(self) -> None:
+            pass
+
+    dummy_index = SimpleNamespace(
+        upsert=lambda obs: None,
+        mark_deleted=lambda observation_id, deleted_at: None,
+    )
+    monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
+    monkeypatch.setattr(store, '_PENDING_DRAIN_BATCH', 1)
+    working = _WorkingSession()
+    monkeypatch.setattr(store, '_open_session', lambda: working)
+    store._reset_session()
+    store._reset_index()
+
+    queued = [Observation(content=f'queued-bg-{i}') for i in range(3)]
+    for obs in queued:
+        store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+
+    assert store.start_pending_drain_background(limit=1) is True
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        status = store.get_transport_status()
+        if status.pending_puts == 0 and not status.drain_in_progress:
+            break
+        time.sleep(0.01)
+
+    status = store.get_transport_status()
+    assert working.put_calls == [obs.key_expr for obs in queued]
+    assert status.pending_puts == 0
+    assert status.drain_in_progress is False
+    assert status.drain_total_succeeded == 3
+    assert status.drain_last_run_iso.endswith('Z')
+
+
+def test_stop_pending_drain_background_uses_short_join_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit cleanup must not wait indefinitely for a stuck daemon drain thread."""
+
+    class _BusyThread:
+        def __init__(self) -> None:
+            self.join_calls: list[float] = []
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_calls.append(0.0 if timeout is None else timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    stop_event = threading.Event()
+    busy = _BusyThread()
+    monkeypatch.setattr(store, '_pending_drain_thread', busy)
+    monkeypatch.setattr(store, '_pending_drain_stop_event', stop_event)
+
+    assert store.stop_pending_drain_background(join_timeout=0.01) is False
+    assert stop_event.is_set()
+    assert busy.join_calls == [0.01]
 
 
 def test_search_via_zenoh_deduplicates_by_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:

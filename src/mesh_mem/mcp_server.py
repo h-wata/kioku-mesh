@@ -18,12 +18,15 @@ from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
+from .store import drain_pending_puts as drain_pending_puts_now
 from .store import find_observation_by_id
 from .store import get_transport_status
 from .store import MAX_SEARCH
 from .store import put_observation
 from .store import put_tombstone
 from .store import search_observations
+from .store import start_pending_drain_background
+from .store import stop_pending_drain_background
 
 _INSTRUCTIONS = """\
 mesh-mem provides a Zenoh-backed shared memory across coding agents and hosts.
@@ -286,6 +289,9 @@ def get_memory_status() -> str:
             f'last_put_status: {transport.last_put_status}',
             f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error',
             f'pending_puts: {transport.pending_puts}',
+            f'drain_in_progress: {"yes" if transport.drain_in_progress else "no"}',
+            f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}',
+            f'drain_total_succeeded: {transport.drain_total_succeeded}',
             f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}'
             + (' ※上限到達の可能性あり、絞り込み推奨' if truncated else ''),
         ]
@@ -298,10 +304,24 @@ def get_memory_status() -> str:
         return f'共有メモリ取得失敗 [{type(e).__name__}]: {e}'
 
 
+@mcp.tool()
+def drain_pending_puts(limit: int | None = None) -> str:
+    """Replay pending queued puts immediately through the current MCP process."""
+    if limit is not None and limit < 1:
+        return 'limit は 1 以上で指定してください。'
+    drained = drain_pending_puts_now(limit=limit, wait=True)
+    remaining = get_transport_status().pending_puts
+    return f'pending_puts drain 完了: drained={drained}, remaining={remaining}'
+
+
 def main() -> None:
     """Entry point for the ``mesh-mem-mcp`` console script."""
     _warn_if_zenoh_connect_unreachable()
-    mcp.run()
+    start_pending_drain_background()
+    try:
+        mcp.run()
+    finally:
+        stop_pending_drain_background()
 
 
 if __name__ == '__main__':
