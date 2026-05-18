@@ -759,19 +759,49 @@ def stop_pending_drain_background(join_timeout: float = _PENDING_DRAIN_JOIN_TIME
     return True
 
 
+def _obs_id_from_key(key_expr: str) -> str | None:
+    """Extract a 32-hex observation_id from a ``mem/(obs|tomb)/.../{obs_id}`` key.
+
+    Returns ``None`` when the trailing segment is not a 32 hex string so
+    a malformed or unrelated key cannot delete the wrong row. Keeps the
+    DELETE-kind subscriber path conservative (Issue #64).
+    """
+    obs_id = key_expr.rsplit('/', 1)[-1]
+    if len(obs_id) == 32 and all(c in '0123456789abcdef' for c in obs_id):
+        return obs_id
+    return None
+
+
 def start_index_subscriber(session: zenoh.Session) -> list:
     """Subscribe to mem/obs/** and mem/tomb/** to keep SQLite in sync with replication.
 
-    Callbacks are idempotent (upsert / mark_deleted) so overlap with the
-    rebuild scan on startup is safe. The returned list holds the two
-    zenoh.Subscriber objects; callers must call undeclare() on each when
-    tearing down (handled by _reset_subscribers / _reset_index).
+    Callbacks are idempotent (upsert / mark_deleted / physical_delete) so
+    overlap with the rebuild scan on startup is safe. PUT-kind samples
+    carry an Observation / Tombstone payload; DELETE-kind samples (issued
+    by ``session.delete``) carry an empty payload and only the key, so the
+    callbacks dispatch on ``sample.kind`` and mirror the upstream delete
+    into the local SQLite index (Issue #64). The returned list holds the
+    two zenoh.Subscriber objects; callers must call undeclare() on each
+    when tearing down (handled by _reset_subscribers / _reset_index).
     """
     idx = get_index()
     if idx.disabled:
         return []
 
     def on_obs(sample: Any) -> None:
+        if sample.kind == zenoh.SampleKind.DELETE:
+            obs_id = _obs_id_from_key(str(sample.key_expr))
+            if obs_id is None:
+                log.debug(
+                    'index subscriber on_obs DELETE ignored (invalid obs_id in key %s)',
+                    sample.key_expr,
+                )
+                return
+            try:
+                idx.physical_delete(obs_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning('index subscriber on_obs DELETE failed for %s: %s', obs_id, e)
+            return
         try:
             obs = Observation.from_json(sample.payload.to_string())
             idx.upsert(obs)
@@ -784,6 +814,24 @@ def start_index_subscriber(session: zenoh.Session) -> list:
             log.warning('index subscriber on_obs error: %s', e)
 
     def on_tomb(sample: Any) -> None:
+        if sample.kind == zenoh.SampleKind.DELETE:
+            # A tombstone DELETE upstream means the tomb (and its mirrored
+            # obs) was physically purged — typically by retention gc or by
+            # ``execute_bulk_purge``. Mirror that into the index so this
+            # peer also drops the row instead of carrying a stale live or
+            # tombstoned record.
+            obs_id = _obs_id_from_key(str(sample.key_expr))
+            if obs_id is None:
+                log.debug(
+                    'index subscriber on_tomb DELETE ignored (invalid obs_id in key %s)',
+                    sample.key_expr,
+                )
+                return
+            try:
+                idx.physical_delete(obs_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning('index subscriber on_tomb DELETE failed for %s: %s', obs_id, e)
+            return
         try:
             tomb = Tombstone.from_json(sample.payload.to_string())
             idx.mark_deleted(tomb.observation_id, tomb.deleted_at)

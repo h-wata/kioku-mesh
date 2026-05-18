@@ -73,6 +73,107 @@ def test_subscriber_picks_up_remote_tombstone(single_zenohd: Any) -> None:
     assert idx.search(project='sub-tomb') == [], 'subscriber must mark row deleted'
 
 
+def test_subscriber_mirrors_remote_obs_delete_into_index(single_zenohd: Any) -> None:
+    """Issue #64: a remote ``session.delete(obs.key_expr)`` must purge the local index row.
+
+    Pre-fix, the subscriber only parsed payloads and silently swallowed
+    DELETE-kind samples (empty payload → JSONDecodeError → DEBUG log),
+    leaving ghost rows on every peer that did not run the delete itself.
+    """
+    idx = store.get_index()
+    obs = _mk_obs('about to be remote-deleted', project='sub-obs-delete')
+    idx.upsert(obs)
+    assert obs.observation_id in {r.observation_id for r in idx.search(project='sub-obs-delete')}
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.delete(obs.key_expr)
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    assert (
+        idx.search(project='sub-obs-delete') == []
+    ), 'subscriber must physical-delete the index row when a remote peer deletes the obs key'
+
+
+def test_subscriber_mirrors_remote_tomb_delete_into_index(single_zenohd: Any) -> None:
+    """A remote ``session.delete(tomb_key)`` must drop the index row too.
+
+    Mirrors the retention-gc / execute_bulk_purge path that issues a Zenoh
+    delete on ``mem/tomb/...`` after the obs has already been purged on
+    the originating PC.
+    """
+    idx = store.get_index()
+    obs = _mk_obs('tomb side will be remote-deleted', project='sub-tomb-delete')
+    idx.upsert(obs)
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.delete(obs.tombstone_key_expr())
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    assert (
+        idx.search(project='sub-tomb-delete', include_deleted=True) == []
+    ), 'subscriber must physical-delete the index row when a remote peer deletes the tomb key'
+
+
+def test_subscriber_ignores_delete_with_invalid_obs_id(
+    single_zenohd: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DELETE on a key whose trailing segment is not a 32-hex obs_id is a no-op.
+
+    Guards against a malformed control key accidentally physical-deleting
+    an unrelated row whose id happens to fall in the same shard. The
+    callback must hit the DEBUG branch and never call ``physical_delete``.
+    """
+    idx = store.get_index()
+    obs = _mk_obs('untouched by malformed delete', project='sub-bad-key')
+    idx.upsert(obs)
+
+    physical_delete_calls: list[str] = []
+    orig_physical = idx.physical_delete
+
+    def tracked_physical(observation_id: str) -> None:
+        physical_delete_calls.append(observation_id)
+        orig_physical(observation_id)
+
+    monkeypatch.setattr(idx, 'physical_delete', tracked_physical)
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        # Trailing segment is not 32 hex → must be ignored.
+        remote.delete('mem/obs/a/b/c/sess/not-a-real-obs-id')
+        remote.delete('mem/tomb/a/b/c/sess/short-id')
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    assert (
+        physical_delete_calls == []
+    ), f'malformed DELETE keys must not trigger physical_delete; got {physical_delete_calls}'
+    # Real row untouched.
+    assert obs.observation_id in {r.observation_id for r in idx.search(project='sub-bad-key')}
+
+
+def test_obs_id_from_key_extracts_only_32_hex() -> None:
+    """Unit test for the conservative obs_id extractor used by DELETE handlers."""
+    from mesh_mem.store import _obs_id_from_key
+
+    valid = 'a' * 32
+    assert _obs_id_from_key(f'mem/obs/fam/cli/pc/sess/{valid}') == valid
+    assert _obs_id_from_key(f'mem/tomb/fam/cli/pc/sess/{valid}') == valid
+    # Mixed-case hex must be rejected (canonical obs_ids are lowercase).
+    assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/' + 'A' * 32) is None
+    # Wrong length, non-hex chars, or trailing slash → None.
+    assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/short') is None
+    assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/' + 'g' * 32) is None
+    assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/') is None
+
+
 def test_subscriber_demotes_non_json_payload_to_debug(
     single_zenohd: Any,  # noqa: ARG001
     monkeypatch: pytest.MonkeyPatch,

@@ -10,6 +10,21 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Replication subscriber now mirrors Zenoh DELETE into the SQLite index**
+  (#64). `start_index_subscriber` previously parsed every `mem/obs/**` /
+  `mem/tomb/**` sample as JSON and silently dropped DELETE-kind samples
+  (empty payload → `JSONDecodeError` → DEBUG log). As a result, a
+  `mesh-mem gc --by-pc-id ... --execute` (or any `session.delete` on an
+  obs/tomb key) issued on one peer purged Zenoh storage and that peer's
+  local index, but left ghost rows in every other peer's
+  `~/.local/share/mesh-mem/index.db`, inflating `get_memory_status`
+  counts and search hits. The subscriber now dispatches on `sample.kind`
+  and calls `LocalIndex.physical_delete` for DELETE samples whose key
+  ends in a 32-hex `observation_id`. Malformed keys (wrong length, non-
+  hex, missing trailing segment) are conservatively ignored.
+
 ### Added
 
 - **Local fallback queue for failed puts** (#50). `put_observation` /
