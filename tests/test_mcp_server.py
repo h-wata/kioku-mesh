@@ -216,8 +216,24 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'recent_puts: 2 ok / 0 error' in text
     assert 'pending_puts: 0' in text
     assert 'drain_in_progress: no' in text
+    assert 'index_rows: live=2 / tomb=0 / shadow=0' in text
     # At least the 2 we put show up in the count summary.
     assert '件数' in text
+
+
+def test_get_memory_status_reports_shadow_rows(single_zenohd: Any) -> None:  # noqa: ARG001
+    obs = _mk_obs('shadowed for status', project='mcp-status-shadow')
+    store.get_index().upsert(obs)
+    store.get_index().mark_shadowed_missing(obs.observation_id, '2026-05-18T00:00:00.000000Z')
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'index_rows: live=0 / tomb=0 / shadow=1' in text
 
 
 def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.MonkeyPatch) -> None:

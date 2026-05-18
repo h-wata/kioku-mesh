@@ -12,6 +12,34 @@ versions without a migration path until `1.0.0`.
 
 ### Fixed
 
+- **Rebuild now reconciles SQLite index against Zenoh, not just appends to it**
+  (#67). `LocalIndex.rebuild_from_zenoh` was add-only: it upserted whatever
+  it saw in Zenoh but never pruned `existing - zenoh_set`. Combined with
+  the subscriber gap fixed in #65, that left long-lived ghost rows after
+  a peer purged keys on Zenoh while another peer was offline. Rebuild now
+  marks `existing` rows that did not appear in the Zenoh scan as
+  *shadowed* via a new `shadowed_at` column. Shadowed rows are hidden
+  from `search` / `find_by_id` (same as tombstones) but a later upsert —
+  including replay of the obs from Zenoh — clears the shadow and the row
+  comes back to life. Tombstones remain stronger than shadows: applying
+  a tombstone clears any prior shadow, and rebuild no longer overwrites
+  an existing tombstone's `deleted_at` timestamp. Rebuild also skips
+  writes for live rows whose `payload_json` is unchanged, avoiding WAL
+  inflation on populated meshes (ADR-0007 / Issue #32).
+- **`get_memory_status` exposes index visibility counts**. Output now
+  includes `index_rows: live=N / tomb=N / shadow=N` so operators can see
+  the read-path state, not just the Zenoh-scan totals.
+
+### Added
+
+- **`LocalIndex.mark_shadowed_missing` + `VisibilityCounts`**. New
+  index methods backing the rebuild reconcile path. Schema migrates
+  forward from v1 to v2 by adding a `shadowed_at TEXT` column;
+  existing rows are treated as live until the next rebuild revisits
+  them.
+
+### Fixed
+
 - **Replication subscriber now mirrors Zenoh DELETE into the SQLite index**
   (#64). `start_index_subscriber` previously parsed every `mem/obs/**` /
   `mem/tomb/**` sample as JSON and silently dropped DELETE-kind samples

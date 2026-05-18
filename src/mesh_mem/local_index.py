@@ -40,7 +40,7 @@ from .models import Tombstone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Issue #32: long-running processes (mesh-mem-mcp) keep the index connection
 # open indefinitely, which blocks SQLite's automatic WAL checkpoint from
@@ -55,7 +55,15 @@ _CHECKPOINT_EVERY_N_UPSERTS = 256
 class RebuildStats:
     added: int = 0
     marked_deleted: int = 0
+    shadowed: int = 0
     unchanged: int = 0
+
+
+@dataclasses.dataclass(frozen=True)
+class VisibilityCounts:
+    live: int = 0
+    tombstoned: int = 0
+    shadowed: int = 0
 
 
 _SCHEMA_SQL = """
@@ -71,7 +79,8 @@ CREATE TABLE IF NOT EXISTS obs_index (
   subject TEXT,
   summary TEXT,
   payload_json TEXT,
-  deleted_at TEXT
+  deleted_at TEXT,
+  shadowed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_project_created ON obs_index(project, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_created ON obs_index(created_at DESC);
@@ -88,14 +97,26 @@ _UPSERT_SQL = (
     'importance=excluded.importance, '
     'subject=excluded.subject, '
     'summary=excluded.summary, '
-    'payload_json=excluded.payload_json'
+    'payload_json=excluded.payload_json, '
+    'shadowed_at=NULL'
 )
 
-_MARK_DELETED_SQL = 'UPDATE obs_index SET deleted_at = ? WHERE observation_id = ?'
+_MARK_DELETED_SQL = 'UPDATE obs_index SET deleted_at = ?, shadowed_at = NULL WHERE observation_id = ?'
+_MARK_SHADOWED_SQL = (
+    'UPDATE obs_index ' 'SET shadowed_at = COALESCE(shadowed_at, ?) ' 'WHERE observation_id = ? AND deleted_at IS NULL'
+)
 
 
 def _disabled_via_env() -> bool:
     return os.environ.get('MESH_MEM_DISABLE_INDEX', '').strip() == '1'
+
+
+def _shadow_now_iso() -> str:
+    """Return the local timestamp used to mark rebuild-shadowed rows."""
+    from datetime import datetime
+    from datetime import timezone
+
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
 def _resolve_db_path() -> str:
@@ -126,11 +147,19 @@ def _open_connection(path: str) -> sqlite3.Connection:
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA synchronous=NORMAL')
     conn.execute('PRAGMA busy_timeout=5000')
-    conn.executescript(_SCHEMA_SQL)
-    # Idempotent stamp; INSERT OR IGNORE so reopening an existing DB is fine.
-    conn.execute('INSERT OR IGNORE INTO schema_version(version) VALUES (?)', (SCHEMA_VERSION,))
+    _ensure_schema(conn)
     conn.commit()
     return conn
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Apply schema creation and forward-only migrations."""
+    conn.executescript(_SCHEMA_SQL)
+    cols = {row[1] for row in conn.execute('PRAGMA table_info(obs_index)').fetchall()}
+    if 'shadowed_at' not in cols:
+        conn.execute('ALTER TABLE obs_index ADD COLUMN shadowed_at TEXT')
+    conn.execute('DELETE FROM schema_version')
+    conn.execute('INSERT INTO schema_version(version) VALUES (?)', (SCHEMA_VERSION,))
 
 
 class LocalIndex:
@@ -204,7 +233,7 @@ class LocalIndex:
             log.debug('LocalIndex.wal_checkpoint failed: %s', e)
 
     def upsert(self, obs: Observation) -> None:
-        """Insert or replace ``obs`` in the index. No-op when disabled."""
+        """Insert or replace ``obs`` in the index, clearing rebuild shadow state."""
         if self._disabled or self._conn is None:
             return
         row = (
@@ -241,6 +270,22 @@ class LocalIndex:
             except sqlite3.Error as e:
                 log.warning('LocalIndex.mark_deleted failed for %s: %s', observation_id, e)
 
+    def mark_shadowed_missing(self, observation_id: str, shadowed_at: str) -> None:
+        """Hide a live row because rebuild did not observe it in Zenoh.
+
+        This state is distinct from tombstones: it hides the row from normal
+        search but does not participate in retention GC and is cleared by any
+        future observation upsert.
+        """
+        if self._disabled or self._conn is None:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(_MARK_SHADOWED_SQL, (shadowed_at, observation_id))
+                self._conn.commit()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.mark_shadowed_missing failed for %s: %s', observation_id, e)
+
     def search_by_project(self, project: str, limit: int = 50) -> list[Observation]:
         """Return live observations for ``project`` ordered by created_at DESC.
 
@@ -272,6 +317,10 @@ class LocalIndex:
         existing Zenoh-side semantic was content/project/tags only, so this
         is a slight broadening that no current test depends on negatively.
 
+        ``include_deleted=True`` returns both tombstoned and rebuild-shadowed
+        rows. The name is historical but the behavior is intentionally "show
+        hidden rows" rather than only "show tombstoned rows".
+
         ``since_iso`` is compared lexicographically against ``created_at``;
         both are produced as 'Z'-suffixed UTC ISO 8601 strings by
         :meth:`mesh_mem.models._utc_now_iso`, so lex order matches time
@@ -285,6 +334,7 @@ class LocalIndex:
         params: list[object] = []
         if not include_deleted:
             where.append('deleted_at IS NULL')
+            where.append('shadowed_at IS NULL')
         if project:
             where.append('project = ?')
             params.append(project)
@@ -381,13 +431,14 @@ class LocalIndex:
         Phase 3 caller is ``store.find_observation_by_id``. ``include_deleted``
         defaults to False so the lookup matches ``search`` semantics; the
         gc / delete paths in store call this with ``include_deleted=True``
-        when they need to locate a tombstoned obs to physical-delete.
+        when they need to locate a tombstoned obs to physical-delete. The
+        flag also includes rebuild-shadowed rows.
         """
         if self._disabled or self._conn is None:
             return None
         sql = 'SELECT payload_json FROM obs_index WHERE observation_id = ?'
         if not include_deleted:
-            sql += ' AND deleted_at IS NULL'
+            sql += ' AND deleted_at IS NULL AND shadowed_at IS NULL'
         with self._lock:
             try:
                 row = self._conn.execute(sql, (observation_id,)).fetchone()
@@ -403,7 +454,7 @@ class LocalIndex:
             return None
 
     def row_count(self) -> int:
-        """Return the total number of rows. Returns 0 when disabled."""
+        """Return the total row count, including tombstoned and shadowed rows."""
         if self._disabled or self._conn is None:
             return 0
         with self._lock:
@@ -414,11 +465,33 @@ class LocalIndex:
                 return 0
         return int(count)
 
+    def visibility_counts(self) -> VisibilityCounts:
+        """Return live / tombstoned / shadowed row counts for status reporting."""
+        if self._disabled or self._conn is None:
+            return VisibilityCounts()
+        sql = (
+            'SELECT '
+            'SUM(CASE WHEN deleted_at IS NULL AND shadowed_at IS NULL THEN 1 ELSE 0 END), '
+            'SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), '
+            'SUM(CASE WHEN deleted_at IS NULL AND shadowed_at IS NOT NULL THEN 1 ELSE 0 END) '
+            'FROM obs_index'
+        )
+        with self._lock:
+            try:
+                row = self._conn.execute(sql).fetchone()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.visibility_counts failed: %s', e)
+                return VisibilityCounts()
+        if row is None:
+            return VisibilityCounts()
+        return VisibilityCounts(live=int(row[0] or 0), tombstoned=int(row[1] or 0), shadowed=int(row[2] or 0))
+
     def rebuild_from_zenoh(self, session: object) -> RebuildStats:
         """Scan zenoh-rocksdb for all observations/tombstones and reconcile SQLite index.
 
         Idempotent: safe to call on every startup. Returns counts of rows
-        added, tombstone marks applied, and unchanged rows.
+        added, tombstone marks applied, rebuild-shadow marks applied, and
+        unchanged rows.
         """
         if self._disabled or self._conn is None:
             return RebuildStats()
@@ -442,18 +515,25 @@ class LocalIndex:
 
         added = 0
         marked_deleted = 0
+        shadowed = 0
         unchanged = 0
 
         with self._lock:
             try:
-                existing: dict[str, str | None] = {
-                    row[0]: row[1]
-                    for row in self._conn.execute('SELECT observation_id, deleted_at FROM obs_index').fetchall()
+                existing: dict[str, tuple[str | None, str | None, str]] = {
+                    row[0]: (row[1], row[2], row[3])
+                    for row in self._conn.execute(
+                        'SELECT observation_id, deleted_at, shadowed_at, payload_json FROM obs_index'
+                    ).fetchall()
                 }
 
                 upsert_rows = []
+                seen_obs_ids: set[str] = set()
                 for obs in obs_list:
-                    if obs.observation_id not in existing:
+                    seen_obs_ids.add(obs.observation_id)
+                    payload_json = obs.to_json()
+                    current = existing.get(obs.observation_id)
+                    if current is None:
                         upsert_rows.append(
                             (
                                 obs.observation_id,
@@ -463,30 +543,55 @@ class LocalIndex:
                                 obs.importance,
                                 obs.subject,
                                 obs.summary,
-                                obs.to_json(),
+                                payload_json,
                             )
                         )
                         added += 1
+                        continue
+                    current_deleted, current_shadowed_at, current_payload_json = current
+                    if current_shadowed_at is not None or current_payload_json != payload_json:
+                        upsert_rows.append(
+                            (
+                                obs.observation_id,
+                                obs.project,
+                                obs.created_at,
+                                obs.memory_type,
+                                obs.importance,
+                                obs.subject,
+                                obs.summary,
+                                payload_json,
+                            )
+                        )
                     else:
                         unchanged += 1
 
-                # obs_ids being added in this transaction (not yet in existing)
-                new_obs_ids = {row[0] for row in upsert_rows}
                 mark_rows = []
                 for obs_id, del_at in tomb_ids.items():
-                    # Mark deleted if the row is live (exists, deleted_at=None) OR
-                    # is being upserted in this same transaction.
-                    already_live = obs_id in existing and existing[obs_id] is None
-                    being_added = obs_id in new_obs_ids
-                    if already_live or being_added:
-                        mark_rows.append((del_at, obs_id))
-                        marked_deleted += 1
+                    # Rebuild can only update rows it has locally or is about
+                    # to upsert from the observation scan; orphan tombstones are
+                    # left to a later replay or rebuild where the obs appears.
+                    if obs_id not in existing and obs_id not in seen_obs_ids:
+                        continue
+                    current_deleted = existing.get(obs_id, (None, None, ''))[0]
+                    if current_deleted is not None:
+                        continue
+                    mark_rows.append((del_at, obs_id))
+                    marked_deleted += 1
+
+                shadow_rows = []
+                shadowed_at = _shadow_now_iso()
+                for obs_id, (deleted_at, existing_shadowed_at, _payload_json) in existing.items():
+                    if deleted_at is None and existing_shadowed_at is None and obs_id not in seen_obs_ids:
+                        shadow_rows.append((shadowed_at, obs_id))
+                        shadowed += 1
 
                 self._conn.execute('BEGIN')
                 if upsert_rows:
                     self._conn.executemany(_UPSERT_SQL, upsert_rows)
                 if mark_rows:
                     self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
+                if shadow_rows:
+                    self._conn.executemany(_MARK_SHADOWED_SQL, shadow_rows)
                 self._conn.execute('COMMIT')
             except sqlite3.Error as e:
                 try:
@@ -496,7 +601,7 @@ class LocalIndex:
                 log.warning('rebuild_from_zenoh transaction failed: %s', e)
                 raise
 
-        return RebuildStats(added=added, marked_deleted=marked_deleted, unchanged=unchanged)
+        return RebuildStats(added=added, marked_deleted=marked_deleted, shadowed=shadowed, unchanged=unchanged)
 
     def close(self) -> None:
         """Close the underlying connection. Safe to call multiple times.

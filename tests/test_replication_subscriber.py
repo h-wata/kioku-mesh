@@ -238,6 +238,38 @@ def test_startup_rebuild_runs_when_index_empty(single_zenohd: Any) -> None:  # n
     assert obs.observation_id in ids, 'rebuild must repopulate index from zenoh'
 
 
+def test_rebuild_shadows_remote_delete_missed_while_subscriber_stopped(single_zenohd: Any) -> None:  # noqa: ARG001
+    """If subscriber downtime misses an upstream delete, rebuild must shadow the stale row.
+
+    Models the Issue #67 edge: the local SQLite cache still has a row, the
+    upstream obs key was deleted while no subscriber callback was active, and
+    the next rebuild must hide the stale row without hard-deleting it.
+    """
+    idx = store.get_index()
+    obs = _mk_obs('stale after missed delete', project='rebuild-shadow-after-miss')
+    store.put_observation(obs)
+    time.sleep(_SETTLE)
+
+    store._reset_subscribers()
+    try:
+        remote = _remote_session(single_zenohd.endpoint)
+        try:
+            remote.delete(obs.key_expr)
+            time.sleep(_SETTLE)
+        finally:
+            remote.close()
+
+        assert obs.observation_id in {r.observation_id for r in idx.search(project='rebuild-shadow-after-miss')}
+
+        stats = idx.rebuild_from_zenoh(store.get_session())
+        assert stats.shadowed == 1
+        assert idx.search(project='rebuild-shadow-after-miss') == []
+        assert idx.find_by_id(obs.observation_id, include_deleted=True) is not None
+    finally:
+        # Re-arm the subscriber cache so later tests see the normal steady-state wiring.
+        store._subscribers = store.start_index_subscriber(store.get_session())  # noqa: SLF001
+
+
 def test_startup_rebuild_skipped_when_env_set(
     monkeypatch: pytest.MonkeyPatch,
     single_zenohd: Any,  # noqa: ARG001
