@@ -20,6 +20,7 @@ from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import drain_pending_puts as drain_pending_puts_now
 from .store import find_observation_by_id
+from .store import get_index
 from .store import get_transport_status
 from .store import MAX_SEARCH
 from .store import put_observation
@@ -112,7 +113,7 @@ def _warn_if_zenoh_connect_unreachable() -> None:
             last_error = str(e).strip() or type(e).__name__
 
     print(
-        f'WARNING: ZENOH_CONNECT={raw} is unreachable ({last_error}). ' 'Saves will fail until the router is up.',
+        f'WARNING: ZENOH_CONNECT={raw} is unreachable ({last_error}). Saves will fail until the router is up.',
         file=sys.stderr,
     )
 
@@ -273,6 +274,7 @@ def get_memory_status() -> str:
     try:
         recent = search_observations(limit=MAX_SEARCH)
         transport = get_transport_status()
+        counts = get_index().visibility_counts()
         by_family: dict[str, int] = {}
         by_pc: dict[str, int] = {}
         for obs in recent:
@@ -292,6 +294,7 @@ def get_memory_status() -> str:
             f'drain_in_progress: {"yes" if transport.drain_in_progress else "no"}',
             f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}',
             f'drain_total_succeeded: {transport.drain_total_succeeded}',
+            f'index_rows: live={counts.live} / tomb={counts.tombstoned} / shadow={counts.shadowed}',
             f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}'
             + (' ※上限到達の可能性あり、絞り込み推奨' if truncated else ''),
         ]

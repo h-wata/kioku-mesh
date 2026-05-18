@@ -47,9 +47,42 @@ def test_local_index_creates_schema_on_first_open(tmp_path: Path) -> None:
             assert version == SCHEMA_VERSION
             tables = {row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             assert 'obs_index' in tables
+            columns = {row[1] for row in raw.execute('PRAGMA table_info(obs_index)')}
+            assert 'shadowed_at' in columns
             indexes = {row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='index'")}
             assert 'idx_project_created' in indexes
             assert 'idx_created' in indexes
+    finally:
+        idx.close()
+
+
+def test_local_index_migrates_legacy_schema_to_add_shadowed_at(tmp_path: Path) -> None:
+    db = tmp_path / 'legacy.db'
+    with sqlite3.connect(str(db)) as raw:
+        raw.executescript("""
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO schema_version(version) VALUES (1);
+CREATE TABLE obs_index (
+  observation_id TEXT PRIMARY KEY,
+  project TEXT,
+  created_at TEXT,
+  memory_type TEXT,
+  importance INTEGER,
+  subject TEXT,
+  summary TEXT,
+  payload_json TEXT,
+  deleted_at TEXT
+);
+""")
+        raw.commit()
+
+    idx = LocalIndex.connect(str(db))
+    try:
+        with sqlite3.connect(str(db)) as raw:
+            columns = {row[1] for row in raw.execute('PRAGMA table_info(obs_index)')}
+            assert 'shadowed_at' in columns
+            (version,) = raw.execute('SELECT version FROM schema_version').fetchone()
+            assert version == SCHEMA_VERSION
     finally:
         idx.close()
 
@@ -120,6 +153,26 @@ def test_local_index_mark_deleted_sets_timestamp(tmp_path: Path) -> None:
         # mark_deleted on an unknown id is a silent no-op
         idx.mark_deleted('00000000000000000000000000000000', deleted_at)
         assert idx.row_count() == 1
+    finally:
+        idx.close()
+
+
+def test_mark_deleted_clears_shadowed_state(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'delete_clears_shadow.db'))
+    try:
+        obs = _mk_obs('shadow then tomb', project='proj-A')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-05-18T00:00:00.000000Z')
+
+        deleted_at = '2026-05-19T00:00:00.000000Z'
+        idx.mark_deleted(obs.observation_id, deleted_at)
+
+        with sqlite3.connect(str(tmp_path / 'delete_clears_shadow.db')) as raw:
+            got = raw.execute(
+                'SELECT deleted_at, shadowed_at FROM obs_index WHERE observation_id = ?',
+                (obs.observation_id,),
+            ).fetchone()
+            assert got == (deleted_at, None)
     finally:
         idx.close()
 
@@ -254,6 +307,37 @@ def test_search_includes_deleted_when_requested(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_search_excludes_shadowed_rows_by_default(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_exclude.db'))
+    try:
+        kept = _mk_obs('alive', project='live')
+        hidden = _mk_obs('temporarily missing upstream', project='live')
+        idx.upsert(kept)
+        idx.upsert(hidden)
+        idx.mark_shadowed_missing(hidden.observation_id, '2026-05-18T00:00:00.000000Z')
+
+        hits = idx.search(project='live')
+        ids = {r.observation_id for r in hits}
+        assert kept.observation_id in ids
+        assert hidden.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_includes_shadowed_rows_when_requested(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_include.db'))
+    try:
+        hidden = _mk_obs('temporarily missing upstream', project='live')
+        idx.upsert(hidden)
+        idx.mark_shadowed_missing(hidden.observation_id, '2026-05-18T00:00:00.000000Z')
+
+        hits = idx.search(project='live', include_deleted=True)
+        ids = {r.observation_id for r in hits}
+        assert hidden.observation_id in ids
+    finally:
+        idx.close()
+
+
 def test_find_by_id_returns_observation(tmp_path: Path) -> None:
     """``find_by_id`` round-trips a stored observation; missing ids return None."""
     idx = LocalIndex.connect(str(tmp_path / 'findby.db'))
@@ -285,6 +369,55 @@ def test_find_by_id_excludes_deleted_by_default_but_include_flag_works(tmp_path:
         hit = idx.find_by_id(obs.observation_id, include_deleted=True)
         assert hit is not None
         assert hit.observation_id == obs.observation_id
+    finally:
+        idx.close()
+
+
+def test_find_by_id_excludes_shadowed_by_default_but_include_flag_works(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'findbyshadow.db'))
+    try:
+        obs = _mk_obs('shadow me', project='find')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-05-18T00:00:00.000000Z')
+
+        assert idx.find_by_id(obs.observation_id) is None
+        hit = idx.find_by_id(obs.observation_id, include_deleted=True)
+        assert hit is not None
+        assert hit.observation_id == obs.observation_id
+    finally:
+        idx.close()
+
+
+def test_upsert_clears_shadowed_state(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_clear.db'))
+    try:
+        obs = _mk_obs('will return', project='shadow')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-05-18T00:00:00.000000Z')
+        assert idx.search(project='shadow') == []
+
+        idx.upsert(obs)
+        hits = idx.search(project='shadow')
+        assert [r.observation_id for r in hits] == [obs.observation_id]
+    finally:
+        idx.close()
+
+
+def test_mark_shadowed_missing_is_noop_for_tombstoned_row(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_noop_tombed.db'))
+    try:
+        obs = _mk_obs('already tombstoned', project='shadow')
+        idx.upsert(obs)
+        deleted_at = '2026-05-19T00:00:00.000000Z'
+        idx.mark_deleted(obs.observation_id, deleted_at)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-05-20T00:00:00.000000Z')
+
+        with sqlite3.connect(str(tmp_path / 'shadow_noop_tombed.db')) as raw:
+            got = raw.execute(
+                'SELECT deleted_at, shadowed_at FROM obs_index WHERE observation_id = ?',
+                (obs.observation_id,),
+            ).fetchone()
+            assert got == (deleted_at, None)
     finally:
         idx.close()
 
@@ -406,6 +539,69 @@ def test_rebuild_from_zenoh_marks_tombstones(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_rebuild_from_zenoh_does_not_overwrite_existing_tombstone_timestamp(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_tomb_preserve.db'))
+    try:
+        obs = _mk_obs('preserve first tomb time', project='r')
+        first_deleted_at = '2026-04-30T00:00:00.000000Z'
+        later_deleted_at = '2026-05-01T00:00:00.000000Z'
+        idx.upsert(obs)
+        idx.mark_deleted(obs.observation_id, first_deleted_at)
+
+        stats = idx.rebuild_from_zenoh(
+            _FakeSession([obs], [Tombstone(observation_id=obs.observation_id, deleted_at=later_deleted_at)])
+        )
+
+        assert stats.marked_deleted == 0
+        with sqlite3.connect(str(tmp_path / 'rebuild_tomb_preserve.db')) as raw:
+            (got,) = raw.execute(
+                'SELECT deleted_at FROM obs_index WHERE observation_id = ?',
+                (obs.observation_id,),
+            ).fetchone()
+            assert got == first_deleted_at
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_clears_shadow_when_tombstone_arrives(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_shadow_tomb.db'))
+    try:
+        obs = _mk_obs('shadow then tomb', project='r')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-05-18T00:00:00.000000Z')
+
+        deleted_at = '2026-05-19T00:00:00.000000Z'
+        stats = idx.rebuild_from_zenoh(
+            _FakeSession([], [Tombstone(observation_id=obs.observation_id, deleted_at=deleted_at)])
+        )
+
+        assert stats.marked_deleted == 1
+        with sqlite3.connect(str(tmp_path / 'rebuild_shadow_tomb.db')) as raw:
+            got = raw.execute(
+                'SELECT deleted_at, shadowed_at FROM obs_index WHERE observation_id = ?',
+                (obs.observation_id,),
+            ).fetchone()
+            assert got == (deleted_at, None)
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_skips_writes_for_unchanged_live_rows(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_noop.db'))
+    try:
+        obs = _mk_obs('stable payload', project='r')
+        idx.upsert(obs)
+        initial_counter = idx._upserts_since_checkpoint  # noqa: SLF001
+
+        stats = idx.rebuild_from_zenoh(_FakeSession([obs], []))
+
+        assert stats.added == 0
+        assert stats.unchanged == 1
+        assert idx._upserts_since_checkpoint == initial_counter  # noqa: SLF001
+    finally:
+        idx.close()
+
+
 def test_rebuild_from_zenoh_idempotent(tmp_path: Path) -> None:
     idx = LocalIndex.connect(str(tmp_path / 'rebuild_idem.db'))
     try:
@@ -444,6 +640,43 @@ def test_rebuild_from_zenoh_handles_partial_index(tmp_path: Path) -> None:
         ids = {r.observation_id for r in idx.search(project='r')}
         assert existing.observation_id in ids
         assert new_obs.observation_id in ids
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_shadows_missing_live_rows_instead_of_hard_deleting(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_shadow.db'))
+    try:
+        missing = _mk_obs('cached only', project='r')
+        idx.upsert(missing)
+
+        stats = idx.rebuild_from_zenoh(_FakeSession([], []))
+
+        assert stats.added == 0
+        assert stats.shadowed == 1
+        assert idx.row_count() == 1
+        assert idx.search(project='r') == []
+        hit = idx.find_by_id(missing.observation_id, include_deleted=True)
+        assert hit is not None
+        assert hit.observation_id == missing.observation_id
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_clears_shadow_when_obs_reappears(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_unshadow.db'))
+    try:
+        obs = _mk_obs('returns from zenoh', project='r')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-05-18T00:00:00.000000Z')
+
+        stats = idx.rebuild_from_zenoh(_FakeSession([obs], []))
+
+        assert stats.added == 0
+        assert stats.unchanged == 0
+        assert stats.shadowed == 0
+        ids = {r.observation_id for r in idx.search(project='r')}
+        assert obs.observation_id in ids
     finally:
         idx.close()
 
@@ -514,6 +747,20 @@ def test_list_tombstoned_obs_in_project_skips_live_rows(tmp_path: Path) -> None:
     try:
         live = _mk_obs('still live', project='p')
         idx.upsert(live)
+
+        rows = idx.list_tombstoned_obs_in_project('p', '2099-01-01T00:00:00.000000Z')
+        assert rows == []
+    finally:
+        idx.close()
+
+
+def test_list_tombstoned_obs_in_project_skips_shadowed_rows(tmp_path: Path) -> None:
+    """Rebuild-shadowed rows must not enter tombstone-driven GC queries."""
+    idx = LocalIndex.connect(str(tmp_path / 'list_tomb_shadow.db'))
+    try:
+        shadowed = _mk_obs('missing in rebuild only', project='p')
+        idx.upsert(shadowed)
+        idx.mark_shadowed_missing(shadowed.observation_id, '2026-05-18T00:00:00.000000Z')
 
         rows = idx.list_tombstoned_obs_in_project('p', '2099-01-01T00:00:00.000000Z')
         assert rows == []
