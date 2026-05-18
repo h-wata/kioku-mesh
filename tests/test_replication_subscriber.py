@@ -164,14 +164,23 @@ def test_obs_id_from_key_extracts_only_32_hex() -> None:
     from mesh_mem.store import _obs_id_from_key
 
     valid = 'a' * 32
+    # Canonical 7-segment shape under each accepted prefix.
     assert _obs_id_from_key(f'mem/obs/fam/cli/pc/sess/{valid}') == valid
     assert _obs_id_from_key(f'mem/tomb/fam/cli/pc/sess/{valid}') == valid
     # Mixed-case hex must be rejected (canonical obs_ids are lowercase).
     assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/' + 'A' * 32) is None
-    # Wrong length, non-hex chars, or trailing slash → None.
+    # Wrong obs_id length / non-hex chars / trailing slash → None.
     assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/short') is None
     assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/' + 'g' * 32) is None
     assert _obs_id_from_key('mem/obs/fam/cli/pc/sess/') is None
+    # Wrong prefix → None (subscriber should never see these, but the
+    # helper must not lean on the declare_subscriber filter for safety).
+    assert _obs_id_from_key(f'other/ns/fam/cli/pc/sess/{valid}') is None
+    assert _obs_id_from_key(f'mem/control/fam/cli/pc/sess/{valid}') is None
+    assert _obs_id_from_key(f'/mem/obs/fam/cli/pc/sess/{valid}') is None
+    # Wrong segment count → None (too few or too many slashes).
+    assert _obs_id_from_key(f'mem/obs/fam/cli/{valid}') is None
+    assert _obs_id_from_key(f'mem/obs/fam/cli/pc/sess/extra/{valid}') is None
 
 
 def test_subscriber_demotes_non_json_payload_to_debug(
