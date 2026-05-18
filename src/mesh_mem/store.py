@@ -759,14 +759,28 @@ def stop_pending_drain_background(join_timeout: float = _PENDING_DRAIN_JOIN_TIME
     return True
 
 
-def _obs_id_from_key(key_expr: str) -> str | None:
-    """Extract a 32-hex observation_id from a ``mem/(obs|tomb)/.../{obs_id}`` key.
+_OBS_KEY_PREFIXES = ('mem/obs/', 'mem/tomb/')
+_OBS_KEY_SEGMENTS = 7  # mem / {obs|tomb} / agent / client / pc / session / obs_id
 
-    Returns ``None`` when the trailing segment is not a 32 hex string so
-    a malformed or unrelated key cannot delete the wrong row. Keeps the
-    DELETE-kind subscriber path conservative (Issue #64).
+
+def _obs_id_from_key(key_expr: str) -> str | None:
+    """Extract a 32-hex observation_id from a canonical mesh-mem key.
+
+    Conservative parser. Accepts only the exact ``mem/{obs|tomb}/
+    {agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}``
+    shape (7 slash-separated segments, ``mem/obs/`` or ``mem/tomb/``
+    prefix) with a 32 lowercase hex trailing segment. Anything else
+    (wrong prefix, wrong segment count, malformed obs_id) returns
+    ``None`` so a stray DELETE on an unrelated key cannot drive
+    ``physical_delete`` against a real row whose id happens to collide
+    with the trailing token (Issue #64).
     """
-    obs_id = key_expr.rsplit('/', 1)[-1]
+    if not key_expr.startswith(_OBS_KEY_PREFIXES):
+        return None
+    parts = key_expr.split('/')
+    if len(parts) != _OBS_KEY_SEGMENTS:
+        return None
+    obs_id = parts[-1]
     if len(obs_id) == 32 and all(c in '0123456789abcdef' for c in obs_id):
         return obs_id
     return None
