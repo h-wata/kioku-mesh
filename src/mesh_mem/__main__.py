@@ -63,7 +63,7 @@ def _positive_int(value: str) -> int:
     """Argparse type that rejects zero / negative integers."""
     parsed = int(value)
     if parsed < 1:
-        raise argparse.ArgumentTypeError('1 以上の整数を指定してください。')
+        raise argparse.ArgumentTypeError('must be a positive integer (1 or greater).')
     return parsed
 
 
@@ -75,7 +75,7 @@ def _select_delete_targets(args: argparse.Namespace) -> tuple[list[Observation],
     """
     until_dt = _parse_iso_or_none(args.until or '')
     if args.until and until_dt is None:
-        return [], '--until は ISO8601 形式で指定してください。'
+        return [], '--until must be in ISO8601 format.'
 
     matches = search_observations(
         project=args.project or '',
@@ -85,8 +85,8 @@ def _select_delete_targets(args: argparse.Namespace) -> tuple[list[Observation],
     )
     if len(matches) >= MAX_SEARCH:
         return [], (
-            f'bulk delete 対象が上限 {MAX_SEARCH} 件に到達しました。'
-            ' --project/--pc-id/--since/--until でさらに絞り込んでください。'
+            f'bulk delete hit the upper limit ({MAX_SEARCH} entries).'
+            ' Narrow further with --project/--pc-id/--since/--until.'
         )
     if until_dt is not None:
         matches = [obs for obs in matches if (_parse_iso_or_none(obs.created_at) or until_dt) <= until_dt]
@@ -109,7 +109,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
         supersedes=supersedes,
     )
     put_observation(obs)
-    print(f'保存完了: {obs.observation_id}')
+    print(f'saved: {obs.observation_id}')
     return 0
 
 
@@ -172,7 +172,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
     )
     if not results:
         if args.format == 'text':
-            print('該当するメモリはありません。')
+            print('No matching memories.')
         elif args.format == 'json':
             print('[]')
         return 0
@@ -188,11 +188,11 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
 def _cmd_get_memory(args: argparse.Namespace) -> int:
     if len(args.observation_id) != 32:
-        print('observation_id は 32 文字の完全一致が必要です。', file=sys.stderr)
+        print('observation_id must be a full 32-character match.', file=sys.stderr)
         return 2
     obs = find_observation_by_id(args.observation_id)
     if obs is None:
-        print(f'observation_id {args.observation_id} は見つかりませんでした。', file=sys.stderr)
+        print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
         return 1
     lines = [
         f'id: {obs.observation_id}',
@@ -216,21 +216,21 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
 def _cmd_delete(args: argparse.Namespace) -> int:
     if args.observation_id and _delete_has_bulk_selector(args):
         print(
-            'observation_id と bulk selector (--project/--pc-id/--since/--until) は同時指定できません。',
+            'observation_id and bulk selector (--project/--pc-id/--since/--until) cannot be combined.',
             file=sys.stderr,
         )
         return 2
     if args.observation_id and args.dry_run:
-        print('--dry-run は bulk delete でのみ指定できます。', file=sys.stderr)
+        print('--dry-run is only valid for bulk delete.', file=sys.stderr)
         return 2
     if args.observation_id and args.yes:
-        print('--yes は bulk delete でのみ指定できます。', file=sys.stderr)
+        print('--yes is only valid for bulk delete.', file=sys.stderr)
         return 2
 
     if not args.observation_id:
         if not _delete_has_bulk_selector(args):
             print(
-                'bulk delete では --project/--pc-id/--since/--until のいずれかが必要です。',
+                'bulk delete requires one of --project/--pc-id/--since/--until.',
                 file=sys.stderr,
             )
             return 2
@@ -249,44 +249,44 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         if args.until:
             selector_parts.append(f'until={args.until!r}')
         selector_text = ', '.join(selector_parts)
-        print(f'bulk delete 対象: {len(matches)} 件 ({selector_text})', file=sys.stderr)
+        print(f'bulk delete target: {len(matches)} entries ({selector_text})', file=sys.stderr)
         if not matches:
-            print('対象なし — 指定条件にマッチする observation がありませんでした。')
+            print('no targets — no observations matched the selector.')
             return 0
         if args.dry_run:
-            print('Dry run — --yes なしでは削除しません。')
+            print('Dry run — pass --yes to actually delete.')
             return 0
         if not args.yes:
             if not sys.stdin.isatty():
                 print(
-                    'bulk delete 実行は対話的確認が必要です。非対話環境では --yes を併用してください。',
+                    'bulk delete requires interactive confirmation. Pass --yes for non-interactive use.',
                     file=sys.stderr,
                 )
                 return 2
-            prompt = f'本当に {len(matches)} 件を tombstone 化しますか？ ' "確認のため 'yes' と入力してください: "
+            prompt = f"Tombstone {len(matches)} entries? type 'yes' to confirm: "
             try:
                 answer = input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
-                print('\nキャンセルしました。', file=sys.stderr)
+                print('\ncancelled.', file=sys.stderr)
                 return 1
             if answer != 'yes':
-                print('キャンセルしました。', file=sys.stderr)
+                print('cancelled.', file=sys.stderr)
                 return 1
 
         for obs in matches:
             put_tombstone(obs, reason=args.reason or '')
-        print(f'削除（tombstone）完了: {len(matches)} 件')
+        print(f'deleted (tombstone): {len(matches)} entries')
         return 0
 
     if len(args.observation_id) != 32:
-        print('observation_id は 32 文字の完全一致が必要です。', file=sys.stderr)
+        print('observation_id must be a full 32-character match.', file=sys.stderr)
         return 2
     obs = find_observation_by_id(args.observation_id)
     if obs is None:
-        print(f'observation_id {args.observation_id} は見つかりませんでした。', file=sys.stderr)
+        print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
         return 1
     put_tombstone(obs, reason=args.reason or '')
-    print(f'削除（tombstone）完了: {args.observation_id}')
+    print(f'deleted (tombstone): {args.observation_id}')
     return 0
 
 
@@ -294,7 +294,7 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     try:
         recent = search_observations(limit=MAX_SEARCH)
     except Exception as e:  # noqa: BLE001
-        print(f'共有メモリ取得失敗 [{type(e).__name__}]: {e}', file=sys.stderr)
+        print(f'failed to read shared memory [{type(e).__name__}]: {e}', file=sys.stderr)
         return 1
     transport = get_transport_status()
     by_family: dict[str, int] = {}
@@ -314,34 +314,35 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f'drain_in_progress: {"yes" if transport.drain_in_progress else "no"}')
     print(f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}')
     print(f'drain_total_succeeded: {transport.drain_total_succeeded}')
-    print(f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}{" ※上限到達の可能性あり" if truncated else ""}')
+    print(f'count (within limit {MAX_SEARCH}): {len(recent)}{" (limit may be reached)" if truncated else ""}')
     for family, count in sorted(by_family.items()):
-        print(f'  family {family}: {count}件')
+        print(f'  family {family}: {count}')
     for pc, count in sorted(by_pc.items()):
-        print(f'  pc {pc[:8]}: {count}件')
+        print(f'  pc {pc[:8]}: {count}')
     label = mesh_ready_label()
     print(f'mesh_ready: {label}')
     if label != 'yes':
         print(
-            '警告: ピアアライメントが未完了です。再起動直後は検索件数が少なく見えることがあります。', file=sys.stderr
+            'WARNING: peer alignment not yet complete. Search counts may be low right after restart.',
+            file=sys.stderr,
         )
     return 0
 
 
 def _cmd_drain(args: argparse.Namespace) -> int:
     if not args.pending:
-        print('現状の drain 対象は --pending のみです。', file=sys.stderr)
+        print('drain currently only supports --pending.', file=sys.stderr)
         return 2
     drained = drain_pending_puts(limit=args.limit, wait=True)
     remaining = get_transport_status().pending_puts
-    print(f'pending_puts drain 完了: drained={drained}, remaining={remaining}')
+    print(f'pending_puts drain complete: drained={drained}, remaining={remaining}')
     return 0
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
     if args.force_id:
         if len(args.force_id) != 32:
-            print('--force-id は 32 文字の完全一致 observation_id が必要です。', file=sys.stderr)
+            print('--force-id requires a full 32-character observation_id.', file=sys.stderr)
             return 2
         obs_removed, tomb_removed = physical_delete_observation(args.force_id)
         parts = []
@@ -350,45 +351,45 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         if tomb_removed:
             parts.append('tomb')
         if parts:
-            print(f'物理削除完了 ({", ".join(parts)}) + broadcast purge: {args.force_id}')
+            print(f'physically deleted ({", ".join(parts)}) + broadcast purge: {args.force_id}')
         else:
             # No local match, but the broadcast wildcard delete may still have
             # purged a reachable peer's copy — treat as success so scripts do
             # not retry or misinterpret a completed emergency purge as failure.
             print(
-                f'observation_id {args.force_id} はこの replica では未所持でした。'
-                'broadcast purge は送信済み (ベストエフォート)。'
-                '完全を期すなら他 PC でも同コマンドを実行してください。',
+                f'observation_id {args.force_id} not present on this replica. '
+                'broadcast purge already sent (best-effort). '
+                'For full coverage, run the same command on other peers.',
             )
         return 0
     if args.by_pc_id:
         return _cmd_gc_by_pc_id(args)
     purged = gc_expired_tombstones(retention_days=args.retention_days, project=args.project or '')
     project_note = f' (project={args.project})' if args.project else ''
-    print(f'retention {args.retention_days} 日超の tombstone{project_note}: {purged} 件を物理削除しました')
+    print(f'retention {args.retention_days}-day tombstones{project_note}: physically deleted {purged} entries')
     return 0
 
 
 def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
     if len(args.by_pc_id) != 32:
-        print('--by-pc-id は 32 文字の pc_id が必要です。', file=sys.stderr)
+        print('--by-pc-id requires a 32-character pc_id.', file=sys.stderr)
         return 2
 
     print(
-        f'mem/obs/** をスキャン中 pc_id={args.by_pc_id!r}'
+        f'scanning mem/obs/** pc_id={args.by_pc_id!r}'
         + (f' session_prefix={args.session_prefix!r}' if args.session_prefix else ''),
         file=sys.stderr,
     )
     matches, sessions = scan_obs_by_pc_id(args.by_pc_id, session_prefix=args.session_prefix or '')
-    print(f'マッチした obs: {len(matches)} 件', file=sys.stderr)
+    print(f'matched obs: {len(matches)} entries', file=sys.stderr)
     if not matches:
-        print('対象なし — pc_id にマッチする observation がありませんでした。')
+        print('no targets — no observations matched the pc_id.')
         return 0
-    print('セッション内訳:', file=sys.stderr)
+    print('session breakdown:', file=sys.stderr)
     for sid, count in sessions.most_common():
         print(f'  {sid!r:>40}: {count}', file=sys.stderr)
     if not args.execute:
-        print('Dry run — --execute を付けると実際に削除します。')
+        print('Dry run — pass --execute to actually delete.')
         return 0
 
     # Interactive confirm gate before any destructive call. ``--yes`` skips
@@ -397,29 +398,27 @@ def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
     if not args.yes:
         if not sys.stdin.isatty():
             print(
-                '--execute は対話的確認が必要です。非対話環境では --yes を併用してください。',
+                '--execute requires interactive confirmation. Pass --yes for non-interactive use.',
                 file=sys.stderr,
             )
             return 2
-        prompt = (
-            f'本当に pc_id={args.by_pc_id} の {len(matches)} 件の obs を物理削除しますか？ '
-            "確認のため 'yes' と入力してください: "
-        )
+        prompt = f"Physically delete {len(matches)} obs for pc_id={args.by_pc_id}? type 'yes' to confirm: "
         try:
             answer = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
-            print('\nキャンセルしました。', file=sys.stderr)
+            print('\ncancelled.', file=sys.stderr)
             return 1
         if answer != 'yes':
-            print('キャンセルしました。', file=sys.stderr)
+            print('cancelled.', file=sys.stderr)
             return 1
 
     def _on_progress(i: int, total: int, purged: int, failures: int) -> None:
-        print(f'  進捗: {i}/{total} (purged={purged}, fail={failures})', file=sys.stderr)
+        print(f'  progress: {i}/{total} (purged={purged}, fail={failures})', file=sys.stderr)
 
     purged, tombs_purged, failures = execute_bulk_purge(matches, on_progress=_on_progress)
     print(
-        f'物理削除完了: obs={purged}, tombs={tombs_purged}, failures={failures} (tomb sweep / broadcast はスキップ)',
+        f'physically deleted: obs={purged}, tombs={tombs_purged}, failures={failures}'
+        ' (tomb sweep / broadcast skipped)',
     )
     return 0 if failures == 0 else 1
 
@@ -431,26 +430,26 @@ def _build_parser() -> argparse.ArgumentParser:
         '--rebuild',
         action='store_true',
         help=(
-            '初回起動時に zenoh から SQLite index を再構築する。'
-            'CLI は one-shot 想定でデフォルト skip (#38)。'
-            'index が空の状態で search したい場合や CI 検証時に明示指定する。'
-            '環境変数 MESH_MEM_FORCE_REBUILD=1 でも同等。'
+            'Rebuild the SQLite index from zenoh on first startup. '
+            'CLI is one-shot and skips by default (#38); '
+            'pass this when the index is empty and you want search to work, or during CI verification. '
+            'MESH_MEM_FORCE_REBUILD=1 has the same effect.'
         ),
     )
     sub = parser.add_subparsers(dest='command', required=True)
 
     _MEMORY_TYPES = sorted(VALID_MEMORY_TYPES)  # noqa: N806
 
-    p_save = sub.add_parser('save', help='Observation を保存')
-    p_save.add_argument('content', help='保存する内容')
+    p_save = sub.add_parser('save', help='Save an observation')
+    p_save.add_argument('content', help='content to save')
     p_save.add_argument('-p', '--project', default='')
-    p_save.add_argument('-t', '--tags', default='', help='カンマ区切りのタグ')
+    p_save.add_argument('-t', '--tags', default='', help='comma-separated tags')
     p_save.add_argument(
         '--memory-type',
         dest='memory_type',
         default='note',
         choices=_MEMORY_TYPES,
-        help='メモリ種別 (default: note)',
+        help='memory category (default: note)',
     )
     p_save.add_argument(
         '--importance',
@@ -458,103 +457,106 @@ def _build_parser() -> argparse.ArgumentParser:
         default=2,
         choices=range(1, 6),
         metavar='1-5',
-        help='重要度 1-5 (default: 2)',
+        help='importance 1-5 (default: 2)',
     )
-    p_save.add_argument('--subject', default='', help='短いトピック名')
-    p_save.add_argument('--summary', default='', help='1行サマリー (検索結果に表示)')
+    p_save.add_argument('--subject', default='', help='short topic name')
+    p_save.add_argument('--summary', default='', help='one-line summary shown in search results')
     p_save.add_argument(
         '--source-files',
         dest='source_files',
         default='',
-        help='関連ファイルパス (カンマ区切り)',
+        help='related file paths (comma-separated)',
     )
     p_save.add_argument(
         '--supersedes',
         default='',
-        help='置き換える observation_id (カンマ区切り、32文字hex)',
+        help='observation_ids this entry replaces (comma-separated, 32-char hex)',
     )
     p_save.set_defaults(func=_cmd_save)
 
-    p_search = sub.add_parser('search', help='メモリを検索')
-    p_search.add_argument('query', nargs='?', default='', help='検索キーワード (任意)')
+    p_search = sub.add_parser('search', help='Search memories')
+    p_search.add_argument('query', nargs='?', default='', help='search keyword (optional)')
     p_search.add_argument('--agent-family', dest='agent_family', default='')
     p_search.add_argument('--client-id', dest='client_id', default='')
     p_search.add_argument('--pc-id', dest='pc_id', default='')
     p_search.add_argument('--session-id', dest='session_id', default='')
     p_search.add_argument('-p', '--project', default='')
-    p_search.add_argument('--since', default='', help='ISO8601 時刻以降に限定')
-    p_search.add_argument('-n', '--limit', type=int, default=50, help='最大件数 (default: 50)')
-    p_search.add_argument('--format', choices=_SEARCH_FORMATS, default='text', help='出力形式 (default: text)')
+    p_search.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
+    p_search.add_argument('-n', '--limit', type=int, default=50, help='max results (default: 50)')
+    p_search.add_argument('--format', choices=_SEARCH_FORMATS, default='text', help='output format (default: text)')
     p_search.set_defaults(func=_cmd_search)
 
-    p_delete = sub.add_parser('delete', help='Observation を論理削除 (tombstone)')
-    p_delete.add_argument('observation_id', nargs='?', default='', help='32文字の完全一致 observation_id')
-    p_delete.add_argument('-p', '--project', default='', help='指定 project の observation を tombstone 化')
-    p_delete.add_argument('--pc-id', dest='pc_id', default='', help='指定 pc_id の observation を tombstone 化')
-    p_delete.add_argument('--since', default='', help='ISO8601 時刻以降に限定')
-    p_delete.add_argument('--until', default='', help='ISO8601 時刻以前に限定')
-    p_delete.add_argument('--dry-run', action='store_true', help='件数だけ表示して削除しない')
-    p_delete.add_argument('--yes', action='store_true', help='bulk delete 時の対話確認をスキップ')
+    p_delete = sub.add_parser('delete', help='Soft-delete an observation (tombstone)')
+    p_delete.add_argument('observation_id', nargs='?', default='', help='full 32-character observation_id')
+    p_delete.add_argument('-p', '--project', default='', help='tombstone observations in the given project')
+    p_delete.add_argument('--pc-id', dest='pc_id', default='', help='tombstone observations from the given pc_id')
+    p_delete.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
+    p_delete.add_argument('--until', default='', help='limit to ISO8601 timestamp and earlier')
+    p_delete.add_argument('--dry-run', action='store_true', help='show count only, do not delete')
+    p_delete.add_argument('--yes', action='store_true', help='skip interactive confirmation for bulk delete')
     p_delete.add_argument('-r', '--reason', default='')
     p_delete.set_defaults(func=_cmd_delete)
 
-    p_status = sub.add_parser('status', help='メモリ状態を表示')
+    p_status = sub.add_parser('status', help='Show memory status')
     p_status.set_defaults(func=_cmd_status)
 
-    p_drain = sub.add_parser('drain', help='保留中の pending_puts を drain')
-    p_drain.add_argument('--pending', action='store_true', help='pending_puts.db の保留 row を replay する')
-    p_drain.add_argument('--limit', type=_positive_int, default=None, help='1 回の drain 上限件数')
+    p_drain = sub.add_parser('drain', help='Drain pending_puts')
+    p_drain.add_argument('--pending', action='store_true', help='replay queued rows in pending_puts.db')
+    p_drain.add_argument('--limit', type=_positive_int, default=None, help='max rows drained per invocation')
     p_drain.set_defaults(func=_cmd_drain)
 
-    p_gc = sub.add_parser('gc', help='tombstone 対象の物理削除 (retention / --force-id / --by-pc-id)')
+    p_gc = sub.add_parser('gc', help='Physically delete tombstoned entries (retention / --force-id / --by-pc-id)')
     p_gc.add_argument(
         '--force-id',
         dest='force_id',
         default='',
-        help='32文字の observation_id を完全一致で物理削除 (機微情報緊急手順用; --project は無視される)',
+        help=(
+            'physically delete observation_id by 32-char exact match '
+            '(emergency-purge for sensitive data; --project is ignored)'
+        ),
     )
     p_gc.add_argument(
         '--retention-days',
         dest='retention_days',
         type=int,
         default=30,
-        help='retention 日数 (default 30)。この日数より古い tombstone と対応 obs を物理削除',
+        help='retention in days (default 30). Tombstones and their obs older than this are physically deleted.',
     )
     p_gc.add_argument(
         '-p',
         '--project',
         default='',
-        help='指定したプロジェクトの tombstone のみを削除対象にする (未指定時は全プロジェクト対象)',
+        help='only delete tombstones for the given project (default: all projects)',
     )
     p_gc.add_argument(
         '--by-pc-id',
         dest='by_pc_id',
         default='',
         help=(
-            '32文字の pc_id にマッチする obs を一括物理削除する (bench / spam 掃除用)。'
-            'デフォルトは dry-run; --execute で実削除。tomb sweep / broadcast はスキップ。'
+            'bulk-physically-delete obs matching a 32-char pc_id (for cleaning up bench/spam). '
+            'Default is dry-run; pass --execute to actually delete. Skips tomb sweep / broadcast.'
         ),
     )
     p_gc.add_argument(
         '--session-prefix',
         dest='session_prefix',
         default='',
-        help='--by-pc-id と併用。session_id の先頭一致でさらに絞り込む (例: "bench")',
+        help='used with --by-pc-id; narrow further by session_id prefix (e.g. "bench")',
     )
     p_gc.add_argument(
         '--execute',
         action='store_true',
-        help='--by-pc-id の dry-run を解除して実際に削除する',
+        help='disable --by-pc-id dry-run and actually delete',
     )
     p_gc.add_argument(
         '--yes',
         action='store_true',
-        help='--by-pc-id --execute 時の対話確認をスキップ (CI / 自動化用)',
+        help='skip interactive confirmation for --by-pc-id --execute (for CI / automation)',
     )
     p_gc.set_defaults(func=_cmd_gc)
 
-    p_get = sub.add_parser('get-memory', help='observation_id で単一レコードを取得')
-    p_get.add_argument('observation_id', help='32文字の完全一致 observation_id')
+    p_get = sub.add_parser('get-memory', help='Get a single observation by observation_id')
+    p_get.add_argument('observation_id', help='full 32-character observation_id')
     p_get.set_defaults(func=_cmd_get_memory)
 
     return parser

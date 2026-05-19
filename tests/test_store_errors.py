@@ -89,7 +89,7 @@ def test_search_does_not_silently_return_partial_on_err(monkeypatch: pytest.Monk
 
     results = store.search_observations()
     ids = {o.observation_id for o in results}
-    # 1件目・2件目は err でロールバックされ、retry 後の結果にだけ観測されるべき。
+    # attempts 1 and 2 roll back on err; only the retry result should be observed.
     assert obs1.observation_id not in ids
     assert obs2.observation_id not in ids
     assert obs3.observation_id in ids

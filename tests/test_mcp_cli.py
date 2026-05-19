@@ -105,7 +105,7 @@ def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None: 
             return result.data
 
     msg = asyncio.run(_go())
-    assert '保存完了' in msg
+    assert 'saved' in msg
     obs_id = msg.split()[-1]
     assert len(obs_id) == 32
 
@@ -150,7 +150,7 @@ def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixt
     )
     assert rc == 0
     out = capsys.readouterr().out
-    assert '保存完了' in out
+    assert 'saved' in out
     obs_id = out.strip().split()[-1]
     assert len(obs_id) == 32
 
@@ -324,7 +324,7 @@ def test_cli_search_empty_format_variants(monkeypatch: pytest.MonkeyPatch, capsy
     monkeypatch.setattr(cli_module, 'search_observations', lambda **kwargs: [])
 
     assert cli_main(['search']) == 0
-    assert capsys.readouterr().out == '該当するメモリはありません。\n'
+    assert capsys.readouterr().out == 'No matching memories.\n'
 
     assert cli_main(['search', '--format', 'markdown']) == 0
     assert capsys.readouterr().out == ''
@@ -404,7 +404,7 @@ def test_cli_drain_pending_replays_queued_rows(
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert 'pending_puts drain 完了: drained=2, remaining=1' in out
+    assert 'pending_puts drain complete: drained=2, remaining=1' in out
     assert working.put_calls == [queued[0].key_expr, queued[1].key_expr]
 
 
@@ -477,7 +477,7 @@ def test_cli_bulk_delete_dry_run_by_project(single_zenohd: Any, capsys: pytest.C
     rc = cli_main(['delete', '--project', 'bulk-dry', '--dry-run'])
     assert rc == 0
     captured = capsys.readouterr()
-    assert "bulk delete 対象: 2 件 (project='bulk-dry')" in captured.err
+    assert "bulk delete target: 2 entries (project='bulk-dry')" in captured.err
     assert 'Dry run' in captured.out
 
     visible = {obs.observation_id for obs in store.search_observations(project='bulk-dry')}
@@ -498,7 +498,7 @@ def test_cli_bulk_delete_requires_yes_in_noninteractive(
     rc = cli_main(['delete', '--project', 'bulk-needs-yes'])
     assert rc == 2
     captured = capsys.readouterr()
-    assert '非対話環境では --yes を併用してください。' in captured.err
+    assert 'Pass --yes for non-interactive use.' in captured.err
 
     visible = {obs.observation_id for obs in store.search_observations(project='bulk-needs-yes')}
     assert target.observation_id in visible
@@ -535,8 +535,8 @@ def test_cli_bulk_delete_executes_with_until_filter(
     )
     assert rc == 0
     captured = capsys.readouterr()
-    assert "bulk delete 対象: 1 件 (project='bulk-until', until='2026-05-10T00:00:00Z')" in captured.err
-    assert '削除（tombstone）完了: 1 件' in captured.out
+    assert "bulk delete target: 1 entries (project='bulk-until', until='2026-05-10T00:00:00Z')" in captured.err
+    assert 'deleted (tombstone): 1 entries' in captured.out
     time.sleep(_INGEST_SETTLE)
 
     visible = {obs.observation_id for obs in store.search_observations(project='bulk-until')}
@@ -549,4 +549,4 @@ def test_cli_bulk_delete_requires_selector(capsys: pytest.CaptureFixture) -> Non
     rc = cli_main(['delete'])
     assert rc == 2
     captured = capsys.readouterr()
-    assert 'bulk delete では --project/--pc-id/--since/--until のいずれかが必要です。' in captured.err
+    assert 'bulk delete requires one of --project/--pc-id/--since/--until.' in captured.err

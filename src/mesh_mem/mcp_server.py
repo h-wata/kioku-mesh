@@ -157,7 +157,7 @@ def save_observation(
         The generated ``observation_id``.
     """
     if memory_type not in VALID_MEMORY_TYPES:
-        return f'memory_type は {sorted(VALID_MEMORY_TYPES)} のいずれかである必要があります。 got: {memory_type!r}'
+        return f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}. got: {memory_type!r}'
     obs = Observation(
         content=content,
         project=project,
@@ -170,7 +170,7 @@ def save_observation(
         supersedes=supersedes or [],
     )
     put_observation(obs)
-    return f'保存完了: {obs.observation_id}'
+    return f'saved: {obs.observation_id}'
 
 
 @mcp.tool()
@@ -201,7 +201,7 @@ def search_memory(
         limit=limit,
     )
     if not results:
-        return '該当するメモリはありません。'
+        return 'No matching memories.'
     lines = []
     for obs in results:
         body = obs.summary if obs.summary else obs.content[:80]
@@ -225,10 +225,10 @@ def get_memory(observation_id: str) -> str:
     summary, source_files, supersedes).
     """
     if len(observation_id) != 32:
-        return 'observation_id は 32 文字の完全一致が必要です。'
+        return 'observation_id must be a full 32-character match.'
     obs = find_observation_by_id(observation_id)
     if obs is None:
-        return f'observation_id {observation_id} は見つかりませんでした。'
+        return f'observation_id {observation_id} not found.'
     lines = [
         f'id: {obs.observation_id}',
         f'memory_type: {obs.memory_type}',
@@ -255,12 +255,12 @@ def delete_memory(observation_id: str, reason: str = '') -> str:
     accidental deletion. Physical cleanup is deferred to a GC job.
     """
     if len(observation_id) != 32:
-        return 'observation_id は 32 文字の完全一致が必要です。'
+        return 'observation_id must be a full 32-character match.'
     obs = find_observation_by_id(observation_id)
     if obs is None:
-        return f'observation_id {observation_id} は見つかりませんでした。'
+        return f'observation_id {observation_id} not found.'
     put_tombstone(obs, reason=reason)
-    return f'削除（tombstone）完了: {observation_id}'
+    return f'deleted (tombstone): {observation_id}'
 
 
 @mcp.tool()
@@ -295,26 +295,26 @@ def get_memory_status() -> str:
             f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}',
             f'drain_total_succeeded: {transport.drain_total_succeeded}',
             f'index_rows: live={counts.live} / tomb={counts.tombstoned} / shadow={counts.shadowed}',
-            f'件数 (上限 {MAX_SEARCH} 内): {len(recent)}'
-            + (' ※上限到達の可能性あり、絞り込み推奨' if truncated else ''),
+            f'count (within limit {MAX_SEARCH}): {len(recent)}'
+            + (' (limit may be reached; consider narrowing)' if truncated else ''),
         ]
         for family, count in sorted(by_family.items()):
-            lines.append(f'  family {family}: {count}件')
+            lines.append(f'  family {family}: {count}')
         for pc, count in sorted(by_pc.items()):
-            lines.append(f'  pc {pc[:8]}: {count}件')
+            lines.append(f'  pc {pc[:8]}: {count}')
         return '\n'.join(lines)
     except Exception as e:  # noqa: BLE001
-        return f'共有メモリ取得失敗 [{type(e).__name__}]: {e}'
+        return f'failed to read shared memory [{type(e).__name__}]: {e}'
 
 
 @mcp.tool()
 def drain_pending_puts(limit: int | None = None) -> str:
     """Replay pending queued puts immediately through the current MCP process."""
     if limit is not None and limit < 1:
-        return 'limit は 1 以上で指定してください。'
+        return 'limit must be 1 or greater.'
     drained = drain_pending_puts_now(limit=limit, wait=True)
     remaining = get_transport_status().pending_puts
-    return f'pending_puts drain 完了: drained={drained}, remaining={remaining}'
+    return f'pending_puts drain complete: drained={drained}, remaining={remaining}'
 
 
 def main() -> None:

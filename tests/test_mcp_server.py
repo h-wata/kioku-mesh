@@ -98,7 +98,7 @@ def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa
             return result.data
 
     msg = _run(_go())
-    assert '保存完了' in msg
+    assert 'saved' in msg
     # Extract the 32-char id (last whitespace-separated token of the success message).
     obs_id = msg.split()[-1]
     assert len(obs_id) == 32
@@ -140,7 +140,7 @@ def test_search_memory_empty_reports_none(single_zenohd: Any) -> None:  # noqa: 
             return result.data
 
     text = _run(_go())
-    assert '該当するメモリはありません' in text
+    assert 'No matching memories' in text
 
 
 def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -158,7 +158,7 @@ def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG
             return result.data
 
     msg = _run(_go())
-    assert '削除' in msg
+    assert 'deleted' in msg
     assert obs.observation_id in msg
 
     time.sleep(_INGEST_SETTLE)
@@ -177,7 +177,7 @@ def test_delete_memory_rejects_short_id(single_zenohd: Any) -> None:  # noqa: AR
             return result.data
 
     msg = _run(_go())
-    assert '32 文字の完全一致' in msg
+    assert '32-character match' in msg
 
 
 def test_delete_memory_reports_missing_id(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -192,7 +192,7 @@ def test_delete_memory_reports_missing_id(single_zenohd: Any) -> None:  # noqa: 
             return result.data
 
     msg = _run(_go())
-    assert '見つかりませんでした' in msg
+    assert 'not found' in msg
     assert phantom_id in msg
 
 
@@ -218,7 +218,7 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'drain_in_progress: no' in text
     assert 'index_rows: live=2 / tomb=0 / shadow=0' in text
     # At least the 2 we put show up in the count summary.
-    assert '件数' in text
+    assert 'count (within limit' in text
 
 
 def test_get_memory_status_reports_shadow_rows(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -304,7 +304,7 @@ def test_drain_pending_puts_tool_replays_queued_rows(monkeypatch: pytest.MonkeyP
             return result.data
 
     text = _run(_go())
-    assert 'pending_puts drain 完了: drained=1, remaining=1' in text
+    assert 'pending_puts drain complete: drained=1, remaining=1' in text
     assert working.put_calls == [queued[0].key_expr]
 
 
@@ -398,7 +398,7 @@ def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # no
             return result.data
 
     msg = _run(_go())
-    assert '保存完了' in msg
+    assert 'saved' in msg
     obs_id = msg.split()[-1]
     time.sleep(_INGEST_SETTLE)
     found = store.find_observation_by_id(obs_id)
@@ -450,7 +450,7 @@ def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: 
             return result.data
 
     msg = _run(_go())
-    assert '保存完了' in msg
+    assert 'saved' in msg
     obs_id = msg.split()[-1]
     time.sleep(_INGEST_SETTLE)
     found = store.find_observation_by_id(obs_id)
