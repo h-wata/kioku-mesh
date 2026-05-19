@@ -16,9 +16,12 @@ export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"
 mkdir -p "$ZENOH_BACKEND_ROCKSDB_ROOT"
 zenohd -c config/zenohd_home.json5    # or zenohd_office.json5
 
-# 4. install the Python package in each PC venv
-python3 -m venv ~/.venv/mesh-mem
-~/.venv/mesh-mem/bin/pip install -e '.[dev]'
+# 4. install the mesh-mem CLI / MCP server (both end up on PATH)
+uv tool install git+https://github.com/h-wata/mesh-mem.git    # end users
+# alternatively from a local checkout:
+# uv tool install --editable .
+# fallback without uv (still works, but you must call by absolute path):
+# python3 -m venv ~/.venv/mesh-mem && ~/.venv/mesh-mem/bin/pip install -e '.[dev]'
 
 # 5. exercise from the CLI
 export MESH_MEM_AGENT_FAMILY=claude
@@ -191,7 +194,7 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 
 ## MCP registration
 
-Register the `mesh-mem-mcp` console script in each agent's MCP config. Use the **absolute path** inside the venv. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([日本語版](docs/mcp-clients.ja.md)).
+Register the `mesh-mem-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — typically `~/.local/bin/mesh-mem-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/mesh-mem-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([日本語版](docs/mcp-clients.ja.md)).
 
 ## systemd unit (zenohd)
 
