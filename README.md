@@ -77,6 +77,26 @@ when both env vars are set. Full resolution order: `--rebuild` flag >
 `MESH_MEM_FORCE_REBUILD` > `MESH_MEM_SKIP_REBUILD` > module default
 (`True` for long-lived processes, `False` for the CLI).
 
+### Shell completion (optional)
+
+`mesh-mem` ships an [argcomplete](https://kislyuk.github.io/argcomplete/)-based
+completer for bash / zsh. Install the optional extra and register it (#76):
+
+```bash
+pip install -e '.[completion]'
+# bash
+eval "$(register-python-argcomplete mesh-mem)"
+# zsh: add to ~/.zshrc
+#   autoload -U bashcompinit && bashcompinit
+#   eval "$(register-python-argcomplete mesh-mem)"
+```
+
+Subcommand names, static flags, and `--memory-type` choices complete
+statically. `--project` / `--pc-id` / `--by-pc-id` use dynamic completers
+that read distinct values from the **local SQLite index only** (no Zenoh
+round-trip, no `rebuild_from_zenoh`) so tab-completion stays fast even
+when the mesh is large.
+
 ## Architecture summary
 
 - **Source of truth:** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.

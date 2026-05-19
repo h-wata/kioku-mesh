@@ -13,6 +13,7 @@ versions without a migration path until `1.0.0`.
 ### Added
 
 - **`Observation.references` field** for first-class PR / Issue / external identifiers (#73). CLI: `mesh-mem save --references "#67,PR#68"`. MCP: `references=["#67", "PR#68"]`. Old JSON without the field deserializes to `[]`.
+- **Shell completion for the `mesh-mem` CLI** via `argcomplete` (#76). Install the new `completion` extra (`pip install -e '.[completion]'`) and run `eval "$(register-python-argcomplete mesh-mem)"` from `.bashrc` / `.zshrc`. Subcommands, static flags, and `--memory-type` complete from argparse metadata; `--project` / `--pc-id` / `--by-pc-id` use dynamic completers that read distinct values from the **local SQLite index only** (no Zenoh round-trip, no `rebuild_from_zenoh`), so tab-completion stays sub-100 ms even on populated meshes. `argcomplete` is optional — if it is not installed the CLI behaves exactly as before.
 
 ### Changed
 
