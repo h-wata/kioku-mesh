@@ -10,6 +10,28 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **`gc --retention-days` now sweeps shadowed index rows alongside tombstones**
+  (#70). After #67 introduced shadow-delete, long-shadowed rows had no
+  physical-removal path and grew the SQLite index forever. The retention
+  sweep now collects shadow rows whose `shadowed_at` predates the same
+  cutoff used for tombstones, **re-verifies each candidate against the
+  live Zenoh state**, and either upserts the row back to live (false-
+  shadow recovery — the upstream obs reappeared since the rebuild that
+  flagged it) or physically deletes it (genuine expiry). The CLI driver
+  additionally runs `rebuild_from_zenoh` before the sweep so that
+  stale-but-not-yet-shadowed local rows enter the discovery branch on
+  a one-shot `mesh-mem gc` invocation (CLI startup skips rebuild by
+  default per #38). If the live query fails the sweep is skipped
+  entirely — never delete on transport ambiguity. Output reads
+  `retention N-day sweep: physically deleted {n} tombstones / {m} shadows (revived {k})`.
+  Pass `--no-shadow-prune` to opt out (tombstone-only sweep, prior
+  behavior; rebuild is also skipped in that branch). The shadow sweep
+  is otherwise local-only — no Zenoh delete is issued for the purged
+  half because the upstream key is already absent; other peers run the
+  sweep independently and converge.
+
 ### Changed
 
 - **All user-facing CLI / MCP runtime strings are now English** (#53). Previously

@@ -774,6 +774,79 @@ def test_list_tombstoned_obs_in_project_returns_empty_when_disabled() -> None:
     assert idx.list_tombstoned_obs_in_project('any', '2026-01-01T00:00:00.000000Z') == []
 
 
+# ---------------------------------------------------------------------------
+# Issue #70 — shadow retention sweep
+# ---------------------------------------------------------------------------
+
+
+def test_list_expired_shadowed_obs_respects_cutoff(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_expire.db'))
+    try:
+        aged = _mk_obs('aged shadow', project='p')
+        idx.upsert(aged)
+        idx.mark_shadowed_missing(aged.observation_id, '2026-01-01T00:00:00.000000Z')
+
+        fresh = _mk_obs('fresh shadow', project='p')
+        idx.upsert(fresh)
+        idx.mark_shadowed_missing(fresh.observation_id, '2026-05-01T00:00:00.000000Z')
+
+        cutoff = '2026-04-01T00:00:00.000000Z'
+        ids = set(idx.list_expired_shadowed_obs(cutoff))
+        assert ids == {aged.observation_id}
+    finally:
+        idx.close()
+
+
+def test_list_expired_shadowed_obs_filters_by_project(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_project.db'))
+    try:
+        a = _mk_obs('proj-a shadow', project='proj-a')
+        idx.upsert(a)
+        idx.mark_shadowed_missing(a.observation_id, '2026-01-01T00:00:00.000000Z')
+
+        b = _mk_obs('proj-b shadow', project='proj-b')
+        idx.upsert(b)
+        idx.mark_shadowed_missing(b.observation_id, '2026-01-01T00:00:00.000000Z')
+
+        cutoff = '2026-04-01T00:00:00.000000Z'
+        only_a = idx.list_expired_shadowed_obs(cutoff, project='proj-a')
+        assert only_a == [a.observation_id]
+        only_b = idx.list_expired_shadowed_obs(cutoff, project='proj-b')
+        assert only_b == [b.observation_id]
+        none = idx.list_expired_shadowed_obs(cutoff, project='proj-c')
+        assert none == []
+    finally:
+        idx.close()
+
+
+def test_list_expired_shadowed_obs_skips_tombstoned_rows(tmp_path: Path) -> None:
+    """Rows with both deleted_at and an old shadowed_at must NOT appear here.
+
+    Tombstones own the retention path for those rows; the shadow sweep
+    deliberately filters ``deleted_at IS NULL`` so the same row is not
+    accounted for twice.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_skip_tomb.db'))
+    try:
+        obs = _mk_obs('shadow first, then tomb', project='p')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, '2026-01-01T00:00:00.000000Z')
+        # mark_deleted clears shadowed_at, so this branch tests the
+        # belt-and-suspenders WHERE clause in case a future change ever
+        # leaves shadowed_at set alongside deleted_at.
+        idx.mark_deleted(obs.observation_id, '2026-02-01T00:00:00.000000Z')
+
+        ids = idx.list_expired_shadowed_obs('2026-04-01T00:00:00.000000Z')
+        assert ids == []
+    finally:
+        idx.close()
+
+
+def test_list_expired_shadowed_obs_returns_empty_when_disabled() -> None:
+    idx = LocalIndex(db_path='', disabled=True)
+    assert idx.list_expired_shadowed_obs('2026-01-01T00:00:00.000000Z') == []
+
+
 def test_close_runs_wal_checkpoint(tmp_path: Path) -> None:
     """``close()`` truncates the WAL so the file does not stay full on disk (#32).
 

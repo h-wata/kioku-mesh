@@ -103,7 +103,7 @@ _UPSERT_SQL = (
 
 _MARK_DELETED_SQL = 'UPDATE obs_index SET deleted_at = ?, shadowed_at = NULL WHERE observation_id = ?'
 _MARK_SHADOWED_SQL = (
-    'UPDATE obs_index ' 'SET shadowed_at = COALESCE(shadowed_at, ?) ' 'WHERE observation_id = ? AND deleted_at IS NULL'
+    'UPDATE obs_index SET shadowed_at = COALESCE(shadowed_at, ?) WHERE observation_id = ? AND deleted_at IS NULL'
 )
 
 
@@ -424,6 +424,36 @@ class LocalIndex:
                 log.warning('list_tombstoned_obs_in_project failed: %s', e)
                 return []
         return [(row[0], row[1]) for row in rows]
+
+    def list_expired_shadowed_obs(
+        self,
+        cutoff_iso: str,
+        project: str = '',
+    ) -> list[str]:
+        """Return observation_ids whose ``shadowed_at`` predates ``cutoff_iso``.
+
+        Drives the shadow retention sweep (Issue #70). Rows are scoped by
+        ``project`` when non-empty to mirror the tombstone sweep behavior.
+        Returns only ids — shadow rows have no remaining Zenoh state to
+        coordinate with, so a payload round-trip is unnecessary.
+        """
+        if self._disabled or self._conn is None:
+            return []
+        sql = (
+            'SELECT observation_id FROM obs_index '
+            'WHERE shadowed_at IS NOT NULL AND deleted_at IS NULL AND shadowed_at < ?'
+        )
+        params: list[object] = [cutoff_iso]
+        if project:
+            sql += ' AND project = ?'
+            params.append(project)
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except sqlite3.Error as e:
+                log.warning('list_expired_shadowed_obs failed: %s', e)
+                return []
+        return [row[0] for row in rows]
 
     def find_by_id(self, observation_id: str, include_deleted: bool = False) -> Observation | None:
         """Return the observation with id ``observation_id`` or None.

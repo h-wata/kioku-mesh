@@ -577,3 +577,231 @@ def test_bulk_purge_by_pc_id_also_purges_mirrored_tombstone(
     time.sleep(_INGEST_SETTLE)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #70 — shadow retention sweep
+# ---------------------------------------------------------------------------
+
+
+def test_gc_expired_shadows_purges_aged_shadow_absent_upstream(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Aged shadow whose Zenoh obs is genuinely gone → physical_delete."""
+    obs = _mk_obs('aged shadow', project='shadow-gc')
+    idx = store.get_index()
+    # Note: obs is NOT put to Zenoh, so the live re-verify will not find it.
+    idx.upsert(obs)
+    aged = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    idx.mark_shadowed_missing(obs.observation_id, aged)
+
+    purged, revived = store.gc_expired_shadows(retention_days=30)
+    assert (purged, revived) == (1, 0)
+    assert idx.find_by_id(obs.observation_id, include_deleted=True) is None
+
+
+def test_gc_expired_shadows_keeps_fresh_shadow(single_zenohd: Any) -> None:  # noqa: ARG001
+    obs = _mk_obs('fresh shadow', project='shadow-gc')
+    idx = store.get_index()
+    idx.upsert(obs)
+    fresh = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    idx.mark_shadowed_missing(obs.observation_id, fresh)
+
+    # Fresh shadow has no expired candidates → early-return (0, 0) without
+    # paying for the Zenoh re-verify scan.
+    purged, revived = store.gc_expired_shadows(retention_days=30)
+    assert (purged, revived) == (0, 0)
+    assert idx.find_by_id(obs.observation_id, include_deleted=True) is not None
+
+
+def test_gc_expired_shadows_respects_project_filter(single_zenohd: Any) -> None:  # noqa: ARG001
+    a = _mk_obs('proj-a aged shadow', project='shadow-a')
+    b = _mk_obs('proj-b aged shadow', project='shadow-b')
+    idx = store.get_index()
+    # Neither is put to Zenoh, so both would be purged if surfaced. The
+    # project filter must isolate them.
+    idx.upsert(a)
+    idx.upsert(b)
+    aged = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    idx.mark_shadowed_missing(a.observation_id, aged)
+    idx.mark_shadowed_missing(b.observation_id, aged)
+
+    purged, revived = store.gc_expired_shadows(retention_days=30, project='shadow-a')
+    assert (purged, revived) == (1, 0)
+    assert idx.find_by_id(a.observation_id, include_deleted=True) is None
+    assert idx.find_by_id(b.observation_id, include_deleted=True) is not None
+
+
+def test_gc_expired_shadows_revives_when_zenoh_still_has_obs(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Aged shadow but Zenoh still observes the obs → upsert revives the row.
+
+    Regression for the false-shadow-deletion path. A rebuild flagged a row
+    as shadowed during a transient gap. Retention has now elapsed, but the
+    obs is once again visible upstream. The sweep must NOT physical-delete
+    — that would erase still-live data and leave no obvious recovery
+    short of replaying the original put.
+    """
+    obs = _mk_obs('shadow but upstream still has it', project='shadow-revive')
+    # Put to Zenoh so the live re-verify hits the obs.
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    idx = store.get_index()
+    idx.upsert(obs)
+    aged = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    idx.mark_shadowed_missing(obs.observation_id, aged)
+    # Row is hidden from default search due to shadowed_at.
+    assert idx.find_by_id(obs.observation_id) is None
+
+    purged, revived = store.gc_expired_shadows(retention_days=30)
+    assert (purged, revived) == (0, 1)
+    # Upsert cleared shadowed_at → row is live again.
+    hit = idx.find_by_id(obs.observation_id)
+    assert hit is not None
+    assert hit.observation_id == obs.observation_id
+
+
+def test_gc_expired_shadows_handles_mixed_revive_and_purge(single_zenohd: Any) -> None:  # noqa: ARG001
+    """One shadow that Zenoh has + one shadow Zenoh doesn't → revive one, purge one."""
+    surviving = _mk_obs('upstream still has me', project='shadow-mixed')
+    gone = _mk_obs('upstream really lost me', project='shadow-mixed')
+    store.put_observation(surviving)
+    # ``gone`` is not put to Zenoh on purpose.
+    time.sleep(_INGEST_SETTLE)
+
+    idx = store.get_index()
+    idx.upsert(surviving)
+    idx.upsert(gone)
+    aged = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    idx.mark_shadowed_missing(surviving.observation_id, aged)
+    idx.mark_shadowed_missing(gone.observation_id, aged)
+
+    purged, revived = store.gc_expired_shadows(retention_days=30)
+    assert (purged, revived) == (1, 1)
+    assert idx.find_by_id(surviving.observation_id) is not None
+    assert idx.find_by_id(gone.observation_id, include_deleted=True) is None
+
+
+def test_cli_gc_retention_sweeps_both_tomb_and_shadow(single_zenohd: Any) -> None:  # noqa: ARG001
+    """``mesh-mem gc --retention-days N`` sweeps tombstones AND shadows by default."""
+    from mesh_mem.__main__ import main as cli_main
+
+    aged_iso = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    # Aged tombstone path (replays the existing tomb-retention test setup).
+    tombed = _mk_obs('cli-gc tomb', project='cli-shadow-mix')
+    store.put_observation(tombed)
+    aged_tomb = Tombstone(observation_id=tombed.observation_id, reason='aged', deleted_at=aged_iso)
+    store.get_session().put(tombed.tombstone_key_expr(), aged_tomb.to_json())
+    time.sleep(_INGEST_SETTLE)
+
+    # Aged shadow path (purely local index manipulation).
+    shadowed = _mk_obs('cli-gc shadow', project='cli-shadow-mix')
+    idx = store.get_index()
+    idx.upsert(shadowed)
+    idx.mark_shadowed_missing(shadowed.observation_id, aged_iso)
+
+    rc = cli_main(['gc', '--retention-days', '30'])
+    assert rc == 0
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(tombed.observation_id)
+    assert idx.find_by_id(shadowed.observation_id, include_deleted=True) is None
+
+
+def test_cli_gc_no_shadow_prune_flag_skips_shadow_only(single_zenohd: Any) -> None:  # noqa: ARG001
+    """``--no-shadow-prune`` keeps shadows untouched while still sweeping tombs."""
+    from mesh_mem.__main__ import main as cli_main
+
+    aged_iso = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    tombed = _mk_obs('cli-gc tomb (no-shadow)', project='cli-no-shadow')
+    store.put_observation(tombed)
+    aged_tomb = Tombstone(observation_id=tombed.observation_id, reason='aged', deleted_at=aged_iso)
+    store.get_session().put(tombed.tombstone_key_expr(), aged_tomb.to_json())
+    time.sleep(_INGEST_SETTLE)
+
+    shadowed = _mk_obs('cli-gc shadow (no-shadow)', project='cli-no-shadow')
+    idx = store.get_index()
+    idx.upsert(shadowed)
+    idx.mark_shadowed_missing(shadowed.observation_id, aged_iso)
+
+    rc = cli_main(['gc', '--retention-days', '30', '--no-shadow-prune'])
+    assert rc == 0
+    time.sleep(_INGEST_SETTLE)
+    assert not _obs_present(tombed.observation_id)
+    # Shadow survives because --no-shadow-prune was set.
+    assert idx.find_by_id(shadowed.observation_id, include_deleted=True) is not None
+
+
+def test_rebuild_then_gc_pipeline_discovers_and_processes_stale_row(single_zenohd: Any) -> None:  # noqa: ARG001
+    """The composed pipeline (rebuild → gc) covers the stale-but-not-yet-shadowed path.
+
+    This is the underlying contract the CLI driver depends on (#70 Finding 2).
+    ``gc_expired_shadows`` alone only sees pre-existing shadow rows; the
+    discovery step that turns a stale local row into a shadow candidate is
+    ``rebuild_from_zenoh``. Run them in the order the CLI does and verify
+    that a row that started with no ``shadowed_at`` actually reaches the
+    purge branch.
+    """
+    # Stale local row: live in SQLite, never published to Zenoh.
+    stale = _mk_obs('stale only in index', project='pipeline-discovery')
+    idx = store.get_index()
+    idx.upsert(stale)
+
+    # Surviving row: properly published. Rebuild must leave it live.
+    surviving = _mk_obs('upstream-live alongside stale', project='pipeline-discovery')
+    store.put_observation(surviving)
+    time.sleep(_INGEST_SETTLE)
+
+    # Pre-state: stale has no shadowed_at — list_expired_shadowed_obs alone
+    # would not surface it.
+    assert idx.find_by_id(stale.observation_id) is not None
+
+    # Step 1: reconcile. After this, stale.shadowed_at is set to "now".
+    stats = idx.rebuild_from_zenoh(store.get_session())
+    assert stats.shadowed >= 1
+    assert idx.find_by_id(stale.observation_id) is None  # hidden by shadow
+
+    # Step 2: sweep. ``now`` injected a day into the future so the freshly
+    # stamped shadow_at falls before the cutoff (cutoff = future - 0d).
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    purged, revived = store.gc_expired_shadows(retention_days=0, now=future)
+    assert purged >= 1
+    assert revived == 0  # surviving was never shadowed → not a candidate
+
+    # End state: stale purged, surviving still live.
+    assert idx.find_by_id(stale.observation_id, include_deleted=True) is None
+    assert idx.find_by_id(surviving.observation_id) is not None
+
+
+def test_cli_gc_runs_rebuild_then_sweep_for_stale_row(single_zenohd: Any) -> None:  # noqa: ARG001
+    """End-to-end pin: a single ``mesh-mem gc`` invocation closes the loop.
+
+    Reproduces the standalone-CLI scenario from #70 Finding 2: no external
+    rebuild has run, the SQLite index carries a stale live row whose obs
+    is absent from Zenoh, and a one-shot ``mesh-mem gc --retention-days 0``
+    must discover it (via the in-driver rebuild) and purge it (via the
+    re-verifying shadow sweep) in the same process.
+    """
+    from mesh_mem.__main__ import main as cli_main
+
+    stale = _mk_obs('cli-discovery stale', project='cli-shadow-discovery')
+    idx = store.get_index()
+    idx.upsert(stale)
+
+    surviving = _mk_obs('cli-discovery surviving', project='cli-shadow-discovery')
+    store.put_observation(surviving)
+    time.sleep(_INGEST_SETTLE)
+
+    # Pre: stale has no shadowed_at yet — list_expired_shadowed_obs would miss it.
+    assert idx.find_by_id(stale.observation_id) is not None
+
+    # Tiny sleep so the rebuild-stamped shadow_at falls strictly before the
+    # sweep's cutoff (both walk-clock ``datetime.now``; without this gap a
+    # zero-retention sweep on a fast machine could see equality and skip).
+    time.sleep(0.01)
+
+    rc = cli_main(['gc', '--retention-days', '0'])
+    assert rc == 0
+
+    # Single CLI invocation did rebuild → shadow → re-verify → purge.
+    assert idx.find_by_id(stale.observation_id, include_deleted=True) is None
+    assert idx.find_by_id(surviving.observation_id) is not None
