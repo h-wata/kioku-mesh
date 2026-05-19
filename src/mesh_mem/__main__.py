@@ -130,9 +130,10 @@ def _format_search_text_entry(obs: Observation) -> str:
     body = obs.summary if obs.summary else obs.content[:80]
     subject_part = f' {obs.subject}' if obs.subject else ''
     project_part = f' ({obs.project})' if obs.project else ''
+    refs_part = f' (refs: {", ".join(obs.references)})' if obs.references else ''
     return (
         f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
-        f'{project_part}{subject_part}\n'
+        f'{project_part}{subject_part}{refs_part}\n'
         f'{body} <id={obs.observation_id}>'
     )
 
@@ -151,11 +152,12 @@ def _format_search_markdown_body(obs: Observation) -> str:
 def _format_search_markdown_entry(obs: Observation) -> str:
     """Render one search result as a single markdown bullet."""
     project_part = f' ({obs.project})' if obs.project else ''
+    refs_part = f' (refs: {", ".join(obs.references)})' if obs.references else ''
     body = _format_search_markdown_body(obs)
     return (
         f'- **[{obs.memory_type}][{obs.importance}]** '
         f'{obs.created_at[:16]}{project_part} '
-        f'{body} <id={obs.observation_id}>'
+        f'{body}{refs_part} <id={obs.observation_id}>'
     )
 
 
@@ -503,7 +505,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_save.add_argument(
         '--references',
         default='',
-        help='related PR / Issue / external identifiers (comma-separated)',
+        help='related PR / Issue ids (comma-separated, e.g. "#67,PR#68,org/repo#42")',
     )
     p_save.add_argument(
         '--supersedes',

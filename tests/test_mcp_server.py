@@ -116,6 +116,7 @@ def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa
 
 def test_search_memory_finds_saved_entry(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('needle for mcp search', project='mcp-search')
+    obs.references = ['#73', 'PR#68']
     store.put_observation(obs)
     time.sleep(_INGEST_SETTLE)
 
@@ -131,6 +132,7 @@ def test_search_memory_finds_saved_entry(single_zenohd: Any) -> None:  # noqa: A
     text = _run(_go())
     assert obs.observation_id in text
     assert 'needle for mcp search' in text
+    assert '(refs: #73, PR#68)' in text
 
 
 def test_search_memory_empty_reports_none(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -477,6 +479,7 @@ def test_search_memory_summary_priority(single_zenohd: Any) -> None:  # noqa: AR
         memory_type='decision',
         importance=3,
         summary='short summary wins',
+        references=['#73'],
     )
     store.put_observation(obs)
     time.sleep(_INGEST_SETTLE)
@@ -493,6 +496,7 @@ def test_search_memory_summary_priority(single_zenohd: Any) -> None:  # noqa: AR
     text = _run(_go())
     assert 'short summary wins' in text
     assert '[decision][3]' in text
+    assert '(refs: #73)' in text
     assert obs.observation_id in text
 
 

@@ -10,6 +10,14 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **`Observation.references` field** for first-class PR / Issue / external identifiers (#73). CLI: `mesh-mem save --references "#67,PR#68"`. MCP: `references=["#67", "PR#68"]`. Old JSON without the field deserializes to `[]`.
+
+### Changed
+
+- **MCP server instructions add an explicit SKIP list and type/importance guidance** (#73). PR/Issue lifecycle ticks, restated PR/ADR/CHANGELOG content, in-conversation progress logs, and bare `tests pass` notes are now called out as save-skip cases. `decision` / `bug` / `pattern` / `config` are preferred over `summary`; `importance` 1-2 invites reconsidering whether to save at all.
+
 ## [0.2.5] - 2026-05-19
 
 ### Added
