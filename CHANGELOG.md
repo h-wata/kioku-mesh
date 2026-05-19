@@ -10,6 +10,19 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- **All user-facing CLI / MCP runtime strings are now English** (#53). Previously
+  `mesh-mem` CLI prints (`save`, `search`, `delete`, `status`, `drain`, `gc` and
+  argparse `--help`) and MCP tool returns (`save_observation`, `search_memory`,
+  `get_memory`, `delete_memory`, `get_memory_status`, `drain_pending_puts`)
+  mixed Japanese and English. They are now uniformly English to match the
+  already-English `logger.*` output and to keep MCP responses safely parseable
+  by non-Japanese agents. The Japanese trigger phrase `"前にやった"` inside the
+  MCP `instructions` field is preserved on purpose — it is a deliberate hint
+  for recognizing Japanese user input. **Breaking** for any script that greps
+  Japanese substrings from CLI or MCP output (e.g. `保存完了`, `削除`, `件数`).
+
 ### Fixed
 
 - **Rebuild now reconciles SQLite index against Zenoh, not just appends to it**

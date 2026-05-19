@@ -15,7 +15,7 @@ def test_observation_key_expr_contains_all_identity_fragments() -> None:
     parts = obs.key_expr.split('/')
     assert parts[0] == 'mem'
     assert parts[1] == 'obs'
-    # agent_family / client_id / pc_id / session_id / observation_id の 5 段
+    # 5 segments: agent_family / client_id / pc_id / session_id / observation_id
     assert len(parts) == 7
     assert parts[-1] == obs.observation_id
 
@@ -23,7 +23,7 @@ def test_observation_key_expr_contains_all_identity_fragments() -> None:
 def test_observation_id_is_32_hex_chars() -> None:
     obs = Observation(content='x')
     assert len(obs.observation_id) == 32
-    int(obs.observation_id, 16)  # hex として valid
+    int(obs.observation_id, 16)  # valid hex
 
 
 def test_tombstone_key_expr_mirrors_observation() -> None:
