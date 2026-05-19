@@ -305,6 +305,7 @@ class LocalIndex:
         query: str = '',
         since_iso: str = '',
         until_iso: str = '',
+        cursor_observation_id: str = '',
         limit: int = 50,
         include_deleted: bool = False,
     ) -> list[Observation]:
@@ -325,12 +326,16 @@ class LocalIndex:
         ``since_iso`` / ``until_iso`` are compared lexicographically against
         ``created_at``; both are produced as 'Z'-suffixed UTC ISO 8601
         strings by :meth:`mesh_mem.models._utc_now_iso`, so lex order
-        matches time order. ``until_iso`` is inclusive (``<=``) to mirror
-        ``since_iso`` semantics and lets bulk-delete cursor pagination
-        pass the last seen ``created_at`` back without dropping rows
-        on the boundary (#66). Rows whose created_at cannot be lex-
-        compared (legacy bad writes) will sort, possibly incorrectly —
-        same caveat as the existing Zenoh path.
+        matches time order. ``until_iso`` is inclusive (``<=``) by
+        default to mirror ``since_iso`` semantics. When paired with
+        ``cursor_observation_id`` the bound switches to the strict
+        ``(created_at, observation_id) < (until_iso, cursor_observation_id)``
+        tuple comparison used by bulk-delete cursor pagination so that
+        ties on the boundary timestamp are walked correctly even when
+        more rows share that timestamp than fit in a single page (#66).
+        Rows whose created_at cannot be lex-compared (legacy bad writes)
+        will sort, possibly incorrectly — same caveat as the existing
+        Zenoh path.
         """
         if self._disabled or self._conn is None:
             return []
@@ -357,7 +362,13 @@ class LocalIndex:
         if since_iso:
             where.append('created_at >= ?')
             params.append(since_iso)
-        if until_iso:
+        if until_iso and cursor_observation_id:
+            # Strict-tuple cursor for bulk-delete pagination (#66): exclude
+            # the boundary row itself so iteration walks past timestamp
+            # ties even when their count exceeds ``limit``.
+            where.append('(created_at < ? OR (created_at = ? AND observation_id < ?))')
+            params.extend([until_iso, until_iso, cursor_observation_id])
+        elif until_iso:
             where.append('created_at <= ?')
             params.append(until_iso)
         if query:

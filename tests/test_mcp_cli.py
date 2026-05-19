@@ -650,6 +650,39 @@ def test_cli_bulk_delete_continues_on_failure(
     assert f'put_tombstone failed for {failing_id}' in captured.err
 
 
+def test_cli_bulk_delete_pages_through_same_timestamp_ties(
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """All ties on the boundary ``created_at`` are tombstoned, even past one batch (#66).
+
+    Regression: the original cursor relied on ``until_iso`` as an
+    inclusive bound with a Python-side dedup; that stalled once the
+    number of rows sharing the boundary timestamp exceeded
+    ``--batch-size``. The strict-tuple cursor must walk through every
+    tie regardless of batch size.
+    """
+    project = 'bulk-ties'
+    ts = '2026-04-03T12:00:00.000000Z'
+    targets = []
+    for i in range(20):
+        obs = Observation(content=f'tie-{i:02d}', project=project, created_at=ts)
+        store.put_observation(obs)
+        targets.append(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(['delete', '--project', project, '--yes', '--batch-size', '10'])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert f'bulk delete target: 20 entries (project={project!r})' in captured.err
+    assert 'deleted (tombstone): 20 entries' in captured.out
+    time.sleep(_INGEST_SETTLE)
+
+    visible = {obs.observation_id for obs in store.search_observations(project=project)}
+    for obs in targets:
+        assert obs.observation_id not in visible, f'{obs.observation_id} should be tombstoned (tied timestamp)'
+
+
 def test_cli_bulk_delete_emits_local_index_hint(
     single_zenohd: Any,  # noqa: ARG001
     capsys: pytest.CaptureFixture,

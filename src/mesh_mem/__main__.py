@@ -81,50 +81,38 @@ def _positive_int(value: str) -> int:
 def _iter_delete_targets(args: argparse.Namespace, *, batch_size: int) -> Iterator[Observation]:
     """Yield bulk-delete targets in (created_at, observation_id) DESC order.
 
-    Pages over :func:`search_observations` using ``until_iso`` as a cursor
-    so the 10k :data:`MAX_SEARCH` per-call cap does not abort large bulk
-    deletes (#66). Each page is at most ``min(batch_size, MAX_SEARCH)``
-    rows; we re-issue with ``until_iso`` set to the last seen
-    ``created_at`` and skip any ``observation_id`` already emitted to
-    handle ties on the page boundary. ``observation_id`` is the SQLite
-    PRIMARY KEY and the secondary ORDER BY key, so this de-dup is bounded
-    by the number of rows sharing the boundary ``created_at`` (typically
-    1; never more than one batch worth).
+    Pages over :func:`search_observations` using the strict
+    ``(created_at, observation_id)`` tuple cursor so the 10k
+    :data:`MAX_SEARCH` per-call cap does not abort large bulk deletes
+    (#66). Each page is at most ``min(batch_size, MAX_SEARCH)`` rows; the
+    next call passes the last yielded row's ``(created_at,
+    observation_id)`` as ``(until_iso, cursor_observation_id)``, which
+    :meth:`LocalIndex.search` translates into
+    ``(created_at, observation_id) < cursor`` — so ties on the boundary
+    timestamp walk correctly even when more rows share the timestamp
+    than fit in a single batch (#66 review).
     """
-    until_cursor = args.until or ''
     page_size = max(1, min(batch_size, MAX_SEARCH))
-    seen_at_cursor: set[str] = set()
+    until_cursor = args.until or ''
+    cursor_obs_id = ''
     while True:
         page = search_observations(
             project=args.project or '',
             pc_id=args.pc_id or '',
             since_iso=args.since or '',
             until_iso=until_cursor,
+            cursor_observation_id=cursor_obs_id,
             limit=page_size,
         )
         if not page:
             return
-        fresh: list[Observation] = []
         for obs in page:
-            if obs.observation_id in seen_at_cursor:
-                continue
-            fresh.append(obs)
-        if not fresh:
-            # Every row in this page was already yielded under the same
-            # boundary timestamp — extending the cursor any further would
-            # loop on identical timestamps. Stop.
-            return
-        last_created_at = fresh[-1].created_at
-        for obs in fresh:
             yield obs
         if len(page) < page_size:
-            # Last page was short — no more rows match the filter.
             return
-        # Reseed the boundary-collision guard with all ids that share the
-        # next cursor timestamp from the current page; the next iteration
-        # will re-fetch starting at ``until_cursor == last_created_at``.
-        seen_at_cursor = {obs.observation_id for obs in fresh if obs.created_at == last_created_at}
-        until_cursor = last_created_at
+        last = page[-1]
+        until_cursor = last.created_at
+        cursor_obs_id = last.observation_id
 
 
 def _count_delete_targets(args: argparse.Namespace, *, batch_size: int) -> tuple[int, str | None]:

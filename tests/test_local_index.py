@@ -297,6 +297,40 @@ def test_search_until_iso_filter(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_search_cursor_observation_id_strict_tuple(tmp_path: Path) -> None:
+    """``cursor_observation_id`` switches ``until_iso`` to strict-tuple semantics (#66).
+
+    Without strict-tuple cursor, the bulk-delete iterator could not walk
+    past a timestamp shared by more rows than fit in one batch. The
+    invariant: when both keywords are set, the result must satisfy
+    ``(created_at, observation_id) < (until_iso, cursor_observation_id)``
+    in DESC order; the boundary row itself is excluded.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'cursor.db'))
+    try:
+        ts = '2025-06-01T00:00:00.000000Z'
+        rows = []
+        for _ in range(5):
+            obs = _mk_obs(f'row-{_}', project='cursor')
+            obs.created_at = ts
+            idx.upsert(obs)
+            rows.append(obs)
+        rows.sort(key=lambda o: o.observation_id, reverse=True)
+        # Use the third-largest row as the cursor — expect only the
+        # strictly smaller two ids to come back.
+        cursor = rows[2]
+        hits = idx.search(
+            project='cursor',
+            until_iso=ts,
+            cursor_observation_id=cursor.observation_id,
+            limit=10,
+        )
+        returned_ids = [r.observation_id for r in hits]
+        assert returned_ids == [r.observation_id for r in rows[3:]], 'strict-tuple cursor must skip the boundary row'
+    finally:
+        idx.close()
+
+
 def test_search_order_by_includes_observation_id_tiebreaker(tmp_path: Path) -> None:
     """Rows sharing the same ``created_at`` must sort by ``observation_id`` DESC.
 
