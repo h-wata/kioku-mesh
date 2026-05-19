@@ -84,6 +84,7 @@ def test_observation_default_values() -> None:
     assert obs.subject == ''
     assert obs.summary == ''
     assert obs.source_files == []
+    assert obs.references == []
     assert obs.supersedes == []
 
 
@@ -95,6 +96,7 @@ def test_observation_with_all_fields() -> None:
         subject='architecture',
         summary='use Zenoh for transport',
         source_files=['src/mesh_mem/store.py'],
+        references=['h-wata/mesh-mem#73'],
         supersedes=['abc123'],
     )
     d = json.loads(obs.to_json())
@@ -103,11 +105,13 @@ def test_observation_with_all_fields() -> None:
     assert d['subject'] == 'architecture'
     assert d['summary'] == 'use Zenoh for transport'
     assert d['source_files'] == ['src/mesh_mem/store.py']
+    assert d['references'] == ['h-wata/mesh-mem#73']
     assert d['supersedes'] == ['abc123']
     restored = Observation.from_json(obs.to_json())
     assert restored.memory_type == obs.memory_type
     assert restored.importance == obs.importance
     assert restored.source_files == obs.source_files
+    assert restored.references == obs.references
     assert restored.supersedes == obs.supersedes
 
 
@@ -140,6 +144,7 @@ def test_observation_old_json_compat() -> None:
     assert obs.subject == ''
     assert obs.summary == ''
     assert obs.source_files == []
+    assert obs.references == []
     assert obs.supersedes == []
 
 
@@ -151,6 +156,7 @@ def test_observation_new_json_old_code_compat() -> None:
         subject='test subject',
         summary='test summary',
         source_files=['a.py'],
+        references=['h-wata/mesh-mem#73'],
         supersedes=['b' * 32],
     )
     new_json = obs.to_json()

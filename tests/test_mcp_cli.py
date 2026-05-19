@@ -142,6 +142,8 @@ def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixt
             'test-summary',
             '--source-files',
             'a.py,b.py',
+            '--references',
+            'h-wata/mesh-mem#73,PR#68',
             '--supersedes',
             '',
             '-p',
@@ -162,6 +164,7 @@ def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixt
     assert obs.subject == 'test-subject'
     assert obs.summary == 'test-summary'
     assert obs.source_files == ['a.py', 'b.py']
+    assert obs.references == ['h-wata/mesh-mem#73', 'PR#68']
 
 
 def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
@@ -180,6 +183,8 @@ def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> No
             'one-line-summary',
             '--source-files',
             'x.py',
+            '--references',
+            'h-wata/mesh-mem#73',
         ]
     )
     assert rc == 0
@@ -195,6 +200,7 @@ def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> No
     assert 'subject: root-cause' in out
     assert 'summary: one-line-summary' in out
     assert 'source_files: x.py' in out
+    assert 'references: h-wata/mesh-mem#73' in out
     assert '---' in out
     assert 'get-memory-content' in out
 
@@ -273,6 +279,8 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
             'json-summary',
             '--source-files',
             'a.py,b.py',
+            '--references',
+            'h-wata/mesh-mem#73,PR#68',
             '--supersedes',
             'a' * 32,
             '--tags',
@@ -307,6 +315,7 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
         'subject',
         'summary',
         'source_files',
+        'references',
         'supersedes',
     }
     assert row['observation_id'] == obs_id
@@ -315,6 +324,7 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
     assert row['subject'] == 'json-subject'
     assert row['summary'] == 'json-summary'
     assert row['source_files'] == ['a.py', 'b.py']
+    assert row['references'] == ['h-wata/mesh-mem#73', 'PR#68']
     assert row['supersedes'] == ['a' * 32]
     assert row['tags'] == ['x', 'y']
 
@@ -462,6 +472,18 @@ def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture)
     obs = store.find_observation_by_id(obs_id)
     assert obs is not None
     assert obs.source_files == ['a.py', 'b.py']
+
+
+def test_cli_references_csv(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
+    """--references #73,PR#68 is parsed into list[str]."""
+    rc = cli_main(['save', 'refs-test', '--references', '#73,PR#68'])
+    assert rc == 0
+    obs_id = capsys.readouterr().out.strip().split()[-1]
+
+    time.sleep(_INGEST_SETTLE)
+    obs = store.find_observation_by_id(obs_id)
+    assert obs is not None
+    assert obs.references == ['#73', 'PR#68']
 
 
 def test_cli_bulk_delete_dry_run_by_project(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001

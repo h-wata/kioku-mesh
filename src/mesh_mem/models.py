@@ -68,6 +68,7 @@ class Observation:
     subject: str = ''
     summary: str = ''
     source_files: list[str] = field(default_factory=list)
+    references: list[str] = field(default_factory=list)
     supersedes: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:

@@ -43,6 +43,12 @@ PROACTIVE SAVE — call ``save_observation`` IMMEDIATELY after ANY of these:
 - User confirms a recommendation, expresses a preference, or rejects an approach
 - Session concludes with a clear direction chosen (memory_type="summary")
 
+SKIP saving when the entry would mostly duplicate another source of truth:
+- PR / Issue lifecycle ticks: opened, pushed, merged, closed, "review found no blockers"
+- Restatement of content already captured in a PR description, Issue body, ADR, CHANGELOG, or commit message
+- Per-step implementation progress inside one conversation; use plan / todo tracking instead
+- Generic status like "tests pass" or "build is green" without a non-obvious cause or decision
+
 Self-check after every task: "Did the user or I just make a decision, confirm a
 recommendation, fix a bug, learn something, or establish a convention? If yes →
 ``save_observation`` NOW." Skip transient notes, status checks, and routine
@@ -59,8 +65,12 @@ server side from environment + state. Do not pass these as tool arguments;
 they are intentionally not parameters of ``save_observation``.
 
 Use ``memory_type`` accurately — one of: note, decision, bug, pattern, config,
-summary. Set ``importance`` 1–5 and prefer adding ``subject`` + ``summary`` so
-search results stay scannable.
+summary. Prefer decision / bug / pattern / config over summary; use summary only
+for a session conclusion with a chosen direction, not as a log of what happened.
+Set ``importance`` 1–5 with care: 4-5 for project-wide or durable changes in
+assumptions, 3 for reusable but local lessons, and 1-2 only when the entry is
+still worth saving after the SKIP rules. Prefer adding ``subject`` + ``summary``
+so search results stay scannable.
 """
 
 mcp = FastMCP('mesh-mem', instructions=_INSTRUCTIONS)
@@ -128,14 +138,22 @@ def save_observation(
     subject: str = '',
     summary: str = '',
     source_files: list[str] | None = None,
+    references: list[str] | None = None,
     supersedes: list[str] | None = None,
 ) -> str:
     """Persist a work note / decision / discovery into the shared mesh memory.
 
     **Save when**: design decision, non-obvious bug root cause, reusable
     pattern, config change with rationale, session summary.
-    **Skip**: status check, transient note, file listing, routine task
-    with no new learning.
+    **Skip**: PR / Issue lifecycle ticks, restated PR / ADR / commit content,
+    in-conversation progress logs, generic "tests pass" notes, status checks,
+    transient notes, file listings, and routine tasks with no new learning.
+
+    Prefer ``decision`` / ``bug`` / ``pattern`` / ``config`` over ``summary``.
+    Use ``summary`` only for a session conclusion with a chosen direction, not
+    as a synonym for "what happened". Treat ``importance`` 4-5 as project-wide
+    or durable assumption changes; if an entry feels like importance 1-2,
+    reconsider whether it should be saved at all.
 
     Identity (agent_family / client_id / pc_id / session_id) is resolved from
     environment, not from tool arguments. This prevents LLMs from corrupting
@@ -151,6 +169,7 @@ def save_observation(
         subject: short topic / symbol name (e.g. "get_position latency").
         summary: one-line abstract shown in search results (fallback: content).
         source_files: related file paths for traceability.
+        references: related PR / Issue / external identifiers.
         supersedes: list of observation_ids this entry replaces.
 
     Returns:
@@ -167,6 +186,7 @@ def save_observation(
         subject=subject,
         summary=summary,
         source_files=source_files or [],
+        references=references or [],
         supersedes=supersedes or [],
     )
     put_observation(obs)
@@ -222,7 +242,7 @@ def get_memory(observation_id: str) -> str:
     Use this after ``search_memory`` to retrieve the complete record for a
     result that looks relevant. Returns all fields including the extended
     schema fields added in Phase 2 (memory_type, importance, subject,
-    summary, source_files, supersedes).
+    summary, source_files, references, supersedes).
     """
     if len(observation_id) != 32:
         return 'observation_id must be a full 32-character match.'
@@ -240,6 +260,7 @@ def get_memory(observation_id: str) -> str:
         f'agent: {obs.agent_family}/{obs.client_id}',
         f'tags: {", ".join(obs.tags) if obs.tags else "-"}',
         f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
+        f'references: {", ".join(obs.references) if obs.references else "-"}',
         f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
         '---',
         obs.content,

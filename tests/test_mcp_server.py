@@ -85,6 +85,9 @@ def test_server_advertises_proactive_instructions(single_zenohd: Any) -> None:  
     assert 'PROACTIVE SAVE' in instructions
     assert 'save_observation' in instructions
     assert 'search_memory' in instructions
+    assert 'SKIP saving when the entry would mostly duplicate another source of truth' in instructions
+    assert 'PR / Issue lifecycle ticks' in instructions
+    assert 'Prefer decision / bug / pattern / config over summary' in instructions
 
 
 def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -391,6 +394,7 @@ def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # no
                     'subject': 'test subject',
                     'summary': 'test summary line',
                     'source_files': ['src/mesh_mem/mcp_server.py'],
+                    'references': ['h-wata/mesh-mem#73'],
                     'supersedes': [],
                 },
             )
@@ -408,6 +412,7 @@ def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # no
     assert found.subject == 'test subject'
     assert found.summary == 'test summary line'
     assert found.source_files == ['src/mesh_mem/mcp_server.py']
+    assert found.references == ['h-wata/mesh-mem#73']
 
 
 def test_save_observation_rejects_invalid_memory_type(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -504,6 +509,7 @@ def test_get_memory_returns_full_metadata(single_zenohd: Any) -> None:  # noqa: 
         subject='critical bug',
         summary='bug summary',
         source_files=['src/store.py'],
+        references=['h-wata/mesh-mem#73'],
         supersedes=['a' * 32],
     )
     store.put_observation(obs)
@@ -522,4 +528,5 @@ def test_get_memory_returns_full_metadata(single_zenohd: Any) -> None:  # noqa: 
     assert 'subject: critical bug' in text
     assert 'summary: bug summary' in text
     assert 'source_files: src/store.py' in text
+    assert 'references: h-wata/mesh-mem#73' in text
     assert 'full content for get_memory test' in text
