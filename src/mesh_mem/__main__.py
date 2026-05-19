@@ -99,6 +99,7 @@ def _select_delete_targets(args: argparse.Namespace) -> tuple[list[Observation],
 def _cmd_save(args: argparse.Namespace) -> int:
     tag_list = [t.strip() for t in (args.tags or '').split(',') if t.strip()]
     source_files = _parse_csv(args.source_files) if args.source_files else []
+    references = _parse_csv(args.references) if args.references else []
     supersedes = _parse_csv(args.supersedes) if args.supersedes else []
     obs = Observation(
         content=args.content,
@@ -109,6 +110,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
         subject=args.subject or '',
         summary=args.summary or '',
         source_files=source_files,
+        references=references,
         supersedes=supersedes,
     )
     put_observation(obs)
@@ -208,6 +210,7 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
         f'agent: {obs.agent_family}/{obs.client_id}',
         f'tags: {", ".join(obs.tags) if obs.tags else "-"}',
         f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
+        f'references: {", ".join(obs.references) if obs.references else "-"}',
         f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
         '---',
         obs.content,
@@ -496,6 +499,11 @@ def _build_parser() -> argparse.ArgumentParser:
         dest='source_files',
         default='',
         help='related file paths (comma-separated)',
+    )
+    p_save.add_argument(
+        '--references',
+        default='',
+        help='related PR / Issue / external identifiers (comma-separated)',
     )
     p_save.add_argument(
         '--supersedes',
