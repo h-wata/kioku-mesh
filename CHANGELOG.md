@@ -10,6 +10,8 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-05-19
+
 ### Added
 
 - **`gc --retention-days` now sweeps shadowed index rows alongside tombstones**
