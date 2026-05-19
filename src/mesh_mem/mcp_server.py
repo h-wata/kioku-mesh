@@ -227,9 +227,10 @@ def search_memory(
         body = obs.summary if obs.summary else obs.content[:80]
         subject_part = f' {obs.subject}' if obs.subject else ''
         project_part = f' ({obs.project})' if obs.project else ''
+        refs_part = f' (refs: {", ".join(obs.references)})' if obs.references else ''
         lines.append(
             f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
-            f'{project_part}{subject_part}\n'
+            f'{project_part}{subject_part}{refs_part}\n'
             f'{body} <id={obs.observation_id}>'
         )
     return '\n---\n'.join(lines)

@@ -213,6 +213,8 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
             'full-body-content-that-is-long',
             '--summary',
             'short-summary',
+            '--references',
+            '#73,PR#68',
             '-p',
             'proj-search',
         ]
@@ -225,6 +227,7 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
     assert rc2 == 0
     out = capsys.readouterr().out
     assert 'short-summary' in out
+    assert '(refs: #73, PR#68)' in out
     assert f'<id={obs_id}>' in out
     assert '[note][2]' in out
 
@@ -236,6 +239,7 @@ def test_cli_search_markdown_fallbacks(single_zenohd: Any, capsys: pytest.Captur
         project='proj-search-md',
         subject='issue-58',
         summary='accepted plan',
+        references=['#58'],
     )
     with_summary = Observation(
         content='body-summary',
@@ -258,7 +262,7 @@ def test_cli_search_markdown_fallbacks(single_zenohd: Any, capsys: pytest.Captur
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 3
     assert all(line.startswith('- **[') for line in lines)
-    assert f'issue-58 — accepted plan <id={with_subject.observation_id}>' in out
+    assert f'issue-58 — accepted plan (refs: #58) <id={with_subject.observation_id}>' in out
     assert f'summary-only <id={with_summary.observation_id}>' in out
     assert f'{"x" * 80}… <id={with_content.observation_id}>' in out
 
