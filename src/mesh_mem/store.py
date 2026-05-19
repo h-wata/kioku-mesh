@@ -915,6 +915,7 @@ def search_observations(
     project: str = '',
     since_iso: str = '',
     until_iso: str = '',
+    cursor_observation_id: str = '',
     limit: int = 50,
 ) -> list[Observation]:
     """Search observations via the SQLite local index, falling back to Zenoh.
@@ -925,9 +926,11 @@ def search_observations(
     operators can flip back if the index is unavailable.
 
     ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``). ``until_iso``
-    is an inclusive upper bound on ``created_at`` and is used by bulk-
-    delete cursor pagination (#66). Tombstones hide the matching
-    observation in both paths.
+    is an inclusive upper bound on ``created_at``; pairing it with
+    ``cursor_observation_id`` switches the bound to the strict
+    ``(created_at, observation_id) < (until_iso, cursor_observation_id)``
+    tuple comparison used by bulk-delete cursor pagination (#66).
+    Tombstones hide the matching observation in both paths.
     """
     limit = max(1, min(limit, MAX_SEARCH))
     idx = get_index()
@@ -941,6 +944,7 @@ def search_observations(
             query=query,
             since_iso=since_iso,
             until_iso=until_iso,
+            cursor_observation_id=cursor_observation_id,
             limit=limit,
         )
     return _search_via_zenoh(
@@ -952,6 +956,7 @@ def search_observations(
         project=project,
         since_iso=since_iso,
         until_iso=until_iso,
+        cursor_observation_id=cursor_observation_id,
         limit=limit,
     )
 
@@ -967,6 +972,7 @@ def _search_via_zenoh(
     project: str,
     since_iso: str,
     until_iso: str = '',
+    cursor_observation_id: str = '',
     limit: int,
 ) -> list[Observation]:
     """Legacy Zenoh full-scan search path, retained as a fallback.
@@ -974,7 +980,10 @@ def _search_via_zenoh(
     Identical semantics to the pre-Phase-3 ``search_observations`` body:
     narrow by key_expr, then filter project / since / until / query
     (substring on content / project / tags) in Python. Re-enabled by
-    setting ``MESH_MEM_DISABLE_INDEX=1``.
+    setting ``MESH_MEM_DISABLE_INDEX=1``. ``cursor_observation_id``
+    triggers the same strict-tuple cursor semantics as
+    :meth:`LocalIndex.search` so bulk-delete pagination keeps working
+    on the fallback path too (#66).
     """
     since_dt = _parse_iso(since_iso)
     until_dt = _parse_iso(until_iso)
@@ -1017,8 +1026,15 @@ def _search_via_zenoh(
                 continue
             if since_dt and obs_dt < since_dt:
                 continue
-            if until_dt and obs_dt > until_dt:
-                continue
+            if until_dt:
+                if cursor_observation_id:
+                    # Strict tuple cursor for paginated bulk-delete (#66).
+                    if obs_dt > until_dt:
+                        continue
+                    if obs_dt == until_dt and obs.observation_id >= cursor_observation_id:
+                        continue
+                elif obs_dt > until_dt:
+                    continue
         if (
             q
             and q not in obs.content.lower()
@@ -1029,7 +1045,15 @@ def _search_via_zenoh(
         results_by_id[obs.observation_id] = obs
 
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    return sorted(results_by_id.values(), key=lambda o: _parse_iso(o.created_at) or epoch, reverse=True)[:limit]
+    # Sort by (created_at, observation_id) DESC tuple so the bulk-delete
+    # cursor sees the same stable order as the SQLite path (#66). Without
+    # the secondary key, ties on a boundary timestamp would shuffle
+    # between calls and the next page could skip or re-emit rows.
+    return sorted(
+        results_by_id.values(),
+        key=lambda o: (_parse_iso(o.created_at) or epoch, o.observation_id),
+        reverse=True,
+    )[:limit]
 
 
 def find_observation_by_id(observation_id: str) -> Observation | None:
