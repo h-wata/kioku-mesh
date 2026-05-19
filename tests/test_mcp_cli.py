@@ -576,3 +576,90 @@ def test_cli_bulk_delete_requires_selector(capsys: pytest.CaptureFixture) -> Non
     assert rc == 2
     captured = capsys.readouterr()
     assert 'bulk delete requires one of --project/--pc-id/--since/--until.' in captured.err
+
+
+def test_cli_bulk_delete_pages_past_batch_size(
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """``--batch-size`` < total forces cursor pagination; all rows tombstone (#66).
+
+    The pre-#66 code aborted at ``len(matches) >= MAX_SEARCH``; the new
+    cursor loop pages via ``until_iso`` and must reach the end even when
+    the per-call page is much smaller than the target set.
+    """
+    project = 'bulk-chunk'
+    targets = []
+    base = '2026-04-01T00:00:'
+    # 10 rows, each at a distinct seconds-resolution timestamp so the
+    # cursor advances cleanly between pages.
+    for i in range(10):
+        obs = Observation(
+            content=f'chunk-{i:02d}',
+            project=project,
+            created_at=f'{base}{i:02d}.000000Z',
+        )
+        store.put_observation(obs)
+        targets.append(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(['delete', '--project', project, '--yes', '--batch-size', '3'])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert f'bulk delete target: 10 entries (project={project!r})' in captured.err
+    assert 'deleted (tombstone): 10 entries' in captured.out
+    time.sleep(_INGEST_SETTLE)
+
+    visible = {obs.observation_id for obs in store.search_observations(project=project)}
+    for obs in targets:
+        assert obs.observation_id not in visible, f'{obs.observation_id} should be tombstoned'
+
+
+def test_cli_bulk_delete_continues_on_failure(
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One ``put_tombstone`` failure must not abort the rest (#66)."""
+    project = 'bulk-fail'
+    targets = []
+    for i in range(4):
+        obs = Observation(
+            content=f'fail-{i}',
+            project=project,
+            created_at=f'2026-04-02T00:00:{i:02d}.000000Z',
+        )
+        store.put_observation(obs)
+        targets.append(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    failing_id = targets[1].observation_id
+    real_put_tombstone = store.put_tombstone
+
+    def flaky(obs: Observation, reason: str = '') -> None:
+        if obs.observation_id == failing_id:
+            raise RuntimeError('simulated transport hiccup')
+        real_put_tombstone(obs, reason=reason)
+
+    monkeypatch.setattr(cli_module, 'put_tombstone', flaky)
+
+    rc = cli_main(['delete', '--project', project, '--yes', '--batch-size', '2'])
+    assert rc == 1, 'non-zero exit when at least one row failed'
+    captured = capsys.readouterr()
+    assert 'deleted (tombstone): 3 entries (1 failures)' in captured.out
+    assert f'put_tombstone failed for {failing_id}' in captured.err
+
+
+def test_cli_bulk_delete_emits_local_index_hint(
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Completion of bulk delete always emits the local-index escape-hatch hint (#66)."""
+    obs = Observation(content='hint-target', project='bulk-hint')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    rc = cli_main(['delete', '--project', 'bulk-hint', '--yes'])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert 'mesh-mem --rebuild gc --retention-days 0 --project <name>' in captured.err
