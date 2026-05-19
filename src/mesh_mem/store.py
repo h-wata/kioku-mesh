@@ -914,6 +914,7 @@ def search_observations(
     session_id: str = '',
     project: str = '',
     since_iso: str = '',
+    until_iso: str = '',
     limit: int = 50,
 ) -> list[Observation]:
     """Search observations via the SQLite local index, falling back to Zenoh.
@@ -923,8 +924,10 @@ def search_observations(
     scan path stays available behind ``MESH_MEM_DISABLE_INDEX=1`` so
     operators can flip back if the index is unavailable.
 
-    ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``). Tombstones hide
-    the matching observation in both paths.
+    ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``). ``until_iso``
+    is an inclusive upper bound on ``created_at`` and is used by bulk-
+    delete cursor pagination (#66). Tombstones hide the matching
+    observation in both paths.
     """
     limit = max(1, min(limit, MAX_SEARCH))
     idx = get_index()
@@ -937,6 +940,7 @@ def search_observations(
             session_id=session_id,
             query=query,
             since_iso=since_iso,
+            until_iso=until_iso,
             limit=limit,
         )
     return _search_via_zenoh(
@@ -947,6 +951,7 @@ def search_observations(
         session_id=session_id,
         project=project,
         since_iso=since_iso,
+        until_iso=until_iso,
         limit=limit,
     )
 
@@ -961,16 +966,18 @@ def _search_via_zenoh(
     session_id: str,
     project: str,
     since_iso: str,
+    until_iso: str = '',
     limit: int,
 ) -> list[Observation]:
     """Legacy Zenoh full-scan search path, retained as a fallback.
 
     Identical semantics to the pre-Phase-3 ``search_observations`` body:
-    narrow by key_expr, then filter project / since / query (substring
-    on content / project / tags) in Python. Re-enabled by setting
-    ``MESH_MEM_DISABLE_INDEX=1``.
+    narrow by key_expr, then filter project / since / until / query
+    (substring on content / project / tags) in Python. Re-enabled by
+    setting ``MESH_MEM_DISABLE_INDEX=1``.
     """
     since_dt = _parse_iso(since_iso)
+    until_dt = _parse_iso(until_iso)
 
     parts = [
         'mem/obs',
@@ -1004,9 +1011,13 @@ def _search_via_zenoh(
             continue
         if project and obs.project != project:
             continue
-        if since_dt:
+        if since_dt or until_dt:
             obs_dt = _parse_iso(obs.created_at)
-            if obs_dt is None or obs_dt < since_dt:
+            if obs_dt is None:
+                continue
+            if since_dt and obs_dt < since_dt:
+                continue
+            if until_dt and obs_dt > until_dt:
                 continue
         if (
             q

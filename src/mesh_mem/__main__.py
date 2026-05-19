@@ -8,6 +8,7 @@ sides converge.
 
 import argparse
 from collections.abc import Callable
+from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 import json
@@ -77,30 +78,68 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
-def _select_delete_targets(args: argparse.Namespace) -> tuple[list[Observation], str | None]:
-    """Resolve bulk-delete targets from search filters.
+def _iter_delete_targets(args: argparse.Namespace, *, batch_size: int) -> Iterator[Observation]:
+    """Yield bulk-delete targets in (created_at, observation_id) DESC order.
 
-    Returns ``(matches, error_message)`` where ``error_message`` is suitable
-    for stderr output and an exit-code-2 caller path.
+    Pages over :func:`search_observations` using ``until_iso`` as a cursor
+    so the 10k :data:`MAX_SEARCH` per-call cap does not abort large bulk
+    deletes (#66). Each page is at most ``min(batch_size, MAX_SEARCH)``
+    rows; we re-issue with ``until_iso`` set to the last seen
+    ``created_at`` and skip any ``observation_id`` already emitted to
+    handle ties on the page boundary. ``observation_id`` is the SQLite
+    PRIMARY KEY and the secondary ORDER BY key, so this de-dup is bounded
+    by the number of rows sharing the boundary ``created_at`` (typically
+    1; never more than one batch worth).
     """
-    until_dt = _parse_iso_or_none(args.until or '')
-    if args.until and until_dt is None:
-        return [], '--until must be in ISO8601 format.'
-
-    matches = search_observations(
-        project=args.project or '',
-        pc_id=args.pc_id or '',
-        since_iso=args.since or '',
-        limit=MAX_SEARCH,
-    )
-    if len(matches) >= MAX_SEARCH:
-        return [], (
-            f'bulk delete hit the upper limit ({MAX_SEARCH} entries).'
-            ' Narrow further with --project/--pc-id/--since/--until.'
+    until_cursor = args.until or ''
+    page_size = max(1, min(batch_size, MAX_SEARCH))
+    seen_at_cursor: set[str] = set()
+    while True:
+        page = search_observations(
+            project=args.project or '',
+            pc_id=args.pc_id or '',
+            since_iso=args.since or '',
+            until_iso=until_cursor,
+            limit=page_size,
         )
-    if until_dt is not None:
-        matches = [obs for obs in matches if (_parse_iso_or_none(obs.created_at) or until_dt) <= until_dt]
-    return matches, None
+        if not page:
+            return
+        fresh: list[Observation] = []
+        for obs in page:
+            if obs.observation_id in seen_at_cursor:
+                continue
+            fresh.append(obs)
+        if not fresh:
+            # Every row in this page was already yielded under the same
+            # boundary timestamp — extending the cursor any further would
+            # loop on identical timestamps. Stop.
+            return
+        last_created_at = fresh[-1].created_at
+        for obs in fresh:
+            yield obs
+        if len(page) < page_size:
+            # Last page was short — no more rows match the filter.
+            return
+        # Reseed the boundary-collision guard with all ids that share the
+        # next cursor timestamp from the current page; the next iteration
+        # will re-fetch starting at ``until_cursor == last_created_at``.
+        seen_at_cursor = {obs.observation_id for obs in fresh if obs.created_at == last_created_at}
+        until_cursor = last_created_at
+
+
+def _count_delete_targets(args: argparse.Namespace, *, batch_size: int) -> tuple[int, str | None]:
+    """Return ``(total_count, error_message)`` for bulk-delete preflight.
+
+    Streams via :func:`_iter_delete_targets` so the count is uncapped
+    (no :data:`MAX_SEARCH` abort). Used by ``--dry-run`` and to size the
+    interactive confirmation prompt.
+    """
+    if args.until and _parse_iso_or_none(args.until or '') is None:
+        return 0, '--until must be in ISO8601 format.'
+    total = 0
+    for _ in _iter_delete_targets(args, batch_size=batch_size):
+        total += 1
+    return total, None
 
 
 def _cmd_save(args: argparse.Namespace) -> int:
@@ -228,6 +267,12 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+_LOCAL_INDEX_HINT = (
+    'hint: rows visible only in the local index (gc --by-pc-id matches 0) are\n'
+    '      better cleaned with: mesh-mem --rebuild gc --retention-days 0 --project <name>'
+)
+
+
 def _cmd_delete(args: argparse.Namespace) -> int:
     if args.observation_id and _delete_has_bulk_selector(args):
         print(
@@ -249,7 +294,8 @@ def _cmd_delete(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        matches, error = _select_delete_targets(args)
+        batch_size = args.batch_size
+        total, error = _count_delete_targets(args, batch_size=batch_size)
         if error:
             print(error, file=sys.stderr)
             return 2
@@ -264,12 +310,14 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         if args.until:
             selector_parts.append(f'until={args.until!r}')
         selector_text = ', '.join(selector_parts)
-        print(f'bulk delete target: {len(matches)} entries ({selector_text})', file=sys.stderr)
-        if not matches:
+        print(f'bulk delete target: {total} entries ({selector_text})', file=sys.stderr)
+        if total == 0:
             print('no targets — no observations matched the selector.')
+            print(_LOCAL_INDEX_HINT, file=sys.stderr)
             return 0
         if args.dry_run:
             print('Dry run — pass --yes to actually delete.')
+            print(_LOCAL_INDEX_HINT, file=sys.stderr)
             return 0
         if not args.yes:
             if not sys.stdin.isatty():
@@ -278,7 +326,18 @@ def _cmd_delete(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 2
-            prompt = f"Tombstone {len(matches)} entries? type 'yes' to confirm: "
+            if total > MAX_SEARCH:
+                # The pre-#66 hard cap is gone; surface the same "large set"
+                # warning so an operator can't tombstone 100k rows by hitting
+                # enter once. The local-index hint is the cheap-out path for
+                # the common "Zenoh already aged it out" case.
+                print(
+                    f'NOTE: large bulk delete ({total} > {MAX_SEARCH} entries). '
+                    'If targets exist only in the local index, '
+                    '`mesh-mem --rebuild gc --retention-days 0 --project ...` is faster.',
+                    file=sys.stderr,
+                )
+            prompt = f"Tombstone {total} entries? type 'yes' to confirm: "
             try:
                 answer = input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
@@ -288,10 +347,28 @@ def _cmd_delete(args: argparse.Namespace) -> int:
                 print('cancelled.', file=sys.stderr)
                 return 1
 
-        for obs in matches:
-            put_tombstone(obs, reason=args.reason or '')
-        print(f'deleted (tombstone): {len(matches)} entries')
-        return 0
+        # Stream a second pass; the page contents may shift slightly under
+        # concurrent writes but cursor pagination keeps progress monotone.
+        deleted = 0
+        failures = 0
+        next_progress = batch_size
+        for obs in _iter_delete_targets(args, batch_size=batch_size):
+            try:
+                put_tombstone(obs, reason=args.reason or '')
+                deleted += 1
+            except Exception as e:  # noqa: BLE001 — one bad row must not abort the sweep (#66)
+                failures += 1
+                print(f'  put_tombstone failed for {obs.observation_id}: {e}', file=sys.stderr)
+            if deleted + failures >= next_progress:
+                print(
+                    f'  progress: {deleted + failures}/{total} (ok={deleted}, fail={failures})',
+                    file=sys.stderr,
+                )
+                next_progress += batch_size
+        suffix = f' ({failures} failures)' if failures else ''
+        print(f'deleted (tombstone): {deleted} entries{suffix}')
+        print(_LOCAL_INDEX_HINT, file=sys.stderr)
+        return 0 if failures == 0 else 1
 
     if len(args.observation_id) != 32:
         print('observation_id must be a full 32-character match.', file=sys.stderr)
@@ -583,6 +660,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_delete.add_argument('--until', default='', help='limit to ISO8601 timestamp and earlier')
     p_delete.add_argument('--dry-run', action='store_true', help='show count only, do not delete')
     p_delete.add_argument('--yes', action='store_true', help='skip interactive confirmation for bulk delete')
+    p_delete.add_argument(
+        '--batch-size',
+        dest='batch_size',
+        type=_positive_int,
+        default=1000,
+        help='bulk delete page / progress granularity (default 1000, max 10000)',
+    )
     p_delete.add_argument('-r', '--reason', default='')
     p_delete.set_defaults(func=_cmd_delete)
 

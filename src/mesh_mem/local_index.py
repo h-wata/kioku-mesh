@@ -304,6 +304,7 @@ class LocalIndex:
         session_id: str = '',
         query: str = '',
         since_iso: str = '',
+        until_iso: str = '',
         limit: int = 50,
         include_deleted: bool = False,
     ) -> list[Observation]:
@@ -321,12 +322,15 @@ class LocalIndex:
         rows. The name is historical but the behavior is intentionally "show
         hidden rows" rather than only "show tombstoned rows".
 
-        ``since_iso`` is compared lexicographically against ``created_at``;
-        both are produced as 'Z'-suffixed UTC ISO 8601 strings by
-        :meth:`mesh_mem.models._utc_now_iso`, so lex order matches time
-        order. Rows whose created_at cannot be lex-compared (legacy bad
-        writes) will sort, possibly incorrectly — same caveat as the
-        existing Zenoh path.
+        ``since_iso`` / ``until_iso`` are compared lexicographically against
+        ``created_at``; both are produced as 'Z'-suffixed UTC ISO 8601
+        strings by :meth:`mesh_mem.models._utc_now_iso`, so lex order
+        matches time order. ``until_iso`` is inclusive (``<=``) to mirror
+        ``since_iso`` semantics and lets bulk-delete cursor pagination
+        pass the last seen ``created_at`` back without dropping rows
+        on the boundary (#66). Rows whose created_at cannot be lex-
+        compared (legacy bad writes) will sort, possibly incorrectly —
+        same caveat as the existing Zenoh path.
         """
         if self._disabled or self._conn is None:
             return []
@@ -353,6 +357,9 @@ class LocalIndex:
         if since_iso:
             where.append('created_at >= ?')
             params.append(since_iso)
+        if until_iso:
+            where.append('created_at <= ?')
+            params.append(until_iso)
         if query:
             # Case-insensitive substring against the full payload (content /
             # project / tags / subject / summary). LIKE is fast enough at PoC
@@ -363,7 +370,10 @@ class LocalIndex:
         sql = 'SELECT payload_json FROM obs_index'
         if where:
             sql += ' WHERE ' + ' AND '.join(where)
-        sql += ' ORDER BY created_at DESC LIMIT ?'
+        # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
+        # sort key gives a total, stable order for cursor pagination over
+        # rows that share the same ``created_at`` (#66).
+        sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
         params.append(max(1, limit))
 
         with self._lock:

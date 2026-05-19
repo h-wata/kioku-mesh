@@ -271,6 +271,59 @@ def test_search_since_iso_filter(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_search_until_iso_filter(tmp_path: Path) -> None:
+    """``until_iso`` keeps rows whose ``created_at`` is lex-less-or-equal.
+
+    Inclusive upper bound matters for the bulk-delete cursor (#66): the
+    next page passes the previous page's last ``created_at`` as
+    ``until_iso`` and relies on dedup-by-observation_id to drop the row
+    that sits exactly on the boundary.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'until.db'))
+    try:
+        old = _mk_obs('old', project='until')
+        old.created_at = '2020-01-01T00:00:00.000000Z'
+        boundary = _mk_obs('boundary', project='until')
+        boundary.created_at = '2024-01-01T00:00:00.000000Z'
+        recent = _mk_obs('recent', project='until')
+        recent.created_at = '2025-06-01T00:00:00.000000Z'
+        idx.upsert(old)
+        idx.upsert(boundary)
+        idx.upsert(recent)
+
+        hits = idx.search(project='until', until_iso='2024-01-01T00:00:00.000000Z')
+        assert {r.content for r in hits} == {'old', 'boundary'}
+    finally:
+        idx.close()
+
+
+def test_search_order_by_includes_observation_id_tiebreaker(tmp_path: Path) -> None:
+    """Rows sharing the same ``created_at`` must sort by ``observation_id`` DESC.
+
+    Stable secondary order is what makes the bulk-delete cursor (#66)
+    correct under timestamp ties; without it pagination could re-emit or
+    skip rows that share the boundary timestamp.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'tie.db'))
+    try:
+        ts = '2025-06-01T00:00:00.000000Z'
+        a = _mk_obs('a', project='tie')
+        a.created_at = ts
+        b = _mk_obs('b', project='tie')
+        b.created_at = ts
+        c = _mk_obs('c', project='tie')
+        c.created_at = ts
+        idx.upsert(a)
+        idx.upsert(b)
+        idx.upsert(c)
+
+        hits = idx.search(project='tie', limit=10)
+        ids = [r.observation_id for r in hits]
+        assert ids == sorted(ids, reverse=True), 'observation_id DESC tiebreaker expected'
+    finally:
+        idx.close()
+
+
 def test_search_excludes_deleted_by_default(tmp_path: Path) -> None:
     """Tombstoned rows must not appear in default ``search`` results."""
     idx = LocalIndex.connect(str(tmp_path / 'exclude.db'))
