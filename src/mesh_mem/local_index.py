@@ -495,6 +495,48 @@ class LocalIndex:
                 return 0
         return int(count)
 
+    def distinct_projects(self) -> list[str]:
+        """Return distinct non-empty ``project`` values present in the index.
+
+        Used by shell completion (Issue #76) to suggest live ``--project``
+        values. ``project`` is a real column, so the query is O(N) on a
+        secondary index and safe to call from a tab-completion subshell.
+        """
+        if self._disabled or self._conn is None:
+            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT project FROM obs_index WHERE project IS NOT NULL AND project != ''"
+                ).fetchall()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.distinct_projects failed: %s', e)
+                return []
+        return sorted({row[0] for row in rows if row[0]})
+
+    def distinct_pc_ids(self, scan_limit: int = 1000) -> list[str]:
+        """Return distinct ``pc_id`` values from the ``scan_limit`` most-recent rows.
+
+        ``pc_id`` lives inside ``payload_json``, so a full table scan would
+        defeat completion latency budgets. Scanning the most-recent N rows
+        keeps the result bounded while still surfacing currently-active
+        peers (the typical completion target). Used by shell completion
+        (Issue #76).
+        """
+        if self._disabled or self._conn is None:
+            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT DISTINCT json_extract(payload_json, '$.pc_id') "
+                    'FROM obs_index ORDER BY created_at DESC LIMIT ?',
+                    (max(1, scan_limit),),
+                ).fetchall()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.distinct_pc_ids failed: %s', e)
+                return []
+        return sorted({row[0] for row in rows if row[0]})
+
     def visibility_counts(self) -> VisibilityCounts:
         """Return live / tombstoned / shadowed row counts for status reporting."""
         if self._disabled or self._conn is None:

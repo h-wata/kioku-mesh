@@ -31,6 +31,9 @@ test = [
     "fastmcp>=0.2",
     "PyYAML>=6.0",
 ]
+completion = [
+    "argcomplete>=3.0",
+]
 
 [project.scripts]
 mesh-mem = "mesh_mem.__main__:main"

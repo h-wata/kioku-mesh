@@ -7,14 +7,21 @@ sides converge.
 """
 
 import argparse
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 import json
 import sys
 
+try:
+    import argcomplete
+except ImportError:  # argcomplete is an optional extra (`pip install mesh-mem[completion]`).
+    argcomplete = None  # type: ignore[assignment]
+
 from . import __version__
 from .identity import get_pc_id
 from .identity import get_session_id
+from .local_index import LocalIndex
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import _reset_session
@@ -458,6 +465,42 @@ def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
     return 0 if failures == 0 else 1
 
 
+def _distinct_values_from_local_index(method_name: str) -> list[str]:
+    """Open the local SQLite index, call ``method_name``, and close cleanly.
+
+    Completion runs inside a shell subprocess — touching Zenoh or triggering
+    ``rebuild_from_zenoh`` would blow the latency budget. ``LocalIndex.connect``
+    is pure SQLite and degrades to a disabled instance on open failure, so a
+    missing / unreadable index just yields no suggestions instead of crashing
+    the completer.
+    """
+    try:
+        idx = LocalIndex.connect()
+        try:
+            return list(getattr(idx, method_name)())
+        finally:
+            idx.close()
+    except Exception:  # noqa: BLE001 — completion must never raise
+        return []
+
+
+def _complete_project(prefix: str, **_kwargs) -> list[str]:
+    """Argcomplete callback: suggest ``--project`` values from the local index."""
+    return [v for v in _distinct_values_from_local_index('distinct_projects') if v.startswith(prefix)]
+
+
+def _complete_pc_id(prefix: str, **_kwargs) -> list[str]:
+    """Argcomplete callback: suggest ``--pc-id`` / ``--by-pc-id`` values."""
+    return [v for v in _distinct_values_from_local_index('distinct_pc_ids') if v.startswith(prefix)]
+
+
+def _attach_completer(action: argparse.Action, completer: Callable[..., list[str]]) -> None:
+    """Attach an argcomplete completer to an argparse Action, no-op if argcomplete is absent."""
+    if argcomplete is None:
+        return
+    action.completer = completer  # type: ignore[attr-defined]
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='mesh-mem', description='mesh-mem CLI')
     parser.add_argument('--version', action='version', version=f'mesh-mem {__version__}')
@@ -477,7 +520,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_save = sub.add_parser('save', help='Save an observation')
     p_save.add_argument('content', help='content to save')
-    p_save.add_argument('-p', '--project', default='')
+    _attach_completer(p_save.add_argument('-p', '--project', default=''), _complete_project)
     p_save.add_argument('-t', '--tags', default='', help='comma-separated tags')
     p_save.add_argument(
         '--memory-type',
@@ -518,9 +561,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument('query', nargs='?', default='', help='search keyword (optional)')
     p_search.add_argument('--agent-family', dest='agent_family', default='')
     p_search.add_argument('--client-id', dest='client_id', default='')
-    p_search.add_argument('--pc-id', dest='pc_id', default='')
+    _attach_completer(p_search.add_argument('--pc-id', dest='pc_id', default=''), _complete_pc_id)
     p_search.add_argument('--session-id', dest='session_id', default='')
-    p_search.add_argument('-p', '--project', default='')
+    _attach_completer(p_search.add_argument('-p', '--project', default=''), _complete_project)
     p_search.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
     p_search.add_argument('-n', '--limit', type=int, default=50, help='max results (default: 50)')
     p_search.add_argument('--format', choices=_SEARCH_FORMATS, default='text', help='output format (default: text)')
@@ -528,8 +571,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_delete = sub.add_parser('delete', help='Soft-delete an observation (tombstone)')
     p_delete.add_argument('observation_id', nargs='?', default='', help='full 32-character observation_id')
-    p_delete.add_argument('-p', '--project', default='', help='tombstone observations in the given project')
-    p_delete.add_argument('--pc-id', dest='pc_id', default='', help='tombstone observations from the given pc_id')
+    _attach_completer(
+        p_delete.add_argument('-p', '--project', default='', help='tombstone observations in the given project'),
+        _complete_project,
+    )
+    _attach_completer(
+        p_delete.add_argument('--pc-id', dest='pc_id', default='', help='tombstone observations from the given pc_id'),
+        _complete_pc_id,
+    )
     p_delete.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
     p_delete.add_argument('--until', default='', help='limit to ISO8601 timestamp and earlier')
     p_delete.add_argument('--dry-run', action='store_true', help='show count only, do not delete')
@@ -562,20 +611,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=30,
         help='retention in days (default 30). Tombstones and their obs older than this are physically deleted.',
     )
-    p_gc.add_argument(
-        '-p',
-        '--project',
-        default='',
-        help='only delete tombstones for the given project (default: all projects)',
-    )
-    p_gc.add_argument(
-        '--by-pc-id',
-        dest='by_pc_id',
-        default='',
-        help=(
-            'bulk-physically-delete obs matching a 32-char pc_id (for cleaning up bench/spam). '
-            'Default is dry-run; pass --execute to actually delete. Skips tomb sweep / broadcast.'
+    _attach_completer(
+        p_gc.add_argument(
+            '-p',
+            '--project',
+            default='',
+            help='only delete tombstones for the given project (default: all projects)',
         ),
+        _complete_project,
+    )
+    _attach_completer(
+        p_gc.add_argument(
+            '--by-pc-id',
+            dest='by_pc_id',
+            default='',
+            help=(
+                'bulk-physically-delete obs matching a 32-char pc_id (for cleaning up bench/spam). '
+                'Default is dry-run; pass --execute to actually delete. Skips tomb sweep / broadcast.'
+            ),
+        ),
+        _complete_pc_id,
     )
     p_gc.add_argument(
         '--session-prefix',
@@ -623,6 +678,11 @@ def main(argv: list[str] | None = None) -> int:
     ambient config (codex review P2).
     """
     parser = _build_parser()
+    if argcomplete is not None:
+        # Must run before parse_args. When the shell is asking for completion
+        # candidates (``_ARGCOMPLETE`` in env) argcomplete writes results and
+        # exits the process; in normal invocation it is a no-op.
+        argcomplete.autocomplete(parser)
     args = parser.parse_args(argv)
     if args.rebuild:
         set_rebuild_on_init_explicit(True)
