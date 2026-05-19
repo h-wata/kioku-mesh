@@ -595,3 +595,48 @@ def test_search_via_zenoh_filters_skip_non_matching_early(monkeypatch: pytest.Mo
     ids = {o.observation_id for o in results}
     assert obs_keep.observation_id in ids
     assert obs_skip.observation_id not in ids
+
+
+def test_search_via_zenoh_cursor_strict_tuple_walks_same_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zenoh fallback honors ``(until_iso, cursor_observation_id)`` strict-tuple (#66).
+
+    The bulk-delete cursor contract (#66) requires the fallback to apply
+    the same strict ``(created_at, observation_id) < cursor`` filter and
+    return results in ``(created_at, observation_id)`` DESC order. Without
+    this, ``MESH_MEM_DISABLE_INDEX=1`` would stall the iterator on rows
+    that share a single ``created_at``.
+    """
+    ts = '2025-06-01T00:00:00.000000Z'
+    rows = []
+    for _ in range(5):
+        obs = Observation(content=f'tie-{_}', project='cursor-zenoh')
+        obs.created_at = ts
+        rows.append(obs)
+    rows.sort(key=lambda o: o.observation_id, reverse=True)
+    cursor_row = rows[2]
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty for first call
+            [_ok_reply(o) for o in rows],
+            [],  # tombstones empty for second call
+            [_ok_reply(o) for o in rows],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    # 1) Without cursor: inclusive ``until_iso`` keeps every tie row.
+    inclusive = store.search_observations(project='cursor-zenoh', until_iso=ts)
+    inclusive_ids = [o.observation_id for o in inclusive]
+    assert inclusive_ids == [r.observation_id for r in rows], 'fallback must sort by (created_at, observation_id) DESC'
+
+    # 2) With strict-tuple cursor: boundary row and everything ordered >= cursor must be excluded.
+    strict = store.search_observations(
+        project='cursor-zenoh',
+        until_iso=ts,
+        cursor_observation_id=cursor_row.observation_id,
+    )
+    strict_ids = [o.observation_id for o in strict]
+    assert strict_ids == [
+        r.observation_id for r in rows[3:]
+    ], 'cursor_observation_id must drop the boundary row and anything sorted before it'
