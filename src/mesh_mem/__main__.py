@@ -21,7 +21,10 @@ from .store import _reset_session
 from .store import drain_pending_puts
 from .store import execute_bulk_purge
 from .store import find_observation_by_id
+from .store import gc_expired_shadows
 from .store import gc_expired_tombstones
+from .store import get_index
+from .store import get_session
 from .store import get_transport_status
 from .store import MAX_SEARCH
 from .store import mesh_ready_label
@@ -364,9 +367,36 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         return 0
     if args.by_pc_id:
         return _cmd_gc_by_pc_id(args)
-    purged = gc_expired_tombstones(retention_days=args.retention_days, project=args.project or '')
+    # Shadow sweep depends on ``shadowed_at`` being current. CLI startup skips
+    # ``rebuild_from_zenoh`` by default (#38), so a one-shot ``mesh-mem gc``
+    # would otherwise miss "stale-but-not-yet-shadowed" local rows that the
+    # subscriber never had a chance to reconcile. Run reconcile explicitly
+    # before the sweep when shadow prune is on so the discovery path is
+    # closed (#70). On reconcile failure we fall through conservatively:
+    # the sweep then only sees pre-existing shadow rows, which is no worse
+    # than the previous behavior.
+    if not args.no_shadow_prune:
+        try:
+            get_index().rebuild_from_zenoh(get_session())
+        except Exception as e:  # noqa: BLE001
+            print(
+                f'rebuild_from_zenoh skipped before gc shadow sweep: {type(e).__name__}: {e}',
+                file=sys.stderr,
+            )
+    purged_tomb = gc_expired_tombstones(retention_days=args.retention_days, project=args.project or '')
     project_note = f' (project={args.project})' if args.project else ''
-    print(f'retention {args.retention_days}-day tombstones{project_note}: physically deleted {purged} entries')
+    if args.no_shadow_prune:
+        print(
+            f'retention {args.retention_days}-day sweep{project_note}: '
+            f'physically deleted {purged_tomb} tombstones (shadow prune skipped)'
+        )
+        return 0
+    purged_shadow, revived_shadow = gc_expired_shadows(retention_days=args.retention_days, project=args.project or '')
+    print(
+        f'retention {args.retention_days}-day sweep{project_note}: '
+        f'physically deleted {purged_tomb} tombstones / {purged_shadow} shadows '
+        f'(revived {revived_shadow})'
+    )
     return 0
 
 
@@ -552,6 +582,12 @@ def _build_parser() -> argparse.ArgumentParser:
         '--yes',
         action='store_true',
         help='skip interactive confirmation for --by-pc-id --execute (for CI / automation)',
+    )
+    p_gc.add_argument(
+        '--no-shadow-prune',
+        dest='no_shadow_prune',
+        action='store_true',
+        help='Skip physical deletion of shadow rows during retention sweep (tombstones only).',
     )
     p_gc.set_defaults(func=_cmd_gc)
 

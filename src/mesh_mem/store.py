@@ -1455,3 +1455,89 @@ def gc_expired_tombstones(
         get_index().physical_delete(tomb.observation_id)
         purged += 1
     return purged
+
+
+def gc_expired_shadows(
+    retention_days: int = 30,
+    now: datetime | None = None,
+    project: str = '',
+) -> tuple[int, int]:
+    """Sweep shadow rows older than the cutoff, re-verifying each against Zenoh.
+
+    Shadows are rows that :meth:`LocalIndex.rebuild_from_zenoh` flagged
+    because the row existed locally but did not appear in the Zenoh scan
+    at that moment (ADR-0011, Issue #70). The shadow is a *guess about
+    the past*, not a fact about now — a peer may have rejoined since,
+    or a transient storage gap may have healed. So before physically
+    deleting a long-shadowed row we re-query the live Zenoh state and
+    branch:
+
+    - ``obs_id`` still observable upstream → ``upsert`` the live obs,
+      which clears ``shadowed_at`` (false-shadow recovery).
+    - ``obs_id`` genuinely absent upstream → ``physical_delete`` the
+      local row, completing the rebuild-shadow → retention →
+      physical-delete lifecycle.
+
+    This function operates only on rows that **already carry**
+    ``shadowed_at``. Driving the *discovery* path — turning a stale-
+    but-not-yet-shadowed live row into a shadow candidate — is the
+    caller's responsibility, typically by running
+    :meth:`LocalIndex.rebuild_from_zenoh` first. The CLI ``_cmd_gc``
+    driver does that explicitly before invoking this function so that
+    one-shot ``mesh-mem gc`` (which skips startup rebuild per #38)
+    still reaches the discovery branch.
+
+    If the live Zenoh query fails the sweep is skipped entirely
+    (returns ``(0, 0)``) — never delete on transport ambiguity.
+
+    ``project`` mirrors the tombstone sweep filter.
+
+    Returns ``(purged, revived)``.
+    """
+    if retention_days < 0:
+        raise ValueError(f'retention_days must be >= 0, got {retention_days}')
+    if now is None:
+        now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=retention_days)
+    cutoff_iso = cutoff.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    idx = get_index()
+    if idx.disabled:
+        return (0, 0)
+    candidate_ids = idx.list_expired_shadowed_obs(cutoff_iso, project=project)
+    if not candidate_ids:
+        return (0, 0)
+    candidate_set = set(candidate_ids)
+
+    # Live re-verify. Conservative on transport failure: skip the whole
+    # sweep so we never destroy a row whose upstream state we did not
+    # actually confirm to be absent.
+    zenoh_obs_by_id: dict[str, Observation] = {}
+    try:
+        session = get_session()
+        for reply in session.get('mem/obs/**', timeout=30.0):  # type: ignore[attr-defined]
+            if not reply.ok:
+                continue
+            try:
+                obs = Observation.from_json(reply.ok.payload.to_string())
+            except Exception as e:  # noqa: BLE001
+                log.warning('gc_expired_shadows skip malformed obs payload: %s', e)
+                continue
+            if obs.observation_id in candidate_set:
+                zenoh_obs_by_id[obs.observation_id] = obs
+    except Exception as e:  # noqa: BLE001
+        log.warning('gc_expired_shadows Zenoh re-verify failed, skipping sweep: %s', e)
+        return (0, 0)
+
+    purged = 0
+    revived = 0
+    for obs_id in candidate_ids:
+        obs = zenoh_obs_by_id.get(obs_id)
+        if obs is not None:
+            # Upsert revives the row: ON CONFLICT sets shadowed_at = NULL.
+            idx.upsert(obs)
+            revived += 1
+        else:
+            idx.physical_delete(obs_id)
+            purged += 1
+    return (purged, revived)
