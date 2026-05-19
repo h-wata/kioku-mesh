@@ -1,6 +1,6 @@
 # MCP registration
 
-Register the installed `mesh-mem-mcp` console script. Use the **absolute path** inside the venv — the PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
+Register the installed `mesh-mem-mcp` console script. Use the **absolute path** to the installed binary — typically `~/.local/bin/mesh-mem-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/mesh-mem-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
 
 ## Claude Code
 
@@ -11,7 +11,7 @@ claude mcp add mesh_mem -s user \
   -e ZENOH_CONNECT=tcp/127.0.0.1:7447 \
   -e MESH_MEM_AGENT_FAMILY=claude \
   -e MESH_MEM_CLIENT_ID=claude-code \
-  -- /home/USER/.venv/mesh-mem/bin/mesh-mem-mcp
+  -- /home/USER/.local/bin/mesh-mem-mcp     # uv tool install path (or /home/USER/.venv/mesh-mem/bin/mesh-mem-mcp for a manual venv)
 
 claude mcp list   # expect: mesh_mem: ... - ✓ Connected
 ```
@@ -42,7 +42,7 @@ Claude Desktop does read `mcpServers` from its own config file:
 {
   "mcpServers": {
     "mesh-mem": {
-      "command": "/home/USER/.venv/mesh-mem/bin/mesh-mem-mcp",
+      "command": "/home/USER/.local/bin/mesh-mem-mcp",
       "env": {
         "ZENOH_CONNECT": "tcp/localhost:7447",
         "MESH_MEM_AGENT_FAMILY": "claude",
