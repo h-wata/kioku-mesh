@@ -80,6 +80,31 @@ def test_build_install_plan_raises_when_binary_missing() -> None:
         build_install_plan(MCPClient.CODEX_CLI, which=lambda _n: None)
 
 
+@pytest.mark.parametrize(
+    'bad_name',
+    [
+        'foo.bar',  # dot would split a Codex TOML table header
+        'has space',  # spaces are not bare keys
+        'with"quote',
+        'has\\backslash',
+        'has@symbol',
+        '',
+        '\t',
+    ],
+)
+def test_build_install_plan_rejects_unsafe_registry_name(bad_name: str) -> None:
+    """Codex review #97: TOML bare keys are [A-Za-z0-9_-]+. Anything else risks a silent rewrite."""
+    with pytest.raises(ValueError, match='registry name'):
+        build_install_plan(MCPClient.CODEX_CLI, name=bad_name, mesh_mem_mcp_path='/x/mesh-mem-mcp')
+
+
+@pytest.mark.parametrize('good_name', ['mesh_mem', 'mesh-mem', 'foo-bar', 'X42', 'a'])
+def test_build_install_plan_accepts_bare_key_names(good_name: str) -> None:
+    """All TOML-spec bare keys must be accepted."""
+    plan = build_install_plan(MCPClient.CODEX_CLI, name=good_name, mesh_mem_mcp_path='/x/mesh-mem-mcp')
+    assert plan.name == good_name
+
+
 # -- Claude Code path -----------------------------------------------------------
 
 
@@ -149,6 +174,22 @@ def test_install_claude_code_force_removes_then_adds() -> None:
     assert invocations[0][:2] == ['mcp', 'list']
     assert invocations[1][:3] == ['mcp', 'remove', 'mesh_mem']
     assert invocations[2][:3] == ['mcp', 'add', 'mesh_mem']
+
+
+def test_install_claude_code_force_raises_when_remove_fails() -> None:
+    """Codex review #97: a failed `claude mcp remove` must surface, not get masked by add failure."""
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+
+    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ['mcp', 'list']:
+            return subprocess.CompletedProcess(argv, 0, stdout='mesh_mem: /old - Connected\n', stderr='')
+        if argv[1:3] == ['mcp', 'remove']:
+            return subprocess.CompletedProcess(argv, 1, stdout='', stderr='permission denied')
+        # Any subsequent call (notably the would-be add) must not happen.
+        raise AssertionError(f'unexpected call after failed remove: {argv}')
+
+    with pytest.raises(RuntimeError, match='claude mcp remove mesh_mem failed'):
+        install_claude_code(plan, run=fake_run, force=True, which=lambda _n: '/usr/bin/claude')
 
 
 def test_install_claude_code_raises_on_subprocess_failure() -> None:

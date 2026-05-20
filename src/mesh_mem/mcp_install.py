@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -75,6 +76,31 @@ class InstallPlan:
     env: dict[str, str] = field(default_factory=dict)
 
 
+# TOML bare keys allow only ASCII letters, digits, underscore, and hyphen
+# (per https://toml.io/en/v1.0.0#keys). A name with any other character —
+# notably ``.`` — would either generate invalid TOML or, worse, silently
+# rewrite the wrong table because ``[mcp_servers.foo.bar]`` is a nested
+# table by spec. The same regex is the safest also-good-as-a-claude-MCP-name
+# constraint (Claude Code's CLI doesn't formally publish a charset but ASCII
+# alphanumerics + `_-` covers everything in docs/mcp-clients.md examples).
+_VALID_REGISTRY_NAME_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+
+
+def _validate_registry_name(name: str) -> None:
+    """Reject registry keys that wouldn't survive both TOML and Claude CLI safely.
+
+    Surfaces the rejection as ``ValueError`` so the CLI layer maps it to a
+    documented exit code rather than ``[mcp_servers.foo.bar]`` silently
+    landing as a nested table in the user's Codex config (Codex review on
+    #97).
+    """
+    if not name or not _VALID_REGISTRY_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f'registry name {name!r} must match [A-Za-z0-9_-]+ '
+            '(no dots, spaces, or other characters that break TOML bare keys).'
+        )
+
+
 def build_install_plan(
     client: MCPClient,
     name: str = DEFAULT_REGISTRY_NAME,
@@ -95,7 +121,9 @@ def build_install_plan(
 
     Raises:
         FileNotFoundError: when ``mesh-mem-mcp`` can't be resolved.
+        ValueError: when ``name`` is not a TOML / Claude-safe bare key.
     """
+    _validate_registry_name(name)
     resolver = which or shutil.which
     command = mesh_mem_mcp_path or resolver('mesh-mem-mcp')
     if not command:
@@ -163,7 +191,13 @@ def install_claude_code(
     if list_result.returncode == 0 and f'{plan.name}:' in list_result.stdout:
         if not force:
             return f'error: {plan.name!r} is already registered with Claude Code. Use --force to overwrite.'
-        runner([claude, 'mcp', 'remove', plan.name])
+        # The remove step has to succeed before we re-add; if Claude refuses
+        # (permission, state mismatch) we want the underlying error rather
+        # than a confusing "claude mcp add failed" downstream (Codex review #97).
+        remove_result = runner([claude, 'mcp', 'remove', plan.name])
+        if remove_result.returncode != 0:
+            stderr = (remove_result.stderr or '').strip() or '(no stderr)'
+            raise RuntimeError(f'claude mcp remove {plan.name} failed (rc={remove_result.returncode}): {stderr}')
 
     result = runner(cmd)
     if result.returncode != 0:
