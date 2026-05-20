@@ -6,28 +6,20 @@ Multiple AI coding agents (Claude Code, Claude Desktop, Gemini CLI, Codex CLI, C
 
 現状仕様は [docs/Spec.md](./docs/Spec.md) にまとめています。設計判断の背景は [docs/adr/](./docs/adr/) を、検証記録は [docs/poc-reports/](./docs/poc-reports/) を参照してください。
 
-## Quick start (PoC)
+## Quick start (single host, ~5 min)
 
 ```bash
-# 1. two PCs (role names: `home` and `office`)
-# 2. edit config/zenohd_*.json5 to replace 192.168.3.x / 192.168.3.y with real LAN IPs
-# 3. on each PC:
-export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"
-mkdir -p "$ZENOH_BACKEND_ROCKSDB_ROOT"
-zenohd -c config/zenohd_home.json5    # or zenohd_office.json5
+# 1. install (CLI + MCP server land on PATH)
+uv tool install git+https://github.com/h-wata/mesh-mem.git
+# alternatives:
+#   uv tool install --editable .                                            # local checkout
+#   python3 -m venv ~/.venv/mesh-mem && ~/.venv/mesh-mem/bin/pip install -e '.[dev]'
 
-# 4. install the mesh-mem CLI / MCP server (both end up on PATH)
-uv tool install git+https://github.com/h-wata/mesh-mem.git    # end users
-# alternatively from a local checkout:
-# uv tool install --editable .
-# fallback without uv (still works, but you must call by absolute path):
-# python3 -m venv ~/.venv/mesh-mem && ~/.venv/mesh-mem/bin/pip install -e '.[dev]'
+# 2. generate a loopback-only zenohd config under ~/.config/mesh-mem/
+mesh-mem init                          # writes ~/.config/mesh-mem/zenohd.json5
+zenohd -c ~/.config/mesh-mem/zenohd.json5    # leave running in another terminal
 
-# 5. exercise from the CLI
-export MESH_MEM_AGENT_FAMILY=claude
-export MESH_MEM_CLIENT_ID=claude-code
-
-# basic save
+# 3. save / search from the CLI
 mesh-mem save "note content" --project demo --tags a,b
 
 # structured save (memory_type / importance / subject / summary; all optional)
@@ -40,10 +32,36 @@ mesh-mem get-memory <observation_id> # full record (32-char id) — extended fie
 mesh-mem status
 ```
 
+The default `init` writes a single-host config: loopback listen,
+in-memory volume (no rocksdb dependency, no persistence across `zenohd`
+restarts), multicast scouting disabled. To pin identity across runs:
+
+```bash
+export MESH_MEM_AGENT_FAMILY=claude
+export MESH_MEM_CLIENT_ID=claude-code
+```
+
+Going multi-host? See [Multi-host mesh setup](#multi-host-mesh-setup)
+below — same `mesh-mem init`, just `--mode hub` / `--mode spoke` with
+`--listen` and `--connect`.
+
 After restarting zenohd or your host, mesh-mem may briefly return
 fewer results until peer alignment completes (typically 5-10 s, up
 to ~3 min for cold-era data). Use `mesh-mem status` to check
 readiness (`mesh_ready: yes` when alignment is complete).
+
+### `mesh-mem init` flags
+
+| Flag | Purpose |
+|------|---------|
+| `--mode localhost` (default) | loopback + in-memory volume; no rocksdb, no replication |
+| `--mode hub` | LAN-facing router with rocksdb + replication; spokes dial in |
+| `--mode spoke` | rocksdb + replication; dials the hub (requires `--connect`) |
+| `--listen ENDPOINT` | repeatable. Accepts `ip`, `ip:port`, or `tcp/ip:port`. If omitted on hub/spoke, an interactive picker lists detected IFs. |
+| `--connect ENDPOINT` | repeatable. Required for `--mode spoke`. |
+| `--out PATH` | override output path (default: `~/.config/mesh-mem/zenohd.json5`, honors `XDG_CONFIG_HOME`) |
+| `--force` | overwrite an existing file |
+| `--print` | emit to stdout instead of writing a file |
 
 ### CLI startup: `--rebuild` and `MESH_MEM_FORCE_REBUILD`
 
@@ -122,10 +140,6 @@ mesh-mem composes Zenoh keys from a 4-tier identity (`agent_family` / `client_id
 
 ## Multi-host mesh setup
 
-The Quick start above ran two PCs (`home` / `office`) using
-`config/zenohd_home.json5` and `config/zenohd_office.json5`. For 3+ peers,
-use `config/zenohd_peer.json5.template` and replicate it once per host.
-
 The recommended layout is **1 hub + N spokes**: one always-on peer acts as
 the hub and listens on every IP that any spoke can reach (LAN, Tailscale,
 VPN). Each spoke dials only the hub. Zenoh router transit then carries
@@ -137,22 +151,47 @@ Verified empirically with a 3-PC test on 2026-05-10
 ### Steps
 
 1. **Pick the hub.** Choose the always-on peer (typically a desktop /
-   home server). Make sure its `listen.endpoints` cover every network
+   home server). Make sure its `listen` endpoints cover every network
    that any spoke can reach: LAN, Tailscale, VPN — aggregate them now so
    later spokes don't force a hub restart.
-2. **Per-peer config.**
-   - On the hub, copy `config/zenohd_home.json5` (or the template) and
-     keep `connect.endpoints: []`.
-   - On each spoke, copy `config/zenohd_peer.json5.template`, replace
-     `{SELF_IP}` with the spoke's own IP, and `{HUB_IP}` with the hub's
-     reachable IP. Spokes do **not** list each other.
-   The full walkthrough lives at
-   [config/peers/example_5peer.md](config/peers/example_5peer.md).
+2. **Generate per-peer configs with `mesh-mem init`.**
+
+   ```bash
+   # on the hub — listen on loopback + every LAN/VPN IF spokes will reach
+   mesh-mem init --mode hub \
+       --listen 127.0.0.1 \
+       --listen 192.168.3.10 \
+       --listen 100.64.0.5
+
+   # on each spoke — dial the hub
+   mesh-mem init --mode spoke \
+       --listen 127.0.0.1 \
+       --listen 192.168.3.21 \
+       --connect 192.168.3.10
+   ```
+
+   Both modes write to `~/.config/mesh-mem/zenohd.json5` by default and
+   emit a rocksdb + replication block whose digest parameters match
+   byte-for-byte across peers. `mesh-mem init` without `--listen` opens
+   an interactive picker that lists detected interface IPs.
+
+   For 5+ peers or a precise walkthrough with example IPs, see
+   [config/peers/example_5peer.md](config/peers/example_5peer.md). The
+   bundled `config/zenohd_peer.json5.template` is still available for
+   anyone who prefers hand-editing.
 3. **Open the firewall.** TCP/7447 from every spoke to the hub (the hub's
    inbound rule is what matters; spokes typically only need outbound). See
    Firewall section below for `ufw` / `iptables` recipes.
-4. **Start zenohd on each peer.** Hub first is convenient but not
-   required; spokes retry their `connect` until the hub answers.
+4. **Start zenohd on each peer.**
+
+   ```bash
+   export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"
+   mkdir -p "$ZENOH_BACKEND_ROCKSDB_ROOT"
+   zenohd -c ~/.config/mesh-mem/zenohd.json5
+   ```
+
+   Hub first is convenient but not required; spokes retry their
+   `connect` until the hub answers.
 5. **Verify connectivity.**
 
 ```bash
