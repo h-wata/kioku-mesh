@@ -7,13 +7,18 @@ stdout/stderr, and exit codes.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import io
 from pathlib import Path
 
 import pytest
 
+from mesh_mem.__main__ import _dedupe_endpoints
 from mesh_mem.__main__ import _default_init_path
+from mesh_mem.__main__ import _detect_local_ipv4
+from mesh_mem.__main__ import _LOCAL_IPV4_PROBES
 from mesh_mem.__main__ import _normalize_endpoint
+from mesh_mem.__main__ import _prompt_listen_endpoints
 from mesh_mem.__main__ import main as cli_main
 
 
@@ -191,3 +196,194 @@ def test_init_non_interactive_hub_requires_listen(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr('sys.stdin', io.StringIO(''))
     rc = cli_main(['init', '--mode', 'hub', '--out', str(tmp_path / 'hub.json5')])
     assert rc == 2
+
+
+def test_dedupe_endpoints_preserves_order_and_drops_repeats() -> None:
+    assert _dedupe_endpoints(['a', 'b', 'a', 'c', 'b']) == ['a', 'b', 'c']
+    assert _dedupe_endpoints([]) == []
+
+
+def test_init_listen_duplicates_collapsed_in_output(tmp_path: Path) -> None:
+    target = tmp_path / 'localhost.json5'
+    rc = cli_main(
+        [
+            'init',
+            '--listen',
+            '127.0.0.1',
+            '--listen',
+            'tcp/127.0.0.1:7447',
+            '--listen',
+            '127.0.0.1:7447',
+            '--out',
+            str(target),
+        ]
+    )
+    assert rc == 0
+    body = target.read_text()
+    assert body.count('"tcp/127.0.0.1:7447"') == 1
+
+
+def test_init_connect_duplicates_collapsed(tmp_path: Path) -> None:
+    target = tmp_path / 'spoke.json5'
+    rc = cli_main(
+        [
+            'init',
+            '--mode',
+            'spoke',
+            '--listen',
+            '127.0.0.1',
+            '--connect',
+            '192.168.1.1',
+            '--connect',
+            'tcp/192.168.1.1:7447',
+            '--out',
+            str(target),
+        ]
+    )
+    assert rc == 0
+    body = target.read_text()
+    assert body.count('"tcp/192.168.1.1:7447"') == 1
+
+
+class _FakeUDPSocket:
+    """Minimal stand-in for ``socket.socket(AF_INET, SOCK_DGRAM)``.
+
+    Maps destination -> source IP using the ``routes`` map. A destination not
+    in the map raises ``OSError`` to mirror an unreachable network.
+    """
+
+    def __init__(self, routes: dict[str, str]) -> None:
+        self._routes = routes
+        self._src: str | None = None
+
+    def __enter__(self) -> '_FakeUDPSocket':
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def connect(self, addr: tuple[str, int]) -> None:
+        dest = addr[0]
+        if dest not in self._routes:
+            raise OSError('no route')
+        self._src = self._routes[dest]
+
+    def getsockname(self) -> tuple[str, int]:
+        assert self._src is not None
+        return (self._src, 0)
+
+
+def _install_fake_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    routes: dict[str, str],
+    hostname_ips: list[str] | None = None,
+) -> None:
+    """Patch ``socket.socket`` and ``socket.getaddrinfo`` for detection tests."""
+    import socket as real_socket
+
+    def fake_socket(family: int, type_: int) -> _FakeUDPSocket:
+        assert family == real_socket.AF_INET
+        assert type_ == real_socket.SOCK_DGRAM
+        return _FakeUDPSocket(routes)
+
+    monkeypatch.setattr('mesh_mem.__main__.socket.socket', fake_socket)
+    monkeypatch.setattr('mesh_mem.__main__.socket.gethostname', lambda: 'fake-host')
+
+    def fake_getaddrinfo(host: str, *_args: object, **_kw: object) -> list[tuple]:
+        assert host == 'fake-host'
+        return [(real_socket.AF_INET, 0, 0, '', (ip, 0)) for ip in (hostname_ips or [])]
+
+    monkeypatch.setattr('mesh_mem.__main__.socket.getaddrinfo', fake_getaddrinfo)
+
+
+def test_detect_local_ipv4_collects_one_ip_per_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    routes = {
+        '8.8.8.8': '203.0.113.10',
+        '192.168.1.1': '192.168.3.42',
+        '100.64.0.1': '100.64.0.5',
+    }
+    _install_fake_socket(monkeypatch, routes)
+    detected = _detect_local_ipv4()
+    assert detected == ['203.0.113.10', '192.168.3.42', '100.64.0.5']
+
+
+def test_detect_local_ipv4_skips_unreachable_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    routes = {'192.168.1.1': '192.168.3.42'}
+    _install_fake_socket(monkeypatch, routes)
+    assert _detect_local_ipv4() == ['192.168.3.42']
+
+
+def test_detect_local_ipv4_deduplicates_across_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    routes = {'8.8.8.8': '192.168.3.42', '192.168.1.1': '192.168.3.42'}
+    _install_fake_socket(monkeypatch, routes, hostname_ips=['192.168.3.42', '10.5.0.1'])
+    assert _detect_local_ipv4() == ['192.168.3.42', '10.5.0.1']
+
+
+def test_detect_local_ipv4_filters_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    routes = {'8.8.8.8': '127.0.0.1'}
+    _install_fake_socket(monkeypatch, routes, hostname_ips=['127.0.1.1'])
+    assert _detect_local_ipv4() == []
+
+
+def test_detect_local_ipv4_returns_empty_when_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_socket(monkeypatch, routes={}, hostname_ips=[])
+    assert _detect_local_ipv4() == []
+
+
+def test_local_ipv4_probes_cover_internet_lan_and_cgnat() -> None:
+    # Surface the documented coverage so a future trim is intentional, not accidental.
+    assert '8.8.8.8' in _LOCAL_IPV4_PROBES
+    assert any(p.startswith('192.168.') for p in _LOCAL_IPV4_PROBES)
+    assert any(p.startswith('10.') for p in _LOCAL_IPV4_PROBES)
+    assert any(p.startswith('172.') for p in _LOCAL_IPV4_PROBES)
+    assert any(p.startswith('100.64.') for p in _LOCAL_IPV4_PROBES)
+
+
+def _scripted_input(answers: list[str]) -> Callable[[str], str]:
+    """Build a fake ``input()`` that returns answers in order."""
+    queue = iter(answers)
+
+    def _input(_prompt: str = '') -> str:
+        try:
+            return next(queue)
+        except StopIteration as e:
+            raise AssertionError('input() called more times than answers provided') from e
+
+    return _input
+
+
+def test_prompt_listen_endpoints_dedupes_repeated_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pick option 1 (loopback) twice and option 2 (first detected) once.
+    monkeypatch.setattr('builtins.input', _scripted_input(['1,1,2']))
+    picks = _prompt_listen_endpoints(['192.168.3.42'])
+    assert picks == ['tcp/127.0.0.1:7447', 'tcp/192.168.3.42:7447']
+
+
+def test_prompt_listen_endpoints_dedupes_custom_matching_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pick loopback then "custom" with the same endpoint typed.
+    detected = ['192.168.3.42']
+    last_option = 4  # 1=loopback, 2=detected, 3=0.0.0.0, 4=custom
+    monkeypatch.setattr(
+        'builtins.input',
+        _scripted_input([f'1,{last_option}', '127.0.0.1:7447']),
+    )
+    picks = _prompt_listen_endpoints(detected)
+    assert picks == ['tcp/127.0.0.1:7447']
+
+
+def test_prompt_listen_endpoints_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('builtins.input', _scripted_input(['99']))
+    with pytest.raises(ValueError, match='out of range'):
+        _prompt_listen_endpoints([])
+
+
+def test_prompt_listen_endpoints_rejects_non_integer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('builtins.input', _scripted_input(['oops']))
+    with pytest.raises(ValueError, match='invalid selection'):
+        _prompt_listen_endpoints([])
+
+
+def test_prompt_listen_endpoints_rejects_empty_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('builtins.input', _scripted_input(['']))
+    with pytest.raises(ValueError, match='no selection made'):
+        _prompt_listen_endpoints([])
