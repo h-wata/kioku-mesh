@@ -8,6 +8,10 @@ import pathlib
 import pytest
 
 from mesh_mem import identity
+from mesh_mem.identity import _sanitize_key_segment
+from mesh_mem.identity import IdentitySource
+from mesh_mem.identity import resolve_agent_family
+from mesh_mem.identity import resolve_client_id
 
 
 def test_session_id_is_cached_across_calls() -> None:
@@ -171,3 +175,94 @@ def test_state_dir_windows_uses_platformdirs(
     assert result == fake_dir
     assert fake_dir.exists()
     assert captured == {'appname': 'mesh-mem', 'appauthor': False}
+
+
+# -- agent_family / client_id defaults & provenance (#82) -----------------------
+
+
+def test_agent_family_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('MESH_MEM_AGENT_FAMILY', 'claude')
+    value, source = resolve_agent_family()
+    assert value == 'claude'
+    assert source is IdentitySource.ENV
+
+
+def test_agent_family_default_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('MESH_MEM_AGENT_FAMILY', raising=False)
+    value, source = resolve_agent_family()
+    assert value == 'unknown'
+    assert source is IdentitySource.DEFAULT
+
+
+def test_agent_family_treats_empty_env_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty MESH_MEM_AGENT_FAMILY falls through to the default rather than producing an empty key segment."""
+    monkeypatch.setenv('MESH_MEM_AGENT_FAMILY', '   ')
+    value, source = resolve_agent_family()
+    assert value == 'unknown'
+    assert source is IdentitySource.DEFAULT
+
+
+def test_client_id_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('MESH_MEM_CLIENT_ID', 'claude-code')
+    value, source = resolve_client_id()
+    assert value == 'claude-code'
+    assert source is IdentitySource.ENV
+
+
+def test_client_id_default_is_user_at_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Env-unset default is ``<user>@<host_short>`` (searchable, complements pc_id)."""
+    monkeypatch.delenv('MESH_MEM_CLIENT_ID', raising=False)
+    monkeypatch.setenv('USER', 'alice')
+    monkeypatch.setattr('mesh_mem.identity.socket.gethostname', lambda: 'mbp-laptop.local')
+    value, source = resolve_client_id()
+    assert value == 'alice@mbp-laptop'
+    assert source is IdentitySource.DEFAULT
+
+
+def test_client_id_default_falls_back_when_user_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Container without USER / LOGNAME / USERNAME and a stub getpass still yields a usable default."""
+    monkeypatch.delenv('MESH_MEM_CLIENT_ID', raising=False)
+    monkeypatch.delenv('USER', raising=False)
+    monkeypatch.delenv('LOGNAME', raising=False)
+    monkeypatch.delenv('USERNAME', raising=False)
+
+    def _raise() -> str:
+        raise KeyError('no user')
+
+    monkeypatch.setattr('mesh_mem.identity.getpass.getuser', _raise)
+    monkeypatch.setattr('mesh_mem.identity.socket.gethostname', lambda: '')
+    value, source = resolve_client_id()
+    assert value == 'user@host'
+    assert source is IdentitySource.DEFAULT
+
+
+def test_client_id_default_sanitizes_zenoh_unsafe_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hostname containing Zenoh-reserved characters must not corrupt the key namespace."""
+    monkeypatch.delenv('MESH_MEM_CLIENT_ID', raising=False)
+    monkeypatch.setenv('USER', 'al/ice')  # pathological path separator
+    monkeypatch.setattr('mesh_mem.identity.socket.gethostname', lambda: 'host*name?.local')
+    value, source = resolve_client_id()
+    assert '/' not in value
+    assert '*' not in value
+    assert '?' not in value
+    assert source is IdentitySource.DEFAULT
+
+
+@pytest.mark.parametrize(
+    ('raw', 'expected'),
+    [
+        ('alice', 'alice'),
+        ('  alice  ', 'alice'),
+        ('al/ice', 'al-ice'),
+        ('al*ice', 'al-ice'),
+        ('al?ice', 'al-ice'),
+        ('al$ice', 'al-ice'),
+        ('al#ice', 'al-ice'),
+        ('al\nice', 'al-ice'),
+        ('/', '-'),  # single-char input sanitizes to '-'; only empty results trigger fallback
+        ('', 'fb'),
+        ('   ', 'fb'),
+    ],
+)
+def test_sanitize_key_segment(raw: str, expected: str) -> None:
+    assert _sanitize_key_segment(raw, 'fb') == expected
