@@ -6,6 +6,84 @@ Multiple AI coding agents (Claude Code, Claude Desktop, Gemini CLI, Codex CLI, C
 
 現状仕様は [docs/Spec.md](./docs/Spec.md) にまとめています。設計判断の背景は [docs/adr/](./docs/adr/) を、検証記録は [docs/poc-reports/](./docs/poc-reports/) を参照してください。
 
+## Install zenohd
+
+mesh-mem stores observations in a Zenoh router (`zenohd`) with the
+RocksDB storage backend. Both must be on `PATH` before running
+`mesh-mem init` and the Quick start below. Target version is Zenoh
+**1.9.0** (see [Requirements](#requirements) — older `zenohd` 1.5 builds
+are reachable but lack first-class rocksdb replication).
+
+### apt (Debian / Ubuntu — recommended)
+
+Eclipse publishes signed `.deb` packages at
+`https://download.eclipse.org/zenoh/debian-repo/`. Add the key + source,
+then install `zenoh` (ships `zenohd`) and `zenoh-backend-rocksdb`
+(ships `libzenoh_backend_rocksdb.so`):
+
+```bash
+sudo install -d /etc/apt/keyrings
+curl -L https://download.eclipse.org/zenoh/debian-repo/zenoh-public-key \
+  | sudo gpg --dearmor --yes --output /etc/apt/keyrings/zenoh-public-key.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/zenoh-public-key.gpg] https://download.eclipse.org/zenoh/debian-repo/ /' \
+  | sudo tee /etc/apt/sources.list.d/eclipse-zenoh.list > /dev/null
+sudo apt update
+sudo apt install zenoh zenoh-backend-rocksdb
+```
+
+The `apt` install drops `zenohd` into `/usr/bin/` and the backend
+plugin into the system library path, so zenohd discovers it
+automatically — no `LD_LIBRARY_PATH` tweaking needed.
+
+### Prebuilt standalone zip (any Linux / macOS / Windows)
+
+For hosts that cannot use the Debian repo (corporate Linux without
+sudo, macOS, Windows), grab the matching version of both archives from
+the [Eclipse Zenoh releases page](https://github.com/eclipse-zenoh/zenoh/releases)
+and extract them into the same directory:
+
+- `zenoh-1.9.0-<target>-standalone.zip` — contains `zenohd`
+- `zenoh-backend-rocksdb-1.9.0-<target>-standalone.zip` — contains the backend library
+
+`<target>` is e.g. `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
+or `x86_64-pc-windows-msvc`. Add the extraction directory to `PATH` so
+`zenohd` is launchable, and keep the backend library next to it (or in
+`~/.zenoh/lib/` / `/usr/lib/`) so zenohd's plugin loader finds it. The
+Windows walkthrough in [docs/windows-setup.md](docs/windows-setup.md)
+documents this layout end-to-end.
+
+### Build from source (cargo, last resort)
+
+```bash
+cargo install --locked --git https://github.com/eclipse-zenoh/zenoh --tag 1.9.0 zenohd
+cargo install --locked --git https://github.com/eclipse-zenoh/zenoh-backend-rocksdb --tag 1.9.0
+```
+
+The rocksdb backend must be **compiled with the same Rust toolchain
+as `zenohd` itself** — mixing toolchains can SIGSEV at plugin load
+(per upstream
+[zenoh-backend-rocksdb README](https://github.com/eclipse-zenoh/zenoh-backend-rocksdb#how-to-install-it)).
+On Linux, apt is strictly easier; reach for cargo only when no
+prebuilt asset fits your target.
+
+### Verify
+
+```bash
+zenohd --version
+# expected: zenohd v1.9.0 ...
+
+# In another terminal, with the loopback config from `mesh-mem init`:
+zenohd -c ~/.config/mesh-mem/zenohd.json5
+# look for a log line resembling:
+#   Successfully loaded backend "rocksdb" ...
+# or, with `mesh-mem init --mode hub` / `--mode spoke`:
+#   Storage 'mem' loaded ... using backend 'rocksdb'
+```
+
+If the rocksdb log line is missing, the backend library is not on the
+plugin search path — re-check the apt / zip / cargo install above
+before running `mesh-mem init`.
+
 ## Quick start (single host, ~5 min)
 
 ```bash
@@ -247,7 +325,7 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 ## Requirements
 
 - Python >= 3.10
-- Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). Older `zenohd` 1.5 builds will talk to a 1.9 client but do not ship rocksdb replication as first-class; stick to 1.9 on real hosts.
+- Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). Older `zenohd` 1.5 builds will talk to a 1.9 client but do not ship rocksdb replication as first-class; stick to 1.9 on real hosts. See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
 - `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
 - NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
 
