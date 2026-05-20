@@ -15,10 +15,12 @@ import pytest
 
 from mesh_mem.__main__ import _dedupe_endpoints
 from mesh_mem.__main__ import _default_init_path
+from mesh_mem.__main__ import _default_systemd_user_unit_path
 from mesh_mem.__main__ import _detect_local_ipv4
 from mesh_mem.__main__ import _LOCAL_IPV4_PROBES
 from mesh_mem.__main__ import _normalize_endpoint
 from mesh_mem.__main__ import _prompt_listen_endpoints
+from mesh_mem.__main__ import _render_systemd_unit
 from mesh_mem.__main__ import main as cli_main
 
 
@@ -387,3 +389,130 @@ def test_prompt_listen_endpoints_rejects_empty_input(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr('builtins.input', _scripted_input(['']))
     with pytest.raises(ValueError, match='no selection made'):
         _prompt_listen_endpoints([])
+
+
+# -- --install-systemd (#86) ----------------------------------------------------
+
+
+@pytest.fixture
+def force_systemd_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend the host has systemctl + Linux platform regardless of the runner."""
+    monkeypatch.setattr('sys.platform', 'linux')
+    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+
+
+@pytest.fixture
+def systemd_unit_under(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect both XDG_CONFIG_HOME branches into the test sandbox."""
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    return tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service'
+
+
+def test_default_systemd_unit_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'custom'))
+    assert _default_systemd_user_unit_path() == tmp_path / 'custom' / 'systemd' / 'user' / 'mesh-mem-zenohd.service'
+
+
+def test_render_systemd_unit_bakes_absolute_paths() -> None:
+    body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd')
+    assert '[Unit]' in body
+    assert 'Description=mesh-mem zenohd router' in body
+    assert 'ExecStart=/opt/zenoh/bin/zenohd -c /x/y/zenohd.json5' in body
+    assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem' in body
+    assert 'WantedBy=default.target' in body
+
+
+def test_init_install_systemd_writes_unit(
+    force_systemd_supported: None,
+    systemd_unit_under: Path,
+    xdg_config: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 0
+    assert xdg_config.is_file()
+    assert systemd_unit_under.is_file()
+    body = systemd_unit_under.read_text()
+    assert f'ExecStart=/usr/bin/zenohd -c {xdg_config}' in body
+    out = capsys.readouterr().out
+    assert 'systemctl --user enable --now mesh-mem-zenohd' in out
+
+
+def test_init_install_systemd_refuses_overwrite_without_force(
+    force_systemd_supported: None,
+    systemd_unit_under: Path,
+    xdg_config: Path,
+) -> None:
+    assert cli_main(['init', '--install-systemd']) == 0
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 1
+
+
+def test_init_install_systemd_force_overwrites(
+    force_systemd_supported: None,
+    systemd_unit_under: Path,
+    xdg_config: Path,
+) -> None:
+    assert cli_main(['init', '--install-systemd']) == 0
+    rc = cli_main(['init', '--install-systemd', '--force', '--listen', '127.0.0.1:7448'])
+    assert rc == 0
+    assert 'tcp/127.0.0.1:7448' in xdg_config.read_text()
+    # Unit body should reference the (unchanged) config path; --force makes the rewrite legal.
+    assert systemd_unit_under.is_file()
+
+
+def test_init_install_systemd_print_emits_both_bodies(
+    force_systemd_supported: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    rc = cli_main(['init', '--install-systemd', '--print'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'mode: "router"' in out  # zenohd config
+    assert '[Unit]' in out
+    assert 'ExecStart=/usr/bin/zenohd -c' in out
+    # No file should have been written under --print.
+    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
+
+
+def test_init_install_systemd_falls_back_when_zenohd_missing(
+    systemd_unit_under: Path,
+    xdg_config: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing zenohd binary should warn and use the documented fallback path, not abort."""
+    monkeypatch.setattr('sys.platform', 'linux')
+
+    def fake_which(name: str) -> str | None:
+        return '/usr/bin/systemctl' if name == 'systemctl' else None
+
+    monkeypatch.setattr('mesh_mem.__main__.shutil.which', fake_which)
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 0
+    assert 'ExecStart=/usr/bin/zenohd' in systemd_unit_under.read_text()
+    err = capsys.readouterr().err
+    assert 'zenohd not on PATH' in err
+
+
+def test_init_install_systemd_rejects_macos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr('sys.platform', 'darwin')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 2
+    # Neither file should be written when the platform check trips.
+    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
+
+
+def test_init_install_systemd_rejects_missing_systemctl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr('sys.platform', 'linux')
+    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda _name: None)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 2
+    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
