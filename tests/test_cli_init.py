@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import io
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -396,9 +397,18 @@ def test_prompt_listen_endpoints_rejects_empty_input(monkeypatch: pytest.MonkeyP
 
 @pytest.fixture
 def force_systemd_supported(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pretend the host has systemctl + Linux platform regardless of the runner."""
+    """Pretend the host has systemctl + Linux platform + reachable user manager.
+
+    Faking ``_default_systemctl_probe`` to return rc=0 ensures the two-stage
+    detection in ``_detect_systemd_user`` (introduced by the Codex review of
+    #95) sees a healthy user manager during tests.
+    """
     monkeypatch.setattr('sys.platform', 'linux')
     monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+    monkeypatch.setattr(
+        'mesh_mem.__main__._default_systemctl_probe',
+        lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
+    )
 
 
 @pytest.fixture
@@ -417,9 +427,27 @@ def test_render_systemd_unit_bakes_absolute_paths() -> None:
     body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd')
     assert '[Unit]' in body
     assert 'Description=mesh-mem zenohd router' in body
-    assert 'ExecStart=/opt/zenoh/bin/zenohd -c /x/y/zenohd.json5' in body
+    # Paths are double-quoted so systemd's unquoted-whitespace splitter doesn't
+    # break ExecStart when the path contains spaces (Codex review on #95).
+    assert 'ExecStart="/opt/zenoh/bin/zenohd" -c "/x/y/zenohd.json5"' in body
     assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem' in body
     assert 'WantedBy=default.target' in body
+
+
+def test_render_systemd_unit_quotes_paths_with_whitespace() -> None:
+    """Paths containing spaces / backslashes / quotes must survive systemd's splitter."""
+    body = _render_systemd_unit(
+        Path('/home/u/My Configs/zenohd.json5'),
+        '/opt/zen oh/bin/zenohd',
+    )
+    assert 'ExecStart="/opt/zen oh/bin/zenohd" -c "/home/u/My Configs/zenohd.json5"' in body
+
+
+def test_render_systemd_unit_escapes_backslashes_and_quotes() -> None:
+    body = _render_systemd_unit(Path('/p/has"quote/zenohd.json5'), '/p/has\\back/zenohd')
+    # Backslashes and double-quotes inside the value are backslash-escaped
+    # per systemd's POSIX-shell-like quoting rules.
+    assert 'ExecStart="/p/has\\\\back/zenohd" -c "/p/has\\"quote/zenohd.json5"' in body
 
 
 def test_init_install_systemd_writes_unit(
@@ -433,7 +461,7 @@ def test_init_install_systemd_writes_unit(
     assert xdg_config.is_file()
     assert systemd_unit_under.is_file()
     body = systemd_unit_under.read_text()
-    assert f'ExecStart=/usr/bin/zenohd -c {xdg_config}' in body
+    assert f'ExecStart="/usr/bin/zenohd" -c "{xdg_config}"' in body
     out = capsys.readouterr().out
     assert 'systemctl --user enable --now mesh-mem-zenohd' in out
 
@@ -473,7 +501,7 @@ def test_init_install_systemd_print_emits_both_bodies(
     out = capsys.readouterr().out
     assert 'mode: "router"' in out  # zenohd config
     assert '[Unit]' in out
-    assert 'ExecStart=/usr/bin/zenohd -c' in out
+    assert 'ExecStart="/usr/bin/zenohd" -c' in out
     # No file should have been written under --print.
     assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
     assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
@@ -492,9 +520,14 @@ def test_init_install_systemd_falls_back_when_zenohd_missing(
         return '/usr/bin/systemctl' if name == 'systemctl' else None
 
     monkeypatch.setattr('mesh_mem.__main__.shutil.which', fake_which)
+    # Probe success: even with zenohd missing, systemd-user itself is reachable.
+    monkeypatch.setattr(
+        'mesh_mem.__main__._default_systemctl_probe',
+        lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
+    )
     rc = cli_main(['init', '--install-systemd'])
     assert rc == 0
-    assert 'ExecStart=/usr/bin/zenohd' in systemd_unit_under.read_text()
+    assert 'ExecStart="/usr/bin/zenohd"' in systemd_unit_under.read_text()
     err = capsys.readouterr().err
     assert 'zenohd not on PATH' in err
 
@@ -516,3 +549,71 @@ def test_init_install_systemd_rejects_missing_systemctl(monkeypatch: pytest.Monk
     rc = cli_main(['init', '--install-systemd'])
     assert rc == 2
     assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
+
+
+def test_init_install_systemd_rejects_unreachable_user_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Handle the case where systemctl exists but the user manager is unreachable (WSL / non-systemd container)."""
+    monkeypatch.setattr('sys.platform', 'linux')
+    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+    monkeypatch.setattr(
+        'mesh_mem.__main__._default_systemctl_probe',
+        lambda _argv: subprocess.CompletedProcess([], 1, stdout='', stderr='Failed to connect to user bus'),
+    )
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert 'systemctl --user show-environment failed' in err
+    # Neither file should be written when the probe trips — Codex review on #95.
+    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
+
+
+def test_init_install_systemd_rejects_probe_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A subprocess timeout (hanging user manager) must surface as a clean refusal."""
+    monkeypatch.setattr('sys.platform', 'linux')
+    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+
+    def _timeout(_argv: list[str]) -> 'subprocess.CompletedProcess[str]':
+        raise subprocess.TimeoutExpired(cmd=_argv, timeout=2.0)
+
+    monkeypatch.setattr('mesh_mem.__main__._default_systemctl_probe', _timeout)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert 'systemctl --user probe failed' in err
+
+
+def test_init_install_systemd_unit_survives_whitespace_config_path(
+    force_systemd_supported: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End-to-end: `--out` with whitespace must produce a unit that systemd can parse."""
+    target_dir = tmp_path / 'My Configs'
+    target_dir.mkdir()
+    config_path = target_dir / 'zenohd.json5'
+    unit_path = tmp_path / 'unit.service'
+    rc = cli_main(
+        [
+            'init',
+            '--install-systemd',
+            '--out',
+            str(config_path),
+            '--print',
+        ]
+    )
+    assert rc == 0
+    body = capsys.readouterr().out
+    assert f'ExecStart="/usr/bin/zenohd" -c "{config_path}"' in body
+    # Sanity: the quoted path is not split by whitespace in the unit body.
+    # systemd would parse this as ONE argument to -c.
+    assert 'My Configs/zenohd.json5"' in body
+    # The file is not written under --print, so the path itself doesn't need
+    # to exist. The point is that the unit body quotes the whitespace path.
+    _ = unit_path
