@@ -125,6 +125,7 @@ readiness (`mesh_ready: yes` when alignment is complete).
 | `--out PATH` | override output path (default: `~/.config/mesh-mem/zenohd.json5`, honors `XDG_CONFIG_HOME`) |
 | `--force` | overwrite an existing file |
 | `--print` | emit to stdout instead of writing a file |
+| `--install-systemd` | also write a user-scope systemd unit at `~/.config/systemd/user/mesh-mem-zenohd.service` so `zenohd` starts on login. Linux only — macOS / Windows / non-systemd hosts get a clear error. |
 
 ### Diagnosing setup with `mesh-mem doctor`
 
@@ -392,7 +393,18 @@ Register the `mesh-mem-mcp` console script in each agent's MCP config. Use the *
 
 ## systemd unit (zenohd)
 
-Drop the following at `~/.config/systemd/user/mesh-mem-zenohd.service` and enable with `systemctl --user enable --now mesh-mem-zenohd`. **Replace `/ABSOLUTE/PATH/TO/mesh-mem` with the actual checkout path on the host** — the unit has no way to discover where you cloned the repo.
+Easiest path is `mesh-mem init --install-systemd` (#86), which writes both
+`~/.config/mesh-mem/zenohd.json5` AND
+`~/.config/systemd/user/mesh-mem-zenohd.service` in one step, with the
+absolute `zenohd` path baked in. Enable with `systemctl --user daemon-reload &&
+systemctl --user enable --now mesh-mem-zenohd`.
+
+The manual template below is still documented for operators who want
+custom paths or system-scope (`/etc/systemd/system/`). Drop it at
+`~/.config/systemd/user/mesh-mem-zenohd.service` and enable with the same
+command. **Replace `/ABSOLUTE/PATH/TO/mesh-mem` with the actual checkout
+path on the host** — the unit has no way to discover where you cloned the
+repo.
 
 ```ini
 [Unit]
