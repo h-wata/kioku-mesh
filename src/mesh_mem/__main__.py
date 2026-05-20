@@ -26,6 +26,9 @@ from . import __version__
 from . import doctor as doctor_module
 from .identity import get_pc_id
 from .identity import get_session_id
+from .identity import IdentitySource
+from .identity import resolve_agent_family
+from .identity import resolve_client_id
 from .local_index import LocalIndex
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
@@ -374,6 +377,15 @@ def _cmd_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_identity_source(source: IdentitySource, env_var: str) -> str:
+    """Format the provenance suffix shown after an identity value in `status`."""
+    if source is IdentitySource.ENV:
+        return f'(from {env_var})'
+    if source is IdentitySource.DETECTED:
+        return '(auto-detected)'
+    return f'(default — set {env_var} to override)'
+
+
 def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     try:
         recent = search_observations(limit=MAX_SEARCH)
@@ -387,9 +399,13 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
         by_family[obs.agent_family] = by_family.get(obs.agent_family, 0) + 1
         by_pc[obs.pc_id] = by_pc.get(obs.pc_id, 0) + 1
     truncated = len(recent) >= MAX_SEARCH
+    af_value, af_source = resolve_agent_family()
+    cid_value, cid_source = resolve_client_id()
     print(f'mesh-mem version: {__version__}')
     print(f'pc_id: {get_pc_id()}')
     print(f'session_id: {get_session_id()}')
+    print(f'agent_family: {af_value} {_format_identity_source(af_source, "MESH_MEM_AGENT_FAMILY")}')
+    print(f'client_id: {cid_value} {_format_identity_source(cid_source, "MESH_MEM_CLIENT_ID")}')
     print(f'zenoh_session: {transport.zenoh_session}')
     print(f'last_put_at_iso: {transport.last_put_at_iso or "-"}')
     print(f'last_put_status: {transport.last_put_status}')

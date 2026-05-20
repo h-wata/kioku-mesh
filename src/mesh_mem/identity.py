@@ -21,13 +21,74 @@ Filesystem requirement:
 
 from datetime import datetime
 from datetime import timezone
+from enum import Enum
+import getpass
 import os
 import pathlib
+import socket
 import sys
 import uuid
 
 _pc_id_cache: str | None = None
 _session_id_cache: str | None = None
+
+
+class IdentitySource(str, Enum):
+    """Where an identity value came from. Used for `mesh-mem status` display."""
+
+    ENV = 'env'
+    # Reserved for future launcher detection (Claude Code / Gemini CLI env
+    # markers). Not produced in v0.3 — leaving the enum value lets `status`
+    # output and tests stabilize their shape before detection is wired in.
+    DETECTED = 'detected'
+    DEFAULT = 'default'
+
+
+# Characters that would corrupt the Zenoh key expression
+# (mem/obs/{agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}).
+# Identity segments are user-controlled (env or default-derived from hostname)
+# so sanitize before letting them into the key namespace.
+_ZENOH_UNSAFE_CHARS = ('/', '*', '?', '$', '#', '\n', '\r', '\t')
+
+
+def _sanitize_key_segment(value: str, fallback: str) -> str:
+    """Make ``value`` safe to use as a single Zenoh key segment.
+
+    Strips whitespace and replaces characters that would break key parsing or
+    open wildcard interpretation. Returns ``fallback`` when sanitization
+    leaves an empty string (e.g. a hostname that was just dots).
+    """
+    cleaned = value.strip()
+    for ch in _ZENOH_UNSAFE_CHARS:
+        cleaned = cleaned.replace(ch, '-')
+    return cleaned or fallback
+
+
+def _default_user_name() -> str:
+    """Best-effort current user name across Linux / macOS / Windows / containers."""
+    candidates = (
+        lambda: os.environ.get('USER'),
+        lambda: os.environ.get('LOGNAME'),
+        lambda: os.environ.get('USERNAME'),  # Windows
+        getpass.getuser,  # may raise KeyError in minimal containers
+    )
+    for getter in candidates:
+        try:
+            v = getter()
+        except Exception:  # noqa: BLE001 — every fallback below this is safe
+            continue
+        if v:
+            return v
+    return 'user'
+
+
+def _default_short_hostname() -> str:
+    """First label of the FQDN, safe-default ``host`` if resolution fails."""
+    try:
+        h = socket.gethostname()
+    except Exception:  # noqa: BLE001
+        h = ''
+    return h.split('.', 1)[0] or 'host'
 
 
 def state_dir() -> pathlib.Path:
@@ -133,14 +194,46 @@ def _read_pc_id_file(p: pathlib.Path) -> str | None:
     return value or None
 
 
+def resolve_agent_family() -> tuple[str, IdentitySource]:
+    """Resolve agent_family and where it came from.
+
+    v0.3 keeps ``agent_family`` as ``'unknown'`` when env-unset (#82). It's
+    the aggregation axis used by ``search --agent-family``, so the cost of
+    misclassifying observations (e.g. labeling everything ``claude``
+    because ``CLAUDECODE=1`` happens to leak into a non-Claude session) is
+    higher than the cost of an uninformative default. Launcher detection
+    is a follow-up that will produce :attr:`IdentitySource.DETECTED`.
+    """
+    v = os.environ.get('MESH_MEM_AGENT_FAMILY', '').strip()
+    if v:
+        return v, IdentitySource.ENV
+    return 'unknown', IdentitySource.DEFAULT
+
+
+def resolve_client_id() -> tuple[str, IdentitySource]:
+    """Resolve client_id and where it came from.
+
+    Default is ``<user>@<host_short>`` — searchable by humans
+    (``--client-id alice@mbp``) and complementary to ``pc_id`` which already
+    plays the opaque-UUID role. Falls back to safe placeholders when user
+    or hostname can't be resolved (e.g. in minimal containers).
+    """
+    v = os.environ.get('MESH_MEM_CLIENT_ID', '').strip()
+    if v:
+        return v, IdentitySource.ENV
+    user = _sanitize_key_segment(_default_user_name(), 'user')
+    host = _sanitize_key_segment(_default_short_hostname(), 'host')
+    return f'{user}@{host}', IdentitySource.DEFAULT
+
+
 def get_agent_family() -> str:
-    """Return the agent family (claude / gemini / codex / chatgpt) from env."""
-    return os.environ.get('MESH_MEM_AGENT_FAMILY', 'unknown')
+    """Return the agent family (claude / gemini / codex / chatgpt). See :func:`resolve_agent_family`."""
+    return resolve_agent_family()[0]
 
 
 def get_client_id() -> str:
-    """Return the client id (e.g. ``claude-code``, ``gemini-cli``) from env."""
-    return os.environ.get('MESH_MEM_CLIENT_ID', 'unknown')
+    """Return the client id (e.g. ``claude-code``, ``alice@mbp``). See :func:`resolve_client_id`."""
+    return resolve_client_id()[0]
 
 
 def get_session_id() -> str:
