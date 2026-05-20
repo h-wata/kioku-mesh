@@ -579,27 +579,49 @@ def _default_init_path() -> Path:
     return Path(base) / 'mesh-mem' / 'zenohd.json5'
 
 
+# Probe destinations span: public internet (default route), the three RFC1918
+# blocks (LAN), and the CGNAT 100.64/10 range (Tailscale and similar overlay
+# networks). UDP connect() resolves the kernel's preferred source IP for each
+# destination without sending a packet — so a host with eth0/wlan0/tailscale0
+# gets one source IP per probe hit. Offline hosts return [], and the
+# interactive picker still offers 127.0.0.1 + 0.0.0.0 + custom.
+_LOCAL_IPV4_PROBES: tuple[str, ...] = (
+    '8.8.8.8',
+    '192.168.1.1',
+    '10.0.0.1',
+    '172.16.0.1',
+    '100.64.0.1',
+)
+
+
 def _detect_local_ipv4() -> list[str]:
-    """Return non-loopback IPv4 addresses on this host (best-effort, stdlib-only)."""
+    """Return non-loopback IPv4 addresses on this host (best-effort, stdlib-only).
+
+    Limitation: each probe yields the source IP for ONE route. Hosts with two
+    interfaces in the same subnet (rare) only surface one of them — users can
+    fall back to ``custom`` in the picker or pass ``--listen`` explicitly.
+    """
     found: list[str] = []
-    # Kernel-preferred outbound source for any internet-bound route. No packet is
-    # sent — connect() on a UDP socket just resolves routing.
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        if not ip.startswith('127.'):
-            found.append(ip)
-    except OSError:
-        pass
-    # Other IPv4s via hostname resolution — picks up tunnel / VPN interfaces
-    # that aren't on the default route.
+
+    def _add(ip: str) -> None:
+        if ip.startswith('127.') or ip in found:
+            return
+        found.append(ip)
+
+    for dest in _LOCAL_IPV4_PROBES:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((dest, 80))
+                _add(s.getsockname()[0])
+        except OSError:
+            continue
+    # Hostname resolution catches VPN / tunnel interfaces that don't match any
+    # probe subnet (e.g. site-to-site IPSec on a custom prefix).
     try:
         for entry in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
             ip = entry[4][0]
-            if not isinstance(ip, str) or ip.startswith('127.') or ip in found:
-                continue
-            found.append(ip)
+            if isinstance(ip, str):
+                _add(ip)
     except (socket.gaierror, OSError):
         pass
     return found
@@ -617,8 +639,25 @@ def _normalize_endpoint(spec: str, default_port: int = _DEFAULT_ZENOH_PORT) -> s
     return f'tcp/{spec}'
 
 
+def _dedupe_endpoints(endpoints: list[str]) -> list[str]:
+    """Drop duplicate endpoints while preserving the user's ordering.
+
+    zenohd refuses to start if ``listen.endpoints`` binds the same socket twice
+    (and the error surfaces well after init). Catch it here so the generated
+    config is always startable.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for ep in endpoints:
+        if ep in seen:
+            continue
+        seen.add(ep)
+        result.append(ep)
+    return result
+
+
 def _prompt_listen_endpoints(detected: list[str]) -> list[str]:
-    """Interactive listen-endpoint picker. Returns normalized ``tcp/...`` strings."""
+    """Interactive listen-endpoint picker. Returns normalized, deduplicated ``tcp/...`` strings."""
     options: list[tuple[str, str]] = [('127.0.0.1', 'loopback only — single-host testing')]
     for ip in detected:
         options.append((ip, 'detected interface'))
@@ -647,6 +686,7 @@ def _prompt_listen_endpoints(detected: list[str]) -> list[str]:
             if not ip:
                 raise ValueError('custom endpoint must not be empty')
         picks.append(_normalize_endpoint(ip))
+    picks = _dedupe_endpoints(picks)
     if not picks:
         raise ValueError('no listen endpoint selected')
     return picks
@@ -760,7 +800,7 @@ def _render_mesh_config(mode: str, listen_endpoints: list[str], connect_endpoint
 def _resolve_listen_endpoints(args: argparse.Namespace, detected: list[str]) -> list[str]:
     """Resolve listen endpoints from flags / interactive picker / mode default."""
     if args.listen:
-        return [_normalize_endpoint(spec) for spec in args.listen]
+        return _dedupe_endpoints([_normalize_endpoint(spec) for spec in args.listen])
     if args.mode == 'localhost':
         return [_normalize_endpoint('127.0.0.1')]
     if sys.stdin.isatty():
@@ -776,7 +816,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f'error: {e}', file=sys.stderr)
         return 2
 
-    connect = [_normalize_endpoint(spec) for spec in (args.connect or [])]
+    connect = _dedupe_endpoints([_normalize_endpoint(spec) for spec in (args.connect or [])])
     if args.mode == 'spoke' and not connect:
         print('error: --connect required for --mode spoke (the hub endpoint to dial).', file=sys.stderr)
         return 2
