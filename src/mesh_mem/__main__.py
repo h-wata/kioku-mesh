@@ -23,6 +23,7 @@ except ImportError:  # argcomplete is an optional extra (`pip install mesh-mem[c
     argcomplete = None  # type: ignore[assignment]
 
 from . import __version__
+from . import doctor as doctor_module
 from .identity import get_pc_id
 from .identity import get_session_id
 from .local_index import LocalIndex
@@ -808,6 +809,16 @@ def _resolve_listen_endpoints(args: argparse.Namespace, detected: list[str]) -> 
     raise ValueError(f'--listen required for --mode {args.mode} in non-interactive use')
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Run diagnostic checks and report PASS / WARN / FAIL with hints."""
+    results = doctor_module.run_all_checks()
+    if args.json:
+        print(doctor_module.to_json(results))
+    else:
+        print(doctor_module.format_text(results))
+    return doctor_module.exit_code_for(doctor_module.worst_status(results))
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     detected = _detect_local_ipv4()
     try:
@@ -1059,6 +1070,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help='write to stdout instead of file',
     )
     p_init.set_defaults(func=_cmd_init)
+
+    p_doctor = sub.add_parser(
+        'doctor',
+        help='Run diagnostic checks (zenohd reachable, config present, state dir healthy)',
+    )
+    p_doctor.add_argument(
+        '--json',
+        action='store_true',
+        help='emit machine-readable JSON instead of human-readable text',
+    )
+    p_doctor.set_defaults(func=_cmd_doctor)
 
     return parser
 
