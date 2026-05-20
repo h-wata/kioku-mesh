@@ -24,12 +24,14 @@ except ImportError:  # argcomplete is an optional extra (`pip install mesh-mem[c
 
 from . import __version__
 from . import doctor as doctor_module
+from . import mcp_install as mcp_install_module
 from .identity import get_pc_id
 from .identity import get_session_id
 from .identity import IdentitySource
 from .identity import resolve_agent_family
 from .identity import resolve_client_id
 from .local_index import LocalIndex
+from .mcp_install import MCPClient
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import _reset_session
@@ -835,6 +837,44 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return doctor_module.exit_code_for(doctor_module.worst_status(results))
 
 
+def _cmd_mcp_install(args: argparse.Namespace) -> int:
+    """Register ``mesh-mem-mcp`` with the chosen MCP client."""
+    try:
+        client = MCPClient(args.client)
+    except ValueError:
+        print(f'error: unknown client {args.client!r}', file=sys.stderr)
+        return 2
+    try:
+        extra_env = mcp_install_module.parse_env_pairs(args.env or [])
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    try:
+        message = mcp_install_module.install(
+            client,
+            name=args.name,
+            extra_env=extra_env,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+    except FileNotFoundError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    except RuntimeError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+
+    # ``install`` returns a human message either way; for the "already
+    # registered, refuse without --force" branch the message starts with
+    # ``error:`` and reflects exit code 1, matching the file-overwrite
+    # idiom used by ``mesh-mem init``.
+    if message.startswith('error:'):
+        print(message, file=sys.stderr)
+        return 1
+    print(message)
+    return 0
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     detected = _detect_local_ipv4()
     try:
@@ -1097,6 +1137,46 @@ def _build_parser() -> argparse.ArgumentParser:
         help='emit machine-readable JSON instead of human-readable text',
     )
     p_doctor.set_defaults(func=_cmd_doctor)
+
+    p_mcp = sub.add_parser(
+        'mcp',
+        help='MCP client registration helpers',
+    )
+    p_mcp_sub = p_mcp.add_subparsers(dest='mcp_command', required=True)
+    p_mcp_install = p_mcp_sub.add_parser(
+        'install',
+        help='Register mesh-mem-mcp with a supported MCP client',
+    )
+    p_mcp_install.add_argument(
+        '--client',
+        required=True,
+        choices=[c.value for c in MCPClient],
+        help='target MCP client (v0.3 supports Claude Code and Codex CLI)',
+    )
+    p_mcp_install.add_argument(
+        '--name',
+        default=mcp_install_module.DEFAULT_REGISTRY_NAME,
+        help='registry key the client lists the server under (default: mesh_mem)',
+    )
+    p_mcp_install.add_argument(
+        '-e',
+        '--env',
+        action='append',
+        default=[],
+        metavar='KEY=VALUE',
+        help='extra env var passed to the MCP server. Repeatable. Overrides the per-client defaults.',
+    )
+    p_mcp_install.add_argument(
+        '--force',
+        action='store_true',
+        help='replace an existing registration of the same name',
+    )
+    p_mcp_install.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='print the command / config block instead of executing the registration',
+    )
+    p_mcp_install.set_defaults(func=_cmd_mcp_install)
 
     return parser
 
