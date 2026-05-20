@@ -9,17 +9,19 @@ Multiple AI coding agents (Claude Code, Claude Desktop, Gemini CLI, Codex CLI, C
 ## Install zenohd
 
 mesh-mem stores observations in a Zenoh router (`zenohd`) with the
-RocksDB storage backend. Both must be on `PATH` before running
-`mesh-mem init` and the Quick start below. Target version is Zenoh
-**1.9.0** (see [Requirements](#requirements) — older `zenohd` 1.5 builds
-are reachable but lack first-class rocksdb replication).
+RocksDB storage backend. Both must be on `PATH` before `mesh-mem init`
+and the Quick start below — they are **separate packages** that the
+mesh-mem install does not pull in.
 
-### apt (Debian / Ubuntu — recommended)
+Target version is **Zenoh 1.9.0**; older `zenohd` 1.5 builds are
+reachable but lack first-class rocksdb replication.
 
-Eclipse publishes signed `.deb` packages at
-`https://download.eclipse.org/zenoh/debian-repo/`. Add the key + source,
-then install `zenoh` (ships `zenohd`) and `zenoh-backend-rocksdb`
-(ships `libzenoh_backend_rocksdb.so`):
+### apt (Debian / Ubuntu)
+
+The fastest path on Debian / Ubuntu. Eclipse publishes signed `.deb`
+packages and installs `zenohd` into `/usr/bin/` with the backend
+plugin already on the system library path — no `LD_LIBRARY_PATH`
+tweaking needed.
 
 ```bash
 sudo install -d /etc/apt/keyrings
@@ -31,40 +33,23 @@ sudo apt update
 sudo apt install zenoh zenoh-backend-rocksdb
 ```
 
-The `apt` install drops `zenohd` into `/usr/bin/` and the backend
-plugin into the system library path, so zenohd discovers it
-automatically — no `LD_LIBRARY_PATH` tweaking needed.
+The two required packages are:
 
-### Prebuilt standalone zip (any Linux / macOS / Windows)
+- `zenoh` — ships the `zenohd` binary
+- `zenoh-backend-rocksdb` — ships `libzenoh_backend_rocksdb.so`
 
-For hosts that cannot use the Debian repo (corporate Linux without
-sudo, macOS, Windows), grab the matching version of both archives from
-the [Eclipse Zenoh releases page](https://github.com/eclipse-zenoh/zenoh/releases)
-and extract them into the same directory:
+### Other platforms / non-apt installs
 
-- `zenoh-1.9.0-<target>-standalone.zip` — contains `zenohd`
-- `zenoh-backend-rocksdb-1.9.0-<target>-standalone.zip` — contains the backend library
+For macOS, Windows, corporate Linux without sudo, or anything else,
+follow the official Zenoh install docs:
+[zenoh.io/docs/getting-started/installation](https://zenoh.io/docs/getting-started/installation/).
+The prebuilt-zip and cargo paths there cover what the apt repo doesn't.
 
-`<target>` is e.g. `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`,
-or `x86_64-pc-windows-msvc`. Add the extraction directory to `PATH` so
-`zenohd` is launchable, and keep the backend library next to it (or in
-`~/.zenoh/lib/` / `/usr/lib/`) so zenohd's plugin loader finds it. The
-Windows walkthrough in [docs/windows-setup.md](docs/windows-setup.md)
-documents this layout end-to-end.
-
-### Build from source (cargo, last resort)
-
-```bash
-cargo install --locked --git https://github.com/eclipse-zenoh/zenoh --tag 1.9.0 zenohd
-cargo install --locked --git https://github.com/eclipse-zenoh/zenoh-backend-rocksdb --tag 1.9.0
-```
-
-The rocksdb backend must be **compiled with the same Rust toolchain
-as `zenohd` itself** — mixing toolchains can SIGSEV at plugin load
-(per upstream
-[zenoh-backend-rocksdb README](https://github.com/eclipse-zenoh/zenoh-backend-rocksdb#how-to-install-it)).
-On Linux, apt is strictly easier; reach for cargo only when no
-prebuilt asset fits your target.
+Whichever route you pick, both `zenohd` (the binary) and
+`zenoh-backend-rocksdb` (the storage backend plugin) must end up where
+zenohd's plugin loader can find them. The rocksdb backend must be
+**version-matched with `zenohd`** — mixing 1.9 with 1.5 or 2.x will
+silently misbehave at storage startup.
 
 ### Verify
 
@@ -72,7 +57,7 @@ prebuilt asset fits your target.
 zenohd --version
 # expected: zenohd v1.9.0 ...
 
-# In another terminal, with the loopback config from `mesh-mem init`:
+# Then with the loopback config from `mesh-mem init`:
 zenohd -c ~/.config/mesh-mem/zenohd.json5
 # look for a log line resembling:
 #   Successfully loaded backend "rocksdb" ...
@@ -81,8 +66,8 @@ zenohd -c ~/.config/mesh-mem/zenohd.json5
 ```
 
 If the rocksdb log line is missing, the backend library is not on the
-plugin search path — re-check the apt / zip / cargo install above
-before running `mesh-mem init`.
+plugin search path — re-check your install above before running
+`mesh-mem init`.
 
 ## Quick start (single host, ~5 min)
 
