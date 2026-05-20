@@ -126,6 +126,45 @@ readiness (`mesh_ready: yes` when alignment is complete).
 | `--force` | overwrite an existing file |
 | `--print` | emit to stdout instead of writing a file |
 
+### Diagnosing setup with `mesh-mem doctor`
+
+When something is wrong (zenohd not running, config missing, state dir on a
+filesystem that doesn't support hard links), `mesh-mem doctor` runs the
+v0.3 first-touch checks and points at the next action:
+
+```bash
+mesh-mem doctor          # human-readable PASS / FAIL with hints
+mesh-mem doctor --json   # machine-readable; same checks
+```
+
+Exit code is `0` when all checks pass, `1` on warnings, `2` on any failure
+(scriptable). The current v0.3 check set is intentionally small and
+deterministic:
+
+- `zenohd_binary` — `zenohd` is on PATH
+- `config_file` — `~/.config/mesh-mem/zenohd.json5` exists (run `mesh-mem init` if not)
+- `zenohd_reachable` — a TCP probe to `ZENOH_CONNECT` (default `tcp/localhost:7447`) succeeds
+- `state_dir_hardlinks` — `MESH_MEM_STATE_DIR` is writable and supports POSIX hard links
+
+JSON shape:
+
+```json
+{
+  "ok": false,
+  "worst_status": "fail",
+  "checks": [
+    {"name": "zenohd_reachable", "status": "fail",
+     "summary": "tcp/127.0.0.1:7447 is not reachable",
+     "hint": "Start zenohd in another terminal: ...",
+     "details": {"endpoint": "tcp/127.0.0.1:7447", "host": "127.0.0.1", "port": 7447, "errno": 111}}
+  ]
+}
+```
+
+Process-owner discrimination, NTP / chrony drift inspection, and MCP-client
+registration probes are deferred to a follow-up — they are platform-specific
+and easier to misdiagnose than to skip.
+
 ### CLI startup: `--rebuild` and `MESH_MEM_FORCE_REBUILD`
 
 `mesh-mem` (the CLI) is a one-shot process. Since v0.2.4 it **skips**
