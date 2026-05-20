@@ -355,6 +355,39 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 
 ## MCP registration
 
+### One-shot install: `mesh-mem mcp install`
+
+For the two most common clients, `mesh-mem mcp install` automates the
+registration so you don't have to hand-edit a JSON or TOML config:
+
+```bash
+# Claude Code (delegates to `claude mcp add` under the hood)
+mesh-mem mcp install --client claude-code
+
+# Codex CLI (writes the [mcp_servers.mesh_mem] block into ~/.codex/config.toml)
+mesh-mem mcp install --client codex-cli
+```
+
+Both forms bake the absolute path to `mesh-mem-mcp` into the
+registration, set sensible `MESH_MEM_AGENT_FAMILY` / `MESH_MEM_CLIENT_ID`
+defaults per client, and route through `ZENOH_CONNECT=tcp/127.0.0.1:7447`.
+
+Useful flags:
+
+| Flag | Purpose |
+|------|---------|
+| `--name NAME` | registry key (default `mesh_mem`; matches existing docs) |
+| `-e KEY=VALUE` | extra env var; repeatable. Overrides the per-client defaults. |
+| `--dry-run` | print the `claude mcp add` command or the TOML block instead of executing |
+| `--force` | replace an existing registration of the same name |
+
+Claude Desktop, Gemini CLI, and ChatGPT Desktop are still set up via the
+manual recipes in [docs/mcp-clients.md](docs/mcp-clients.md) — Claude
+Desktop pending macOS / Windows verification, the rest pending stable
+upstream config schemas.
+
+### Manual registration
+
 Register the `mesh-mem-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — typically `~/.local/bin/mesh-mem-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/mesh-mem-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([日本語版](docs/mcp-clients.ja.md)).
 
 ## systemd unit (zenohd)
