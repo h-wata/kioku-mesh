@@ -12,6 +12,11 @@ versions without a migration path until `1.0.0`.
 
 ### Fixed
 
+- **Forward-compatibility for Observation schema**: when a peer running
+  an older release receives a PUT carrying fields it doesn't know about,
+  those fields are now preserved via a `_extras` side channel and re-emitted
+  on `to_json`, instead of being silently stripped on SQLite round-trip.
+  Fixes silent data loss during rolling upgrades. (#75)
 - **`mesh-mem-mcp` interactive misinvocation now exits with usage**
   instead of starting the stdio loop and flooding stderr with
   JSON-RPC parse errors. Set `MESH_MEM_MCP_ALLOW_TTY=1` to bypass
