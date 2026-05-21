@@ -143,6 +143,10 @@ def save_observation(
 ) -> str:
     """Persist a work note / decision / discovery into the shared mesh memory.
 
+    Call this PROACTIVELY after ANY decision, bug fix, discovery, or convention —
+    do not wait for the user to ask. If you just made a design choice, fixed a
+    non-obvious bug, or established a reusable pattern, call this now.
+
     **Save when**: design decision, non-obvious bug root cause, reusable
     pattern, config change with rationale, session summary.
     **Skip**: PR / Issue lifecycle ticks, restated PR / ADR / commit content,
@@ -205,6 +209,10 @@ def search_memory(
     limit: int = 50,
 ) -> str:
     """Search the shared mesh memory, narrowing by key_expr and filtering in Python.
+
+    If results are unexpectedly empty for work you know was done previously, this
+    is a signal that ``save_observation`` may have been skipped — call it
+    PROACTIVELY now to capture what is still in context before the session ends.
 
     ``limit`` defaults to 50 and is internally clamped to ``MAX_SEARCH``.
     Returned observation ids are full 32-char strings so ``delete_memory``
@@ -289,6 +297,10 @@ def delete_memory(observation_id: str, reason: str = '') -> str:
 def get_memory_status() -> str:
     """Summarize the server's view of the mesh memory for troubleshooting.
 
+    Check ``last_save_at`` in the output — if it is absent or distant, you may
+    have skipped ``save_observation`` during a long session. Call it PROACTIVELY
+    now if there are unsaved decisions or discoveries.
+
     Counts are computed from up to ``MAX_SEARCH`` most-recent entries.
     Exception messages preserve the type name so connection / query /
     implementation failures are distinguishable.
@@ -303,7 +315,9 @@ def get_memory_status() -> str:
             by_family[obs.agent_family] = by_family.get(obs.agent_family, 0) + 1
             by_pc[obs.pc_id] = by_pc.get(obs.pc_id, 0) + 1
         truncated = len(recent) >= MAX_SEARCH
+        last_save_at = recent[0].created_at if recent else '-'
         lines = [
+            f'last_save_at: {last_save_at}',
             f'mesh-mem version: {__version__}',
             f'python: {sys.executable}',
             f'pc_id: {get_pc_id()}',

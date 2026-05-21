@@ -29,6 +29,13 @@ versions without a migration path until `1.0.0`.
 
 ### Changed
 
+- **MCP tool descriptions reinforced for proactive save**: `save_observation`,
+  `search_memory`, and `get_memory_status` docstrings now carry per-tool
+  PROACTIVELY reminders so the protocol stays active in long sessions where
+  the server instructions may have been pushed out of the context window.
+  `get_memory_status` output now includes `last_save_at` (ISO timestamp of the
+  most recent index entry) to surface skipped saves as a self-check hint. (#51)
+
 - **`mesh-mem delete` no longer aborts at 10 000 matches** (#66). The bulk-delete path now pages via a `(created_at, observation_id)` DESC cursor (`LocalIndex.search` gained an inclusive `until_iso` filter and a stable tiebreaker), tombstoning all matching rows regardless of size. `--batch-size` (default `1000`, max `MAX_SEARCH=10000`) controls per-page and progress granularity. Individual `put_tombstone` failures no longer abort the sweep — they increment a `failures` counter and the process exits non-zero only at the end. When the target set exceeds `MAX_SEARCH` the interactive prompt prints an extra warning suggesting `mesh-mem --rebuild gc --retention-days 0 --project ...` as the faster path when the rows live only in the local SQLite index (ADR-0010 / ADR-0011 shadow-sweep). The same hint is appended to stderr on every bulk-delete completion to discourage raw `DELETE FROM obs_index` workarounds.
 
 - **MCP server instructions add an explicit SKIP list and type/importance guidance** (#73). PR/Issue lifecycle ticks, restated PR/ADR/CHANGELOG content, in-conversation progress logs, and bare `tests pass` notes are now called out as save-skip cases. `decision` / `bug` / `pattern` / `config` are preferred over `summary`; `importance` 1-2 invites reconsidering whether to save at all.

@@ -534,3 +534,34 @@ def test_get_memory_returns_full_metadata(single_zenohd: Any) -> None:  # noqa: 
     assert 'source_files: src/store.py' in text
     assert 'references: h-wata/mesh-mem#73' in text
     assert 'full content for get_memory test' in text
+
+
+def test_tool_descriptions_contain_proactive_hint() -> None:
+    """Tool docstrings must carry per-tool proactive save reminders.
+
+    These docstrings become the MCP tool descriptions seen by the LLM.
+    Distributing PROACTIVELY across key tools reinforces the protocol in
+    long sessions where the server instructions may have been pushed out of
+    the context window.
+    """
+    assert mcp_server_module.save_observation.__doc__ is not None
+    assert 'PROACTIVELY' in mcp_server_module.save_observation.__doc__
+    assert mcp_server_module.search_memory.__doc__ is not None
+    assert 'PROACTIVELY' in mcp_server_module.search_memory.__doc__
+    assert mcp_server_module.get_memory_status.__doc__ is not None
+    assert 'PROACTIVELY' in mcp_server_module.get_memory_status.__doc__
+
+
+def test_get_memory_status_includes_last_save_at(single_zenohd: Any) -> None:  # noqa: ARG001
+    """get_memory_status output contains last_save_at for proactive save nudging."""
+    store.put_observation(_mk_obs('entry for last_save_at test', project='mcp-last-save'))
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'last_save_at:' in text
