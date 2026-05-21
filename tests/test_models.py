@@ -185,6 +185,41 @@ def test_observation_accepts_all_documented_memory_types() -> None:
         assert obs.memory_type == mt
 
 
+def test_observation_preserves_unknown_fields_through_round_trip() -> None:
+    """Unknown fields from a newer schema are preserved via _extras and re-emitted on to_json."""
+    new_payload = json.dumps(
+        {
+            'content': 'x',
+            'future_field_scalar': 1,
+            'future_field_list': ['a', 'b'],
+        }
+    )
+    obs = Observation.from_json(new_payload)
+    round_tripped = json.loads(obs.to_json())
+    assert round_tripped['content'] == 'x'
+    assert round_tripped['future_field_scalar'] == 1
+    assert round_tripped['future_field_list'] == ['a', 'b']
+
+
+def test_observation_extras_empty_for_normal_json() -> None:
+    """Normal JSON with no unknown fields leaves _extras empty and to_json unchanged."""
+    obs = Observation(content='hello', project='test')
+    restored = Observation.from_json(obs.to_json())
+    assert getattr(restored, '_extras', {}) == {}
+    assert json.loads(restored.to_json())['content'] == 'hello'
+    assert json.loads(restored.to_json())['project'] == 'test'
+
+
+def test_observation_extras_dataclass_field_wins_on_collision() -> None:
+    """Dataclass field wins over _extras when the same key appears in both."""
+    obs = Observation(content='original', project='p1')
+    # Simulate a future schema promotion: a key now in _extras also exists as a dataclass field
+    obs._extras = {'content': 'from_extras', 'project': 'from_extras'}
+    result = json.loads(obs.to_json())
+    assert result['content'] == 'original'
+    assert result['project'] == 'p1'
+
+
 def test_observation_from_json_clamps_unknown_memory_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clamp unknown memory_type to 'note' for forward-compat.
 

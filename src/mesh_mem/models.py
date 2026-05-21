@@ -34,9 +34,13 @@ def _utc_now_iso() -> str:
 
 
 def _from_dict_compat(cls: type, data: dict[str, Any]) -> Any:
-    """Build ``cls`` from ``data`` while dropping unknown fields."""
-    known = {f.name for f in fields(cls)}
-    return cls(**{k: v for k, v in data.items() if k in known})
+    """Build ``cls`` from ``data``, stashing unknown fields in ``_extras``."""
+    known_field_names = {f.name for f in fields(cls)}
+    known_data = {k: v for k, v in data.items() if k in known_field_names}
+    extras = {k: v for k, v in data.items() if k not in known_field_names}
+    inst = cls(**known_data)
+    inst._extras = extras  # noqa: SLF001
+    return inst
 
 
 VALID_MEMORY_TYPES: frozenset[str] = frozenset({'note', 'decision', 'bug', 'pattern', 'config', 'summary'})
@@ -78,6 +82,10 @@ class Observation:
             self.importance = 5
         if self.memory_type not in VALID_MEMORY_TYPES:
             raise ValueError(f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}; got {self.memory_type!r}')
+        # Non-dataclass side channel for unknown fields from newer schemas.
+        # Persistence boundary: _extras is only preserved through to_json / from_json.
+        # Any clone path that bypasses this pair (e.g. dataclasses.replace()) will drop _extras.
+        self._extras: dict[str, Any] = {}
 
     @property
     def key_expr(self) -> str:
@@ -89,8 +97,9 @@ class Observation:
         return self.key_expr.replace('mem/obs/', 'mem/tomb/', 1)
 
     def to_json(self) -> str:
-        """Serialize to a compact UTF-8 JSON string."""
-        return json.dumps(asdict(self), ensure_ascii=False)
+        """Serialize to a compact UTF-8 JSON string, re-emitting preserved unknown fields."""
+        data = {**getattr(self, '_extras', {}), **asdict(self)}
+        return json.dumps(data, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, data: str) -> 'Observation':
