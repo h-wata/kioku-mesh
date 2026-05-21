@@ -240,9 +240,7 @@ mesh-mem intentionally carries no in-protocol authentication or encryption. `mem
 
 ### Versioning
 
-mesh-mem is currently `0.x`. Breaking changes to APIs or on-disk schema are documented in [CHANGELOG.md](./CHANGELOG.md) and [docs/migration.md](./docs/migration.md) before each release.
-
-The commitment for `1.0`: MCP tool signatures, CLI subcommand flags, and on-disk schema will follow SemVer — breaking changes only on a major version bump. The `0.x` series makes no formal stability guarantee, but every breaking change ships with a documented migration path.
+mesh-mem follows SemVer with the explicit caveat that **`0.x` is experimental**: minor version bumps may include breaking changes to APIs and on-disk storage schema. The CHANGELOG announces every break, but a stable migration path is only guaranteed from `1.0` onward. `1.0` will lock in API stability and the storage schema.
 
 ### Operational notes
 
