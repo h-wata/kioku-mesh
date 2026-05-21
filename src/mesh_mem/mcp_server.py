@@ -339,8 +339,35 @@ def drain_pending_puts(limit: int | None = None) -> str:
     return f'pending_puts drain complete: drained={drained}, remaining={remaining}'
 
 
+def _is_tty_misinvocation() -> bool:
+    """Return True when stdin is a TTY and MESH_MEM_MCP_ALLOW_TTY is not set."""
+    if os.environ.get('MESH_MEM_MCP_ALLOW_TTY') == '1':
+        return False
+    try:
+        return sys.stdin.isatty()
+    except (ValueError, OSError):
+        return False
+
+
 def main() -> None:
     """Entry point for the ``mesh-mem-mcp`` console script."""
+    if _is_tty_misinvocation():
+        print(
+            'mesh-mem-mcp is the stdio MCP server. It is meant to be spawned\n'
+            'by an MCP client (Claude Code, Codex CLI, Claude Desktop, etc.),\n'
+            'not run interactively.\n'
+            '\n'
+            'If you wanted to register this server with a client, run:\n'
+            '    mesh-mem mcp install --client claude-code\n'
+            '    mesh-mem mcp install --client codex-cli\n'
+            '\n'
+            'To force interactive launch anyway (debugging), pipe stdin from /dev/null:\n'
+            '    mesh-mem-mcp < /dev/null\n'
+            '\n'
+            'Or set MESH_MEM_MCP_ALLOW_TTY=1 to bypass this check.',
+            file=sys.stderr,
+        )
+        sys.exit(2)
     _warn_if_zenoh_connect_unreachable()
     start_pending_drain_background()
     try:

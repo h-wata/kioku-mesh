@@ -10,6 +10,13 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mesh-mem-mcp` interactive misinvocation now exits with usage**
+  instead of starting the stdio loop and flooding stderr with
+  JSON-RPC parse errors. Set `MESH_MEM_MCP_ALLOW_TTY=1` to bypass
+  the check for protocol-level debugging. (#98)
+
 ### Added
 
 - **README adds an "Install zenohd" section** (#83) before the Quick start. Covers the apt one-liner (Eclipse Debian repo) plus the `zenohd --version` + rocksdb-backend-loaded verify steps so a Debian / Ubuntu first-touch user can get a working router without reading upstream Zenoh docs. macOS / Windows / non-apt Linux paths defer to [zenoh.io/docs/getting-started/installation](https://zenoh.io/docs/getting-started/installation/) rather than embedding fragile prebuilt-zip / cargo recipes that would drift out of sync with upstream. The existing `## Requirements` Zenoh 1.9 bullet cross-links to the new section.

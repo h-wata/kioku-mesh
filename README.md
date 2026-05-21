@@ -370,6 +370,13 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 
 ## MCP registration
 
+> **Two binaries — know the difference**
+>
+> - `mesh-mem` (one hyphen) — the **CLI**. Run this yourself: `mesh-mem mcp install`, `mesh-mem status`, etc.
+> - `mesh-mem-mcp` (two hyphens) — the **stdio MCP server**. It is spawned in the background by an MCP
+>   client (Claude Code, Codex CLI, Claude Desktop…); you do not type this command directly.
+>   Running it from a terminal will print a usage message and exit.
+
 ### One-shot install: `mesh-mem mcp install`
 
 For the two most common clients, `mesh-mem mcp install` automates the

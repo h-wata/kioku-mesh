@@ -1,5 +1,12 @@
 # MCP registration
 
+> **Two binaries — know the difference**
+>
+> - `mesh-mem` (one hyphen) — the **CLI**. Run this yourself: `mesh-mem mcp install`, `mesh-mem status`, etc.
+> - `mesh-mem-mcp` (two hyphens) — the **stdio MCP server**. It is spawned in the background by an MCP
+>   client (Claude Code, Codex CLI, Claude Desktop…); you do not type this command directly.
+>   Running it from a terminal will print a usage message and exit.
+
 Register the installed `mesh-mem-mcp` console script. Use the **absolute path** to the installed binary — typically `~/.local/bin/mesh-mem-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/mesh-mem-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
 
 ## Claude Code
