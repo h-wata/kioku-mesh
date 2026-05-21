@@ -228,14 +228,30 @@ when the mesh is large.
 
 ## Status & known limitations
 
-PoC implementation is usable but still an experimental `0.x` project. LAN replication / DR / split-brain behavior has been verified on a 2-host setup, and the current code uses a SQLite sidecar index for the default search path. APIs and on-disk schema may still change before `1.0`. See [docs/Spec.md](./docs/Spec.md) for the current behavior, [plan.md](./plan.md) for the broader design notes, and `gh issue list --state open` for live tracking status.
+mesh-mem is a LAN / VPN / mesh-VPN shared memory for trusted peers. Trust comes from network admission, not transport-level auth. LAN replication, DR, and split-brain recovery have been verified on a 2-host setup (1,192 writes across a ~24 h partition, data integrity verified G3 / G4 / Tombstone); the default read path uses a SQLite sidecar index backed by Zenoh + RocksDB.
 
-- **No transport-level auth or encryption.** `mem/**` and `mem/tomb/**` are open to anyone reaching port 7447. LAN-only — never expose to the internet or to an untrusted LAN segment.
-- **stdio MCP only.** Works with Claude Code, Claude Desktop, Gemini CLI, and Codex CLI. Web apps (`claude.ai`, `chatgpt.com`) are not supported — they require HTTP/SSE transport + tunnel + auth, which this PoC does not ship.
-- **Multi-host (Home↔Office) field-tested on LAN (post-`v0.1.0`).** Smoke / split-brain (TASK-094), Tier-1/2/3 benchmarks (TASK-097/113/115), and a 24-hour disconnect-recovery (DR) run (TASK-119, 1,192 writes, ~24.45 h partition) all pass for data integrity (G3 / G4 / Tombstone). One known caveat: cold-era resync is **step-function** rather than incremental — Office stayed at 0 obs for 97–282 s after re-link, then jumped to the full count. Hot/warm-era reconvergence stays at ~5 s as designed. See `plan.md` §実機検証結果サマリ.
+### Scope decision: no transport-level auth or encryption
+
+mesh-mem intentionally carries no in-protocol authentication or encryption. `mem/**` and `mem/tomb/**` are readable and writable by anyone who can reach port 7447 — the security boundary is the network itself. This is a deliberate scope choice: trusted-peer shared memory on a LAN, VPN, or mesh-VPN (Tailscale, WireGuard) where admission control is handled at the network layer.
+
+> ⚠️ **Do not expose port 7447 to untrusted networks.** Never open to the internet or to an untrusted LAN segment. See [Firewall](#firewall) for per-peer allow rules.
+
+**stdio MCP transport only.** Works with Claude Code, Claude Desktop, Gemini CLI, and Codex CLI. Web apps (`claude.ai`, `chatgpt.com`) are not supported — they require HTTP/SSE transport + tunnel + auth, which is out of this project's current scope.
+
+### Versioning
+
+mesh-mem is currently `0.x`. Breaking changes to APIs or on-disk schema are documented in [CHANGELOG.md](./CHANGELOG.md) and [docs/migration.md](./docs/migration.md) before each release.
+
+The commitment for `1.0`: MCP tool signatures, CLI subcommand flags, and on-disk schema will follow SemVer — breaking changes only on a major version bump. The `0.x` series makes no formal stability guarantee, but every breaking change ships with a documented migration path.
+
+### Operational notes
+
+- **Cold-era resync is step-function, not incremental.** After reconnect, a peer that has been offline may show 0 obs for 97–282 s before jumping to the full count. Hot/warm-era reconvergence stays at ~5 s as designed. See `plan.md` §実機検証結果サマリ.
+- **gc broadcast is best-effort.** A replica unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.
+- **MAX_SEARCH is a return-size cap, not a scan budget.** The default search path is the SQLite sidecar index with case-insensitive substring matching against `payload_json`; `MAX_SEARCH=10000`. With `MESH_MEM_DISABLE_INDEX=1`, the legacy Zenoh full-scan fallback is used. No FTS5 full-text search.
 - **Logical vs physical delete.** `mesh-mem delete` / `delete_memory` write a tombstone; the observation is hidden from `search` but still stored. `mesh-mem gc --retention-days N` (default 30) physically removes expired tombstones plus their observations. `mesh-mem gc --force-id <obs_id>` broadcasts a best-effort immediate purge to every replica.
-- **No FTS5 full-text search yet.** The default search path is the SQLite sidecar index and `query` is a case-insensitive substring match against `payload_json`. With `MESH_MEM_DISABLE_INDEX=1`, the legacy Zenoh full-scan fallback is used. `MAX_SEARCH=10000` is a return-size cap, not a scan budget.
-- **gc broadcast is best-effort.** A replica that was unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.
+
+See [docs/Spec.md](./docs/Spec.md) for the current behavior, [plan.md](./plan.md) for design notes, and `gh issue list --state open` for live tracking.
 
 ## Multi-agent identity (single host, multiple agents)
 
