@@ -82,6 +82,9 @@ class Observation:
             self.importance = 5
         if self.memory_type not in VALID_MEMORY_TYPES:
             raise ValueError(f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}; got {self.memory_type!r}')
+        # Non-dataclass side channel for unknown fields from newer schemas.
+        # Persistence boundary: _extras is only preserved through to_json / from_json.
+        # Any clone path that bypasses this pair (e.g. dataclasses.replace()) will drop _extras.
         self._extras: dict[str, Any] = {}
 
     @property
