@@ -36,6 +36,10 @@ versions without a migration path until `1.0.0`.
 
 ### Documentation
 
+- **README rewritten for v0.3 first-impression**: top-down structure with a
+  one-paragraph pitch, demo placeholder, Wave 1-2 quick start (init / doctor /
+  mcp install), and a "What you get" capabilities list. English-primary; Japanese
+  sections clearly demarcated. (#89)
 - **README "Status & known limitations" reframed as design scope** (#88): the section now leads with the LAN/VPN trusted-peer design statement, separates Versioning (SemVer commitment) from Operational notes (cold-era resync, gc broadcast, MAX_SEARCH cap), and keeps the "don't expose to untrusted networks" callout intact. No factual claims removed.
 
 ## [0.2.5] - 2026-05-19
