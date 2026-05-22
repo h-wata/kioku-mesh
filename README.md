@@ -59,10 +59,12 @@ section.
 
 ### What you get
 
-- **Multi-agent support** — Claude Code, Codex CLI, Claude Desktop, Gemini CLI, and
-  ChatGPT Desktop can all read and write the same memory pool.
+- **Single-machine persistence** — save and search on one machine, no daemon, no extra
+  install (Tier 0, `--mode local`). Your agent's memory survives session resets.
 - **One-command MCP registration** — `mesh-mem mcp install` wires the MCP server into
   your agent's config with sensible defaults; no JSON / TOML hand-editing required.
+- **Multi-agent support** — Claude Code, Codex CLI, Claude Desktop, Gemini CLI, and
+  ChatGPT Desktop can all read and write the same memory pool.
 - **Self-diagnosis** — `mesh-mem doctor` checks backend reachability, config, and
   storage health with actionable hints.
 - **SQLite-first local search** — fast substring search and tab-completion without any
@@ -71,6 +73,9 @@ section.
   physically purges expired records.
 - **stdio MCP transport** — works with all agents that support MCP stdio; no HTTP
   tunnel or auth layer needed for trusted-LAN usage.
+- **Multi-host shared memory (opt-in)** — extend to a multi-machine mesh via
+  [Power users: multi-host mesh](#power-users-multi-host-mesh). No changes to
+  save / search / MCP workflows required.
 
 ## Try it (local-only quickstart)
 
@@ -144,6 +149,8 @@ JSON shape:
 }
 ```
 
+Ready to use memory across multiple machines? See [Power users: multi-host mesh](#power-users-multi-host-mesh).
+
 ## Use it with your agent (MCP)
 
 > **Two binaries — know the difference**
@@ -189,8 +196,6 @@ upstream config schemas.
 Register the `mesh-mem-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — typically `~/.local/bin/mesh-mem-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/mesh-mem-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([日本語版](docs/mcp-clients.ja.md)).
 
 ## Power users: multi-host mesh
-
-<!-- #111 でポーランド予定 -->
 
 The recommended layout is **1 hub + N spokes**: one always-on peer acts as
 the hub and listens on every IP that any spoke can reach (LAN, Tailscale,
