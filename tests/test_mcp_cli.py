@@ -347,43 +347,23 @@ def test_cli_search_empty_format_variants(monkeypatch: pytest.MonkeyPatch, capsy
     assert capsys.readouterr().out == '[]\n'
 
 
-def test_cli_status_reports_transport_and_pending_puts(
+def test_cli_status_local_backend(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    monkeypatch.setattr(cli_module, 'search_observations', lambda limit=store.MAX_SEARCH: [])
-    monkeypatch.setattr(cli_module, 'get_pc_id', lambda: 'p' * 32)
-    monkeypatch.setattr(cli_module, 'get_session_id', lambda: 'test-session')
-    monkeypatch.setattr(cli_module, 'mesh_ready_label', lambda: 'yes')
-    monkeypatch.setattr(
-        cli_module,
-        'get_transport_status',
-        lambda: store.TransportStatus(
-            zenoh_session='disconnected',
-            last_put_at_iso='2026-05-17T00:00:00.000000Z',
-            last_put_status='error: ConnectionError',
-            recent_put_ok=4,
-            recent_put_error=1,
-            recent_put_window=5,
-            pending_puts=2,
-            drain_in_progress=True,
-            drain_last_run_iso='2026-05-17T00:00:02.000000Z',
-            drain_total_succeeded=7,
-        ),
-    )
+    # Use local backend so no zenohd is required.
+    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    from mesh_mem.backend import reset_backend
+
+    reset_backend()
 
     rc = cli_main(['status'])
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert 'zenoh_session: disconnected' in out
-    assert 'last_put_at_iso: 2026-05-17T00:00:00.000000Z' in out
-    assert 'last_put_status: error: ConnectionError' in out
-    assert 'recent_puts: 4 ok / 1 error' in out
-    assert 'pending_puts: 2' in out
-    assert 'drain_in_progress: yes' in out
-    assert 'drain_last_run_iso: 2026-05-17T00:00:02.000000Z' in out
-    assert 'drain_total_succeeded: 7' in out
+    assert 'backend: local' in out
+    assert 'zenoh_session: n/a' in out
+    assert 'pending_puts: 0' in out
 
 
 def test_cli_drain_pending_replays_queued_rows(
@@ -634,14 +614,17 @@ def test_cli_bulk_delete_continues_on_failure(
     time.sleep(_INGEST_SETTLE)
 
     failing_id = targets[1].observation_id
-    real_put_tombstone = store.put_tombstone
+    from mesh_mem.backend import get_backend
+
+    backend = get_backend()
+    real_put_tombstone = backend.put_tombstone
 
     def flaky(obs: Observation, reason: str = '') -> None:
         if obs.observation_id == failing_id:
             raise RuntimeError('simulated transport hiccup')
         real_put_tombstone(obs, reason=reason)
 
-    monkeypatch.setattr(cli_module, 'put_tombstone', flaky)
+    monkeypatch.setattr(backend, 'put_tombstone', flaky)
 
     rc = cli_main(['delete', '--project', project, '--yes', '--batch-size', '2'])
     assert rc == 1, 'non-zero exit when at least one row failed'

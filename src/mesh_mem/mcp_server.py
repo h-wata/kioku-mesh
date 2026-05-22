@@ -14,18 +14,14 @@ import sys
 from fastmcp import FastMCP
 
 from . import __version__
+from .backend import get_backend
+from .backend import reset_backend
+from .config import get_backend_mode
 from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
-from .store import drain_pending_puts as drain_pending_puts_now
-from .store import find_observation_by_id
-from .store import get_index
-from .store import get_transport_status
 from .store import MAX_SEARCH
-from .store import put_observation
-from .store import put_tombstone
-from .store import search_observations
 from .store import start_pending_drain_background
 from .store import stop_pending_drain_background
 
@@ -193,7 +189,7 @@ def save_observation(
         references=references or [],
         supersedes=supersedes or [],
     )
-    put_observation(obs)
+    get_backend().put_observation(obs)
     return f'saved: {obs.observation_id}'
 
 
@@ -218,7 +214,7 @@ def search_memory(
     Returned observation ids are full 32-char strings so ``delete_memory``
     can be called directly.
     """
-    results = search_observations(
+    results = get_backend().search_observations(
         query=query,
         agent_family=agent_family,
         client_id=client_id,
@@ -255,7 +251,7 @@ def get_memory(observation_id: str) -> str:
     """
     if len(observation_id) != 32:
         return 'observation_id must be a full 32-character match.'
-    obs = find_observation_by_id(observation_id)
+    obs = get_backend().find_observation_by_id(observation_id)
     if obs is None:
         return f'observation_id {observation_id} not found.'
     lines = [
@@ -286,10 +282,10 @@ def delete_memory(observation_id: str, reason: str = '') -> str:
     """
     if len(observation_id) != 32:
         return 'observation_id must be a full 32-character match.'
-    obs = find_observation_by_id(observation_id)
+    obs = get_backend().find_observation_by_id(observation_id)
     if obs is None:
         return f'observation_id {observation_id} not found.'
-    put_tombstone(obs, reason=reason)
+    get_backend().put_tombstone(obs, reason=reason)
     return f'deleted (tombstone): {observation_id}'
 
 
@@ -306,9 +302,9 @@ def get_memory_status() -> str:
     implementation failures are distinguishable.
     """
     try:
-        recent = search_observations(limit=MAX_SEARCH)
-        transport = get_transport_status()
-        counts = get_index().visibility_counts()
+        backend = get_backend()
+        recent = backend.search_observations(limit=MAX_SEARCH)
+        status = backend.get_status()
         by_family: dict[str, int] = {}
         by_pc: dict[str, int] = {}
         for obs in recent:
@@ -319,18 +315,15 @@ def get_memory_status() -> str:
         lines = [
             f'last_save_at: {last_save_at}',
             f'mesh-mem version: {__version__}',
+            f'backend: {status.mode}',
             f'python: {sys.executable}',
             f'pc_id: {get_pc_id()}',
             f'session_id: {get_session_id()}',
-            f'zenoh_session: {transport.zenoh_session}',
-            f'last_put_at_iso: {transport.last_put_at_iso or "-"}',
-            f'last_put_status: {transport.last_put_status}',
-            f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error',
-            f'pending_puts: {transport.pending_puts}',
-            f'drain_in_progress: {"yes" if transport.drain_in_progress else "no"}',
-            f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}',
-            f'drain_total_succeeded: {transport.drain_total_succeeded}',
-            f'index_rows: live={counts.live} / tomb={counts.tombstoned} / shadow={counts.shadowed}',
+            f'zenoh_session: {status.zenoh_session}',
+            f'last_put_at_iso: {status.last_put_at_iso or "-"}',
+            f'last_put_status: {status.last_put_status}',
+            f'pending_puts: {status.pending_puts}',
+            f'index_rows: live={status.live} / tomb={status.tombstoned} / shadow={status.shadowed}',
             f'count (within limit {MAX_SEARCH}): {len(recent)}'
             + (' (limit may be reached; consider narrowing)' if truncated else ''),
         ]
@@ -348,8 +341,8 @@ def drain_pending_puts(limit: int | None = None) -> str:
     """Replay pending queued puts immediately through the current MCP process."""
     if limit is not None and limit < 1:
         return 'limit must be 1 or greater.'
-    drained = drain_pending_puts_now(limit=limit, wait=True)
-    remaining = get_transport_status().pending_puts
+    drained = get_backend().drain_pending(limit=limit, wait=True)
+    remaining = get_backend().get_status().pending_puts
     return f'pending_puts drain complete: drained={drained}, remaining={remaining}'
 
 
@@ -382,12 +375,15 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    _warn_if_zenoh_connect_unreachable()
-    start_pending_drain_background()
+    if get_backend_mode() != 'local':
+        _warn_if_zenoh_connect_unreachable()
+        start_pending_drain_background()
     try:
         mcp.run()
     finally:
-        stop_pending_drain_background()
+        if get_backend_mode() != 'local':
+            stop_pending_drain_background()
+        reset_backend()
 
 
 if __name__ == '__main__':
