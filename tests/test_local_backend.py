@@ -297,3 +297,84 @@ def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: 
     assert any(
         r.observation_id == obs.observation_id for r in results
     ), 'local-only row must survive rebuild_from_zenoh on the zenoh cache DB'
+
+
+# ---------------------------------------------------------------------------
+# I1: Common contract suite — same assertions for LocalBackend + ZenohBackend
+# ---------------------------------------------------------------------------
+
+_ZENOHD_AVAILABLE = shutil.which('zenohd') is not None
+
+
+@pytest.fixture(
+    params=[
+        'local',
+        pytest.param(
+            'zenoh',
+            marks=pytest.mark.skipif(not _ZENOHD_AVAILABLE, reason='zenohd not on PATH'),
+        ),
+    ]
+)
+def contract_backend(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> object:
+    """Parametrized fixture that yields a LocalBackend or ZenohBackend."""
+    mode = request.param
+    monkeypatch.setenv('MESH_MEM_BACKEND', mode)
+    reset_backend()
+    if mode == 'zenoh':
+        # Ensure a live zenohd router is running for the session.
+        request.getfixturevalue('single_zenohd')
+    return get_backend()
+
+
+def _settle(backend: object) -> None:
+    """Brief sleep after a Zenoh put — storage ingestion is asynchronous."""
+    from mesh_mem.backend import ZenohBackend
+
+    if isinstance(backend, ZenohBackend):
+        import time
+
+        time.sleep(0.25)
+
+
+def test_contract_put_and_search(contract_backend: object) -> None:
+    obs = _mk_obs('contract put and search', project='contract')
+    contract_backend.put_observation(obs)  # type: ignore[union-attr]
+    _settle(contract_backend)
+    results = contract_backend.search_observations(query='contract put', project='contract')  # type: ignore[union-attr]
+    assert any(r.observation_id == obs.observation_id for r in results)
+
+
+def test_contract_get_by_id(contract_backend: object) -> None:
+    obs = _mk_obs('contract get by id', project='contract')
+    contract_backend.put_observation(obs)  # type: ignore[union-attr]
+    _settle(contract_backend)
+    found = contract_backend.find_observation_by_id(obs.observation_id)  # type: ignore[union-attr]
+    assert found is not None
+    assert found.content == 'contract get by id'
+
+
+def test_contract_delete_tombstone(contract_backend: object) -> None:
+    obs = _mk_obs('contract tombstone target', project='contract')
+    contract_backend.put_observation(obs)  # type: ignore[union-attr]
+    _settle(contract_backend)
+    contract_backend.put_tombstone(obs, reason='contract test')  # type: ignore[union-attr]
+    _settle(contract_backend)
+    results = contract_backend.search_observations(query='contract tombstone', project='contract')  # type: ignore[union-attr]
+    assert not any(r.observation_id == obs.observation_id for r in results)
+
+
+def test_contract_status_mode(contract_backend: object) -> None:
+    from mesh_mem.backend import BackendStatus
+
+    status = contract_backend.get_status()  # type: ignore[union-attr]
+    assert isinstance(status, BackendStatus)
+    assert status.mode in ('local', 'zenoh')
+
+
+def test_contract_drain_returns_int(contract_backend: object) -> None:
+    drained = contract_backend.drain_pending()  # type: ignore[union-attr]
+    assert isinstance(drained, int)
+    assert drained >= 0
