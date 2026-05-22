@@ -29,7 +29,6 @@ from . import doctor as doctor_module
 from . import mcp_install as mcp_install_module
 from .backend import get_backend
 from .backend import reset_backend
-from .config import get_backend_mode
 from .config import write_local_config
 from .identity import get_pc_id
 from .identity import get_session_id
@@ -977,9 +976,18 @@ _DEMO_SEEDS: tuple[tuple[str, str], ...] = (
 def _cmd_demo(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Seed 3 example observations via local backend — no zenohd required."""
     print('Setting up local memory (no zenohd needed)... ', end='', flush=True)
-    if get_backend_mode() != 'local':
-        write_local_config()
-        reset_backend()
+    # Always write local config (idempotent) so the local backend is initialized.
+    write_local_config()
+    # Force local backend selection regardless of MESH_MEM_BACKEND env.
+    # demo is a first-touch UX command that must never use zenohd.
+    _env_override = os.environ.get('MESH_MEM_BACKEND', '')
+    if _env_override and _env_override != 'local':
+        print(
+            f'\nnote: MESH_MEM_BACKEND={_env_override!r} detected; demo forces local backend.',
+            file=sys.stderr,
+        )
+    os.environ['MESH_MEM_BACKEND'] = 'local'
+    reset_backend()
     print('✓')
 
     print('Saving 3 example observations:')
