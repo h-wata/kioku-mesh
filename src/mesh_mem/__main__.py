@@ -27,6 +27,9 @@ except ImportError:  # argcomplete is an optional extra (`pip install mesh-mem[c
 from . import __version__
 from . import doctor as doctor_module
 from . import mcp_install as mcp_install_module
+from .backend import get_backend
+from .backend import reset_backend
+from .config import write_local_config
 from .identity import get_pc_id
 from .identity import get_session_id
 from .identity import IdentitySource
@@ -37,21 +40,12 @@ from .mcp_install import MCPClient
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import _reset_session
-from .store import drain_pending_puts
 from .store import execute_bulk_purge
-from .store import find_observation_by_id
-from .store import gc_expired_shadows
-from .store import gc_expired_tombstones
 from .store import get_index
 from .store import get_session
-from .store import get_transport_status
 from .store import MAX_SEARCH
 from .store import mesh_ready_label
-from .store import physical_delete_observation
-from .store import put_observation
-from .store import put_tombstone
 from .store import scan_obs_by_pc_id
-from .store import search_observations
 from .store import set_rebuild_on_init_default
 from .store import set_rebuild_on_init_explicit
 from .store import stop_pending_drain_background
@@ -107,7 +101,7 @@ def _iter_delete_targets(args: argparse.Namespace, *, batch_size: int) -> Iterat
     until_cursor = args.until or ''
     cursor_obs_id = ''
     while True:
-        page = search_observations(
+        page = get_backend().search_observations(
             project=args.project or '',
             pc_id=args.pc_id or '',
             since_iso=args.since or '',
@@ -158,7 +152,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
         references=references,
         supersedes=supersedes,
     )
-    put_observation(obs)
+    get_backend().put_observation(obs)
     print(f'saved: {obs.observation_id}')
     return 0
 
@@ -212,7 +206,7 @@ def _format_search_json(results: list[Observation]) -> str:
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
-    results = search_observations(
+    results = get_backend().search_observations(
         query=args.query or '',
         agent_family=args.agent_family or '',
         client_id=args.client_id or '',
@@ -242,7 +236,7 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
     if len(args.observation_id) != 32:
         print('observation_id must be a full 32-character match.', file=sys.stderr)
         return 2
-    obs = find_observation_by_id(args.observation_id)
+    obs = get_backend().find_observation_by_id(args.observation_id)
     if obs is None:
         print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
         return 1
@@ -353,7 +347,7 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         next_progress = batch_size
         for obs in _iter_delete_targets(args, batch_size=batch_size):
             try:
-                put_tombstone(obs, reason=args.reason or '')
+                get_backend().put_tombstone(obs, reason=args.reason or '')
                 deleted += 1
             except Exception as e:  # noqa: BLE001 — one bad row must not abort the sweep (#66)
                 failures += 1
@@ -372,11 +366,11 @@ def _cmd_delete(args: argparse.Namespace) -> int:
     if len(args.observation_id) != 32:
         print('observation_id must be a full 32-character match.', file=sys.stderr)
         return 2
-    obs = find_observation_by_id(args.observation_id)
+    obs = get_backend().find_observation_by_id(args.observation_id)
     if obs is None:
         print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
         return 1
-    put_tombstone(obs, reason=args.reason or '')
+    get_backend().put_tombstone(obs, reason=args.reason or '')
     print(f'deleted (tombstone): {args.observation_id}')
     return 0
 
@@ -392,11 +386,11 @@ def _format_identity_source(source: IdentitySource, env_var: str) -> str:
 
 def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     try:
-        recent = search_observations(limit=MAX_SEARCH)
+        recent = get_backend().search_observations(limit=MAX_SEARCH)
     except Exception as e:  # noqa: BLE001
         print(f'failed to read shared memory [{type(e).__name__}]: {e}', file=sys.stderr)
         return 1
-    transport = get_transport_status()
+    status = get_backend().get_status()
     by_family: dict[str, int] = {}
     by_pc: dict[str, int] = {}
     for obs in recent:
@@ -406,30 +400,28 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     af_value, af_source = resolve_agent_family()
     cid_value, cid_source = resolve_client_id()
     print(f'mesh-mem version: {__version__}')
+    print(f'backend: {status.mode}')
     print(f'pc_id: {get_pc_id()}')
     print(f'session_id: {get_session_id()}')
     print(f'agent_family: {af_value} {_format_identity_source(af_source, "MESH_MEM_AGENT_FAMILY")}')
     print(f'client_id: {cid_value} {_format_identity_source(cid_source, "MESH_MEM_CLIENT_ID")}')
-    print(f'zenoh_session: {transport.zenoh_session}')
-    print(f'last_put_at_iso: {transport.last_put_at_iso or "-"}')
-    print(f'last_put_status: {transport.last_put_status}')
-    print(f'recent_puts: {transport.recent_put_ok} ok / {transport.recent_put_error} error')
-    print(f'pending_puts: {transport.pending_puts}')
-    print(f'drain_in_progress: {"yes" if transport.drain_in_progress else "no"}')
-    print(f'drain_last_run_iso: {transport.drain_last_run_iso or "-"}')
-    print(f'drain_total_succeeded: {transport.drain_total_succeeded}')
+    print(f'zenoh_session: {status.zenoh_session}')
+    print(f'last_put_at_iso: {status.last_put_at_iso or "-"}')
+    print(f'last_put_status: {status.last_put_status}')
+    print(f'pending_puts: {status.pending_puts}')
     print(f'count (within limit {MAX_SEARCH}): {len(recent)}{" (limit may be reached)" if truncated else ""}')
     for family, count in sorted(by_family.items()):
         print(f'  family {family}: {count}')
     for pc, count in sorted(by_pc.items()):
         print(f'  pc {pc[:8]}: {count}')
-    label = mesh_ready_label()
-    print(f'mesh_ready: {label}')
-    if label != 'yes':
-        print(
-            'WARNING: peer alignment not yet complete. Search counts may be low right after restart.',
-            file=sys.stderr,
-        )
+    if status.mode == 'zenoh':
+        label = mesh_ready_label()
+        print(f'mesh_ready: {label}')
+        if label != 'yes':
+            print(
+                'WARNING: peer alignment not yet complete. Search counts may be low right after restart.',
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -437,8 +429,8 @@ def _cmd_drain(args: argparse.Namespace) -> int:
     if not args.pending:
         print('drain currently only supports --pending.', file=sys.stderr)
         return 2
-    drained = drain_pending_puts(limit=args.limit, wait=True)
-    remaining = get_transport_status().pending_puts
+    drained = get_backend().drain_pending(limit=args.limit, wait=True)
+    remaining = get_backend().get_status().pending_puts
     print(f'pending_puts drain complete: drained={drained}, remaining={remaining}')
     return 0
 
@@ -448,35 +440,26 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         if len(args.force_id) != 32:
             print('--force-id requires a full 32-character observation_id.', file=sys.stderr)
             return 2
-        obs_removed, tomb_removed = physical_delete_observation(args.force_id)
+        obs_removed, tomb_removed = get_backend().physical_delete_observation(args.force_id)
         parts = []
         if obs_removed:
             parts.append('obs')
         if tomb_removed:
             parts.append('tomb')
         if parts:
-            print(f'physically deleted ({", ".join(parts)}) + broadcast purge: {args.force_id}')
+            print(f'physically deleted ({", ".join(parts)}): {args.force_id}')
         else:
-            # No local match, but the broadcast wildcard delete may still have
-            # purged a reachable peer's copy — treat as success so scripts do
-            # not retry or misinterpret a completed emergency purge as failure.
             print(
-                f'observation_id {args.force_id} not present on this replica. '
-                'broadcast purge already sent (best-effort). '
-                'For full coverage, run the same command on other peers.',
+                f'observation_id {args.force_id} not present on this replica.',
             )
         return 0
     if args.by_pc_id:
+        if get_backend().get_status().mode == 'local':
+            print('--by-pc-id is not supported in local mode.', file=sys.stderr)
+            return 2
         return _cmd_gc_by_pc_id(args)
-    # Shadow sweep depends on ``shadowed_at`` being current. CLI startup skips
-    # ``rebuild_from_zenoh`` by default (#38), so a one-shot ``mesh-mem gc``
-    # would otherwise miss "stale-but-not-yet-shadowed" local rows that the
-    # subscriber never had a chance to reconcile. Run reconcile explicitly
-    # before the sweep when shadow prune is on so the discovery path is
-    # closed (#70). On reconcile failure we fall through conservatively:
-    # the sweep then only sees pre-existing shadow rows, which is no worse
-    # than the previous behavior.
-    if not args.no_shadow_prune:
+    # Shadow sweep for zenoh: rebuild index from zenoh first so discovery path is current.
+    if not args.no_shadow_prune and get_backend().get_status().mode == 'zenoh':
         try:
             get_index().rebuild_from_zenoh(get_session())
         except Exception as e:  # noqa: BLE001
@@ -484,7 +467,7 @@ def _cmd_gc(args: argparse.Namespace) -> int:
                 f'rebuild_from_zenoh skipped before gc shadow sweep: {type(e).__name__}: {e}',
                 file=sys.stderr,
             )
-    purged_tomb = gc_expired_tombstones(retention_days=args.retention_days, project=args.project or '')
+    purged_tomb = get_backend().gc_tombstones(retention_days=args.retention_days, project=args.project or '')
     project_note = f' (project={args.project})' if args.project else ''
     if args.no_shadow_prune:
         print(
@@ -492,7 +475,9 @@ def _cmd_gc(args: argparse.Namespace) -> int:
             f'physically deleted {purged_tomb} tombstones (shadow prune skipped)'
         )
         return 0
-    purged_shadow, revived_shadow = gc_expired_shadows(retention_days=args.retention_days, project=args.project or '')
+    purged_shadow, revived_shadow = get_backend().gc_shadows(
+        retention_days=args.retention_days, project=args.project or ''
+    )
     print(
         f'retention {args.retention_days}-day sweep{project_note}: '
         f'physically deleted {purged_tomb} tombstones / {purged_shadow} shadows '
@@ -590,7 +575,7 @@ def _attach_completer(action: argparse.Action, completer: Callable[..., list[str
     action.completer = completer  # type: ignore[attr-defined]
 
 
-_INIT_MODES = ('localhost', 'hub', 'spoke')
+_INIT_MODES = ('localhost', 'hub', 'spoke', 'local')
 _DEFAULT_ZENOH_PORT = 7447
 
 
@@ -981,7 +966,28 @@ def _cmd_mcp_install(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_init_local(args: argparse.Namespace) -> int:
+    """Provision a local-only config that does NOT require zenohd on PATH."""
+    from .config import _config_path
+
+    config_path = _config_path()
+    if config_path.exists() and not args.force:
+        print(f'error: {config_path} already exists. Use --force to overwrite.', file=sys.stderr)
+        return 1
+    if args.to_stdout:
+        sys.stdout.write('backend: local\n')
+        return 0
+    written = write_local_config()
+    print(f'wrote {written}')
+    print('local backend ready — no zenohd required.')
+    print('next: mesh-mem save "hello local"')
+    return 0
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
+    if args.mode == 'local':
+        return _cmd_init_local(args)
+
     detected = _detect_local_ipv4()
     try:
         listen = _resolve_listen_endpoints(args, detected)
@@ -1233,7 +1239,10 @@ def _build_parser() -> argparse.ArgumentParser:
         '--mode',
         default='localhost',
         choices=_INIT_MODES,
-        help='localhost (loopback+memory, default) / hub (LAN listener) / spoke (dials a hub)',
+        help=(
+            'localhost (loopback+memory, default) / hub (LAN listener) / '
+            'spoke (dials a hub) / local (SQLite-only, no zenohd)'
+        ),
     )
     p_init.add_argument(
         '--listen',
@@ -1356,6 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     finally:
         stop_pending_drain_background()
+        reset_backend()
         # Explicitly close the cached Zenoh session before sys.exit. Without
         # this, the CLI hangs after printing output because the session's
         # replication subscriber thread keeps the interpreter alive past

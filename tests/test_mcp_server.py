@@ -218,9 +218,7 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
     assert 'session_id' in text
     assert 'zenoh_session: connected' in text
     assert 'last_put_status: ok' in text
-    assert 'recent_puts: 2 ok / 0 error' in text
     assert 'pending_puts: 0' in text
-    assert 'drain_in_progress: no' in text
     assert 'index_rows: live=2 / tomb=0 / shadow=0' in text
     # At least the 2 we put show up in the count summary.
     assert 'count (within limit' in text
@@ -242,23 +240,31 @@ def test_get_memory_status_reports_shadow_rows(single_zenohd: Any) -> None:  # n
 
 
 def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(mcp_server_module, 'search_observations', lambda limit=store.MAX_SEARCH: [])
-    monkeypatch.setattr(
-        mcp_server_module,
-        'get_transport_status',
-        lambda: store.TransportStatus(
-            zenoh_session='disconnected',
-            last_put_at_iso='2026-05-16T00:00:00.000000Z',
-            last_put_status='error: ZError',
-            recent_put_ok=18,
-            recent_put_error=2,
-            recent_put_window=20,
-            pending_puts=3,
-            drain_in_progress=True,
-            drain_last_run_iso='2026-05-16T00:00:05.000000Z',
-            drain_total_succeeded=9,
-        ),
+    from mesh_mem import backend as backend_module
+    from mesh_mem.backend import BackendStatus
+
+    mock_status = BackendStatus(
+        mode='zenoh',
+        live=0,
+        tombstoned=0,
+        shadowed=0,
+        zenoh_session='disconnected',
+        last_put_at_iso='2026-05-16T00:00:00.000000Z',
+        last_put_status='error: ZError',
+        pending_puts=3,
     )
+
+    class _MockBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202
+            return []
+
+        def get_status(self) -> BackendStatus:
+            return mock_status
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _MockBackend())
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -270,11 +276,7 @@ def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.Mo
     assert 'zenoh_session: disconnected' in text
     assert 'last_put_at_iso: 2026-05-16T00:00:00.000000Z' in text
     assert 'last_put_status: error: ZError' in text
-    assert 'recent_puts: 18 ok / 2 error' in text
     assert 'pending_puts: 3' in text
-    assert 'drain_in_progress: yes' in text
-    assert 'drain_last_run_iso: 2026-05-16T00:00:05.000000Z' in text
-    assert 'drain_total_succeeded: 9' in text
 
 
 def test_drain_pending_puts_tool_replays_queued_rows(monkeypatch: pytest.MonkeyPatch) -> None:
