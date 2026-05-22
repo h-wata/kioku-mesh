@@ -177,35 +177,50 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
 def test_mesh_start_peer_hint_not_loopback_only(tmp_path: Path) -> None:
     """B3 regression: wildcard listen must show real-IP hint, not loopback-only for other hosts."""
     import signal as _signal
+    import threading
 
     port = _free_port()
     listen = f'tcp/0.0.0.0:{port}'
     state_dir = str(tmp_path / 'state')
 
+    # PYTHONUNBUFFERED=1 ensures print() flushes immediately so startup lines
+    # are not held in the buffer when SIGINT is delivered (CI flaky fix: B4).
     router_proc = subprocess.Popen(
         [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', listen],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.STDOUT,  # merge stderr so all output is in stdout
+        bufsize=1,
         text=True,
-        env=_subprocess_env(MESH_MEM_STATE_DIR=state_dir),
+        env=_subprocess_env(MESH_MEM_STATE_DIR=state_dir, PYTHONUNBUFFERED='1'),
     )
 
-    # Wait for router to start listening, then send SIGINT to capture startup output
-    reachable = _wait_for_tcp('127.0.0.1', port, timeout=10.0)
-    if not reachable:
+    collected: list[str] = []
+    sentinel_event = threading.Event()
+
+    def _reader() -> None:
+        assert router_proc.stdout is not None
+        for line in iter(router_proc.stdout.readline, ''):
+            stripped = line.rstrip()
+            collected.append(stripped)
+            # startup is complete once 'Ctrl-C' appears (last startup print)
+            if 'ctrl-c' in stripped.lower() or 'ctrl' in stripped.lower():
+                sentinel_event.set()
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    # Wait for startup sentinel before sending SIGINT
+    if not sentinel_event.wait(timeout=15.0):
         router_proc.terminate()
         router_proc.wait(timeout=3)
-        pytest.fail(f'Router did not start on {listen}')
+        reader_thread.join(timeout=3)
+        pytest.fail(f'Router startup sentinel not seen within 15s.\nCollected so far: {collected!r}')
 
-    time.sleep(0.3)
     router_proc.send_signal(_signal.SIGINT)
-    try:
-        stdout_text, _ = router_proc.communicate(timeout=8)
-    except subprocess.TimeoutExpired:
-        router_proc.kill()
-        stdout_text, _ = router_proc.communicate()
+    reader_thread.join(timeout=5)
 
-    lines = [ln.rstrip() for ln in stdout_text.splitlines()]
+    stdout_text = '\n'.join(collected)
+    lines = collected
 
     # The "from other hosts" hint must NOT use loopback 127.0.0.1
     for line in lines:
