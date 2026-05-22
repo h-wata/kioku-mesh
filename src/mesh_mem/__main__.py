@@ -29,6 +29,7 @@ from . import doctor as doctor_module
 from . import mcp_install as mcp_install_module
 from .backend import get_backend
 from .backend import reset_backend
+from .config import get_backend_mode
 from .config import write_local_config
 from .identity import get_pc_id
 from .identity import get_session_id
@@ -966,6 +967,39 @@ def _cmd_mcp_install(args: argparse.Namespace) -> int:
     return 0
 
 
+_DEMO_SEEDS: tuple[tuple[str, str], ...] = (
+    ('decision', 'Chose Postgres over SQLite for the analytics service'),
+    ('bug', 'Session refresh race — fixed by adding mutex around token swap'),
+    ('pattern', 'Tests mirror src/ layout, prefix with test_'),
+)
+
+
+def _cmd_demo(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Seed 3 example observations via local backend — no zenohd required."""
+    print('Setting up local memory (no zenohd needed)... ', end='', flush=True)
+    if get_backend_mode() != 'local':
+        write_local_config()
+        reset_backend()
+    print('✓')
+
+    print('Saving 3 example observations:')
+    for memory_type, content in _DEMO_SEEDS:
+        obs = Observation(content=content, memory_type=memory_type)
+        get_backend().put_observation(obs)
+        tag = f'[{memory_type}]'
+        print(f'  {tag:<11}{content}')
+
+    print()
+    print('Try this now:')
+    print('  $ mesh-mem search "race"')
+    print('  $ mesh-mem search "Postgres"')
+    print()
+    print('Then close this terminal, open a new one, and search again.')
+    print('Your agent will see the same memory once you register it:')
+    print('  $ mesh-mem mcp install')
+    return 0
+
+
 def _cmd_init_local(args: argparse.Namespace) -> int:
     """Provision a local-only config that does NOT require zenohd on PATH."""
     from .config import _config_path
@@ -1332,6 +1366,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help='print the command / config block instead of executing the registration',
     )
     p_mcp_install.set_defaults(func=_cmd_mcp_install)
+
+    p_demo = sub.add_parser(
+        'demo',
+        help='Seed 3 example observations via local backend — no zenohd required',
+        description=(
+            'Seed 3 example observations (decision / bug / pattern) via the local backend. '
+            'No zenohd or prior configuration needed. '
+            'Re-running adds duplicate entries; use mesh-mem delete to clean up.'
+        ),
+    )
+    p_demo.set_defaults(func=_cmd_demo)
 
     return parser
 
