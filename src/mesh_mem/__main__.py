@@ -970,7 +970,7 @@ _MESH_DEFAULT_LISTEN = 'tcp/0.0.0.0:17447'
 
 
 def _cmd_mesh_start(args: argparse.Namespace) -> int:
-    """Open an in-process zenoh router and wait for Ctrl-C (Tier 1, no zenohd needed)."""
+    """Open an in-process zenoh router, start index subscriber, and wait for Ctrl-C."""
     import signal as _signal
 
     import zenoh
@@ -984,11 +984,24 @@ def _cmd_mesh_start(args: argparse.Namespace) -> int:
         print(f'error: failed to open router session: {e}', file=sys.stderr)
         return 1
 
+    # Self-connect endpoint: replace 0.0.0.0 with 127.0.0.1 for loopback
+    connect_ep = args.listen.replace('0.0.0.0', '127.0.0.1')
+
     print(f'Router listening on {args.listen}')
-    print(f'Connect peers with: ZENOH_CONNECT={args.listen} mesh-mem save ...')
+    print(f'Peers can connect with: ZENOH_CONNECT={connect_ep} MESH_MEM_BACKEND=zenoh mesh-mem save ...')
+    print('Subscribing to peer observations (saves will be visible from this process)...')
     print('Press Ctrl-C to stop.')
 
+    # Start index subscriber so peer saves are visible from router search.
+    # _open_session() uses ZENOH_CONNECT, so we point it at our own router.
+    os.environ['ZENOH_CONNECT'] = connect_ep
+    os.environ['MESH_MEM_BACKEND'] = 'zenoh'
+    set_rebuild_on_init_default(False)
+    get_index()  # opens client session to our router + starts replication subscriber
+
     def _shutdown(sig: int, frame: object) -> None:
+        stop_pending_drain_background()
+        reset_backend()
         session.close()
         sys.exit(0)
 
@@ -999,7 +1012,9 @@ def _cmd_mesh_start(args: argparse.Namespace) -> int:
 
 
 def _cmd_mesh_join(args: argparse.Namespace) -> int:
-    """Verify connectivity to a mesh peer by opening an in-process peer session."""
+    """Connect to a mesh peer, start index subscriber, and wait for Ctrl-C."""
+    import signal as _signal
+
     import zenoh
 
     cfg = zenoh.Config()
@@ -1012,9 +1027,26 @@ def _cmd_mesh_join(args: argparse.Namespace) -> int:
         return 1
 
     print(f'Connected to peer {args.peer}')
-    print(f'Use: ZENOH_CONNECT={args.peer} mesh-mem save ...')
-    session.close()
-    return 0
+    print(f'In another terminal: ZENOH_CONNECT={args.peer} MESH_MEM_BACKEND=zenoh mesh-mem save ...')
+    print('Subscribing to mesh observations (saves from peers will be stored locally)...')
+    print('Press Ctrl-C to stop.')
+
+    # Start index subscriber to receive saves from the mesh.
+    os.environ['ZENOH_CONNECT'] = args.peer
+    os.environ['MESH_MEM_BACKEND'] = 'zenoh'
+    set_rebuild_on_init_default(False)
+    get_index()  # opens client session + starts replication subscriber
+
+    def _shutdown(sig: int, frame: object) -> None:
+        stop_pending_drain_background()
+        reset_backend()
+        session.close()
+        sys.exit(0)
+
+    _signal.signal(_signal.SIGINT, _shutdown)
+    _signal.signal(_signal.SIGTERM, _shutdown)
+    _signal.pause()
+    return 0  # unreachable
 
 
 def _cmd_init_local(args: argparse.Namespace) -> int:
@@ -1387,12 +1419,38 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mesh = sub.add_parser(
         'mesh',
         help='Embedded zenoh router management (Tier 1 — no zenohd binary required)',
+        description=(
+            'Tier 1 ephemeral multi-host mesh without zenohd binary.\n\n'
+            '60-second multi-host start:\n'
+            '  Host A: mesh-mem mesh start\n'
+            '  Host B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 MESH_MEM_BACKEND=zenoh '
+            'mesh-mem mesh join tcp/<host-a-ip>:17447\n'
+            '  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 MESH_MEM_BACKEND=zenoh mesh-mem save "hello mesh"\n'
+            '  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 MESH_MEM_BACKEND=zenoh mesh-mem search "hello"\n\n'
+            'Env vars:\n'
+            '  ZENOH_CONNECT   zenoh router endpoint (e.g. tcp/192.168.1.10:17447)\n'
+            '  MESH_MEM_BACKEND  set to "zenoh" to use Zenoh transport (default for mesh)'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_mesh_sub = p_mesh.add_subparsers(dest='mesh_command', required=True)
 
     p_mesh_start = p_mesh_sub.add_parser(
         'start',
         help='Start an in-process zenoh router (foreground; Ctrl-C to stop)',
+        description=(
+            'Start an in-process zenoh router (mode=router). No zenohd binary required.\n\n'
+            'The router subscribes to all peer saves and stores them in the local SQLite index,\n'
+            'so `mesh-mem search` from this terminal will return content saved by remote peers.\n\n'
+            'Example:\n'
+            '  mesh-mem mesh start --listen tcp/0.0.0.0:17447\n\n'
+            'Then on a remote host:\n'
+            '  ZENOH_CONNECT=tcp/<this-host>:17447 MESH_MEM_BACKEND=zenoh mesh-mem save "hello"\n\n'
+            'Env vars:\n'
+            '  ZENOH_CONNECT     (set automatically by mesh start to point at the local router)\n'
+            '  MESH_MEM_BACKEND  (set automatically to "zenoh")'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_mesh_start.add_argument(
         '--listen',
@@ -1403,11 +1461,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_mesh_join = p_mesh_sub.add_parser(
         'join',
-        help='Connect to a mesh peer and verify connectivity',
+        help='Connect to a mesh peer (foreground; accumulates peer saves locally)',
+        description=(
+            'Connect to a mesh router as an in-process peer. Starts a replication subscriber\n'
+            'so remote saves are accumulated in the local SQLite index (Ctrl-C to stop).\n\n'
+            'Example:\n'
+            '  mesh-mem mesh join tcp/192.168.1.10:17447\n\n'
+            'After joining, in another terminal:\n'
+            '  ZENOH_CONNECT=tcp/192.168.1.10:17447 MESH_MEM_BACKEND=zenoh mesh-mem save "hello"\n'
+            '  mesh-mem search "hello"  # reads from local SQLite filled by the subscriber\n\n'
+            'Env vars:\n'
+            '  ZENOH_CONNECT     endpoint to connect to (set automatically from <peer> arg)\n'
+            '  MESH_MEM_BACKEND  set to "zenoh" automatically'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_mesh_join.add_argument(
         'peer',
-        help='Peer endpoint (e.g. tcp/192.168.1.10:17447)',
+        help='Peer endpoint to connect to (e.g. tcp/192.168.1.10:17447)',
     )
     p_mesh_join.set_defaults(func=_cmd_mesh_join)
 

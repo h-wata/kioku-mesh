@@ -312,11 +312,42 @@ def check_embedded_router(
             hint='Run `mesh-mem mesh start` to start an in-process router (no zenohd needed).',
             details={'endpoint': raw, 'host': host, 'port': port, 'running': False},
         )
+    # TCP reachable — try a zenoh peer probe to get router identity.
+    # Note: connected_peers count requires in-process access to the router session;
+    # it is not available via external probe. We report the router ZIDs visible
+    # from a short-lived peer connection as the best external approximation.
+    router_zids: list[str] = []
+    try:
+        import time
+
+        import zenoh as _zenoh
+
+        tmp_cfg = _zenoh.Config()
+        tmp_cfg.insert_json5('mode', '"peer"')
+        tmp_cfg.insert_json5('connect/endpoints', f'["{raw}"]')
+        tmp_cfg.insert_json5('scouting/multicast/enabled', 'false')
+        tmp_session = _zenoh.open(tmp_cfg)
+        time.sleep(0.3)
+        router_zids = [str(z) for z in tmp_session.info.routers_zid()]
+        tmp_session.close()
+    except Exception:  # noqa: BLE001
+        pass
+
     return CheckResult(
         name='embedded_router',
         status=CheckStatus.PASS,
         summary=f'Embedded router listening on tcp/{host}:{port}',
-        details={'endpoint': raw, 'host': host, 'port': port, 'running': True},
+        details={
+            'endpoint': raw,
+            'host': host,
+            'port': port,
+            'running': True,
+            'router_zids': router_zids,
+            'peer_count_note': (
+                'connected_peers count requires in-process router access; '
+                'router_zids shows routers visible from external probe'
+            ),
+        },
     )
 
 

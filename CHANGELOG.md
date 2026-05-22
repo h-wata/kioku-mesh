@@ -12,6 +12,7 @@ versions without a migration path until `1.0.0`.
 
 ### Fixed
 
+- **Tier 1 mesh integration** (#112 post-merge fix): `mesh-mem mesh start` now starts an index subscriber within the router process, so peer saves published via `ZENOH_CONNECT` are written to the router's local SQLite index and visible from `mesh-mem search` in the router context. `mesh join` is now foreground (Ctrl-C to stop) and also starts a replication subscriber. Addresses post-merge review B1/B2/I1/I2/N1.
 - **Forward-compatibility for Observation schema**: when a peer running
   an older release receives a PUT carrying fields it doesn't know about,
   those fields are now preserved via a `_extras` side channel and re-emitted
