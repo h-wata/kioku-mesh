@@ -66,12 +66,21 @@ class MemoryBackend(Protocol):
 
 
 class LocalBackend:
-    """SQLite-only backend. No zenohd required."""
+    """SQLite-only backend. No zenohd required.
+
+    Uses a dedicated index path (``state_dir()/local/index.db``) that is
+    physically separate from the Zenoh sidecar index (``state_dir()/index.db``).
+    This prevents ``rebuild_from_zenoh()`` from shadowing local-only rows when
+    the user switches backend from ``local`` to ``zenoh`` (B2 fix).
+    """
 
     def __init__(self) -> None:
+        from .identity import state_dir
         from .local_index import LocalIndex
 
-        self._idx = LocalIndex.connect()
+        local_dir = state_dir() / 'local'
+        local_dir.mkdir(parents=True, exist_ok=True)
+        self._idx = LocalIndex.connect(str(local_dir / 'index.db'))
 
     def put_observation(self, obs: Observation) -> None:
         self._idx.upsert(obs)

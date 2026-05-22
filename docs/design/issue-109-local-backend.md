@@ -66,6 +66,37 @@ backend: local  # or: zenoh (default when absent)
 2. `~/.config/mesh-mem/config.yaml` に `backend: local` を書く
 3. 次のステップは `mesh-mem save` / `mesh-mem search` がすぐ使える
 
+## B2: backend-switch 時の local row shadowing 問題
+
+### 問題の再現
+
+W4 review で再現確認済み: `LocalBackend` と `ZenohBackend` が同じ SQLite index
+(`state_dir()/index.db`) を共有しているため、`local → zenoh` に切り替えた直後に
+`rebuild_from_zenoh()` が走ると、Zenoh upstream に存在しない local-only row が
+`shadowed` 扱いになり通常 search から消える (`RebuildStats(shadowed=1)`)。
+これは silent data loss に相当する。
+
+### 選択した修正方針
+
+**方針 1: local backend 用 state/index を Zenoh cache と物理的に分離する。**
+
+- `LocalBackend` は `state_dir() / 'local' / 'index.db'` を使う
+- `ZenohBackend` (store.py 経由) は従来通り `state_dir() / 'index.db'` を使う
+
+選定理由:
+- local-only データは Zenoh upstream と独立して永続化すべきであり、
+  Zenoh 側の `rebuild_from_zenoh()` が触れないパスに置くのが最もシンプル。
+- 方針 2 (識別子フラグ) は rebuild ロジックに変更が必要で影響範囲が広い。
+- 方針 3 (明示 migration) は UX が大きく変わり PR スコープ外。
+- パス分離は `LocalIndex.connect(db_path)` に引数を渡すだけで実現可能。
+
+### 実装概要
+
+- `src/mesh_mem/backend.py` の `LocalBackend.__init__` で
+  `state_dir() / 'local'` ディレクトリを作成し、そこの `index.db` を使う。
+- 既存の `store.py` と `local_index.py` への変更なし。
+- 回帰テスト: `test_backend_switch_does_not_shadow_local_rows` を追加。
+
 ## テスト戦略
 
 ### contract tests の共有

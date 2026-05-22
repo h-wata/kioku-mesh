@@ -234,3 +234,66 @@ def test_cli_save_local_no_zenohd(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     rc = cli_main(['save', 'no zenohd test'])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# B2 regression: backend-switch must not shadow local-only rows
+# ---------------------------------------------------------------------------
+
+
+def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """W4 reproduction scenario: local save → switch to zenoh → row must survive.
+
+    Before B2 fix: LocalBackend and ZenohBackend shared the same SQLite index.
+    rebuild_from_zenoh() with an empty upstream would mark local-only rows as
+    'shadowed', making them invisible in normal search (silent data loss).
+
+    After B2 fix: LocalBackend uses state_dir()/local/index.db which is
+    physically separate from the zenoh cache index (state_dir()/index.db).
+    The rebuild never touches the local DB, so rows persist across the switch.
+    """
+    from mesh_mem.local_index import LocalIndex
+
+    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    reset_backend()
+
+    # Step 1: save via local backend.
+    local_b = get_backend()
+    assert isinstance(local_b, LocalBackend)
+    obs = Observation(content='B2 regression data', project='b2test')
+    local_b.put_observation(obs)
+
+    # Confirm the local index path is under state_dir()/local/.
+    from mesh_mem.identity import state_dir
+
+    expected_local_db = state_dir() / 'local' / 'index.db'
+    assert expected_local_db.exists(), 'LocalBackend must write to state_dir()/local/index.db'
+
+    # Confirm the zenoh cache index path is *not* the same file.
+    zenoh_cache_db = state_dir() / 'index.db'
+    assert expected_local_db != zenoh_cache_db, 'Local and zenoh cache DBs must be different paths'
+
+    # Step 2: simulate what happens when rebuild_from_zenoh is called with an empty
+    # upstream — this used to shadow local-only rows in the shared DB.
+    # We trigger it directly on the zenoh-cache DB (not the local DB).
+    zenoh_idx = LocalIndex.connect(str(zenoh_cache_db))
+    try:
+        # Fake a Zenoh session that returns no observations or tombstones.
+        class _EmptySession:
+            def get(self, _key: str, **_kw):  # noqa: ANN202
+                return []
+
+        stats = zenoh_idx.rebuild_from_zenoh(_EmptySession())
+        # The rebuild ran against the zenoh DB — it should not have touched local DB.
+        assert stats.shadowed == 0, 'Zenoh cache DB was empty so nothing should be shadowed'
+    finally:
+        zenoh_idx.close()
+
+    # Step 3: switch back to local backend and confirm the row is still visible.
+    reset_backend()
+    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    reset_backend()
+    results = get_backend().search_observations(query='B2 regression', project='b2test')
+    assert any(
+        r.observation_id == obs.observation_id for r in results
+    ), 'local-only row must survive rebuild_from_zenoh on the zenoh cache DB'
