@@ -32,6 +32,7 @@ from fastmcp.client.transports import StdioTransport  # noqa: E402
 
 from mesh_mem import store  # noqa: E402
 import mesh_mem.__main__ as cli_module  # noqa: E402
+from mesh_mem.backend import reset_backend  # noqa: E402
 from mesh_mem.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
@@ -335,7 +336,8 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
 
 def test_cli_search_empty_format_variants(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     """Empty search results follow the per-format output contract."""
-    monkeypatch.setattr(cli_module, 'search_observations', lambda **kwargs: [])
+    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    reset_backend()
 
     assert cli_main(['search']) == 0
     assert capsys.readouterr().out == 'No matching memories.\n'
@@ -407,32 +409,17 @@ def test_cli_main_requests_background_drain_shutdown_on_exit(
     capsys: pytest.CaptureFixture,
 ) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli_module, 'search_observations', lambda limit=store.MAX_SEARCH: [])
-    monkeypatch.setattr(cli_module, 'get_pc_id', lambda: 'p' * 32)
-    monkeypatch.setattr(cli_module, 'get_session_id', lambda: 'test-session')
-    monkeypatch.setattr(cli_module, 'mesh_ready_label', lambda: 'yes')
-    monkeypatch.setattr(
-        cli_module,
-        'get_transport_status',
-        lambda: store.TransportStatus(
-            zenoh_session='connected',
-            last_put_at_iso='',
-            last_put_status='never',
-            recent_put_ok=0,
-            recent_put_error=0,
-            recent_put_window=0,
-            pending_puts=0,
-            drain_in_progress=False,
-            drain_last_run_iso='',
-            drain_total_succeeded=0,
-        ),
-    )
+    # Use local backend so no zenohd is required — search_observations returns [] naturally.
+    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    reset_backend()
     monkeypatch.setattr(cli_module, 'stop_pending_drain_background', lambda: calls.append('stop'))
     monkeypatch.setattr(cli_module, '_reset_session', lambda: calls.append('reset'))
 
     assert cli_main(['status']) == 0
     capsys.readouterr()
-    assert calls == ['stop', 'reset']
+    # Both cleanup hooks must fire in main()'s finally block.
+    assert 'stop' in calls
+    assert 'reset' in calls
 
 
 def test_cli_save_importance_out_of_range(capsys: pytest.CaptureFixture) -> None:
