@@ -966,6 +966,57 @@ def _cmd_mcp_install(args: argparse.Namespace) -> int:
     return 0
 
 
+_MESH_DEFAULT_LISTEN = 'tcp/0.0.0.0:17447'
+
+
+def _cmd_mesh_start(args: argparse.Namespace) -> int:
+    """Open an in-process zenoh router and wait for Ctrl-C (Tier 1, no zenohd needed)."""
+    import signal as _signal
+
+    import zenoh
+
+    cfg = zenoh.Config()
+    cfg.insert_json5('mode', '"router"')
+    cfg.insert_json5('listen/endpoints', f'["{args.listen}"]')
+    try:
+        session = zenoh.open(cfg)
+    except Exception as e:  # noqa: BLE001
+        print(f'error: failed to open router session: {e}', file=sys.stderr)
+        return 1
+
+    print(f'Router listening on {args.listen}')
+    print(f'Connect peers with: ZENOH_CONNECT={args.listen} mesh-mem save ...')
+    print('Press Ctrl-C to stop.')
+
+    def _shutdown(sig: int, frame: object) -> None:
+        session.close()
+        sys.exit(0)
+
+    _signal.signal(_signal.SIGINT, _shutdown)
+    _signal.signal(_signal.SIGTERM, _shutdown)
+    _signal.pause()
+    return 0  # unreachable
+
+
+def _cmd_mesh_join(args: argparse.Namespace) -> int:
+    """Verify connectivity to a mesh peer by opening an in-process peer session."""
+    import zenoh
+
+    cfg = zenoh.Config()
+    cfg.insert_json5('mode', '"peer"')
+    cfg.insert_json5('connect/endpoints', f'["{args.peer}"]')
+    try:
+        session = zenoh.open(cfg)
+    except Exception as e:  # noqa: BLE001
+        print(f'error: failed to connect to {args.peer}: {e}', file=sys.stderr)
+        return 1
+
+    print(f'Connected to peer {args.peer}')
+    print(f'Use: ZENOH_CONNECT={args.peer} mesh-mem save ...')
+    session.close()
+    return 0
+
+
 def _cmd_init_local(args: argparse.Namespace) -> int:
     """Provision a local-only config that does NOT require zenohd on PATH."""
     from .config import _config_path
@@ -1332,6 +1383,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help='print the command / config block instead of executing the registration',
     )
     p_mcp_install.set_defaults(func=_cmd_mcp_install)
+
+    p_mesh = sub.add_parser(
+        'mesh',
+        help='Embedded zenoh router management (Tier 1 — no zenohd binary required)',
+    )
+    p_mesh_sub = p_mesh.add_subparsers(dest='mesh_command', required=True)
+
+    p_mesh_start = p_mesh_sub.add_parser(
+        'start',
+        help='Start an in-process zenoh router (foreground; Ctrl-C to stop)',
+    )
+    p_mesh_start.add_argument(
+        '--listen',
+        default=_MESH_DEFAULT_LISTEN,
+        help=f'TCP listen endpoint (default: {_MESH_DEFAULT_LISTEN})',
+    )
+    p_mesh_start.set_defaults(func=_cmd_mesh_start)
+
+    p_mesh_join = p_mesh_sub.add_parser(
+        'join',
+        help='Connect to a mesh peer and verify connectivity',
+    )
+    p_mesh_join.add_argument(
+        'peer',
+        help='Peer endpoint (e.g. tcp/192.168.1.10:17447)',
+    )
+    p_mesh_join.set_defaults(func=_cmd_mesh_join)
 
     return parser
 
