@@ -13,6 +13,8 @@ versions without a migration path until `1.0.0`.
 ### Fixed
 
 - **Tier 1 mesh integration** (#112 post-merge fix): `mesh-mem mesh start` now starts an index subscriber within the router process, so peer saves published via `ZENOH_CONNECT` are written to the router's local SQLite index and visible from `mesh-mem search` in the router context. `mesh join` is now foreground (Ctrl-C to stop) and also starts a replication subscriber. Addresses post-merge review B1/B2/I1/I2/N1.
+- **`mesh start` peer hint now shows real host IP** (B3 fix): when listening on a wildcard address (`0.0.0.0`), the startup message now auto-detects the host's LAN IP(s) and shows separate hints for same-host (`127.0.0.1`) and other-host connections. Previously the other-host hint showed loopback `127.0.0.1`, causing remote peers to connect to their own loopback.
+- **`mesh-mem doctor` connected-peer count**: `check_embedded_router` uses `router_zids` from an external peer probe as an approximation; full peer enumeration requires in-process router state and is deferred to #113.
 - **Forward-compatibility for Observation schema**: when a peer running
   an older release receives a PUT carrying fields it doesn't know about,
   those fields are now preserved via a `_extras` side channel and re-emitted

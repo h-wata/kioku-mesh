@@ -984,17 +984,37 @@ def _cmd_mesh_start(args: argparse.Namespace) -> int:
         print(f'error: failed to open router session: {e}', file=sys.stderr)
         return 1
 
-    # Self-connect endpoint: replace 0.0.0.0 with 127.0.0.1 for loopback
-    connect_ep = args.listen.replace('0.0.0.0', '127.0.0.1')
+    # Internal self-connect endpoint (loopback substitution — router process only).
+    self_connect_ep = args.listen.replace('0.0.0.0', '127.0.0.1')
 
-    print(f'Router listening on {args.listen}')
-    print(f'Peers can connect with: ZENOH_CONNECT={connect_ep} MESH_MEM_BACKEND=zenoh mesh-mem save ...')
+    # User-facing peer hints: separate from self_connect_ep so other-host guidance
+    # is correct when listen is wildcard (B3 fix).
+    _port = args.listen.rsplit(':', 1)[-1]
+    _is_wildcard = '0.0.0.0' in args.listen or '[::]' in args.listen
+    if _is_wildcard:
+        _detected = _detect_local_ipv4()
+        print(f'Router listening on {args.listen} (all interfaces).')
+        print(f'  from this host:   ZENOH_CONNECT=tcp/127.0.0.1:{_port} MESH_MEM_BACKEND=zenoh mesh-mem save ...')
+        if _detected:
+            _hint_ip = _detected[0]
+            _all_ips = ', '.join(_detected)
+            print(f'  from other hosts: ZENOH_CONNECT=tcp/{_hint_ip}:{_port} MESH_MEM_BACKEND=zenoh mesh-mem save ...')
+            print(f'                    ^ auto-detected IPs: {_all_ips}')
+        else:
+            print(
+                f'  from other hosts: '
+                f'ZENOH_CONNECT=tcp/<this-host-ip>:{_port} MESH_MEM_BACKEND=zenoh mesh-mem save ...'
+            )
+            print("                    ^ replace <this-host-ip> with this machine's LAN IP")
+    else:
+        print(f'Router listening on {args.listen}.')
+        print(f'  connect with: ZENOH_CONNECT={args.listen} MESH_MEM_BACKEND=zenoh mesh-mem save ...')
     print('Subscribing to peer observations (saves will be visible from this process)...')
     print('Press Ctrl-C to stop.')
 
     # Start index subscriber so peer saves are visible from router search.
     # _open_session() uses ZENOH_CONNECT, so we point it at our own router.
-    os.environ['ZENOH_CONNECT'] = connect_ep
+    os.environ['ZENOH_CONNECT'] = self_connect_ep
     os.environ['MESH_MEM_BACKEND'] = 'zenoh'
     set_rebuild_on_init_default(False)
     get_index()  # opens client session to our router + starts replication subscriber

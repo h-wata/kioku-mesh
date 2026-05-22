@@ -174,6 +174,145 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
             router_proc.kill()
 
 
+def test_mesh_start_peer_hint_not_loopback_only(tmp_path: Path) -> None:
+    """B3 regression: wildcard listen must show real-IP hint, not loopback-only for other hosts."""
+    import signal as _signal
+
+    port = _free_port()
+    listen = f'tcp/0.0.0.0:{port}'
+    state_dir = str(tmp_path / 'state')
+
+    router_proc = subprocess.Popen(
+        [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', listen],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_subprocess_env(MESH_MEM_STATE_DIR=state_dir),
+    )
+
+    # Wait for router to start listening, then send SIGINT to capture startup output
+    reachable = _wait_for_tcp('127.0.0.1', port, timeout=10.0)
+    if not reachable:
+        router_proc.terminate()
+        router_proc.wait(timeout=3)
+        pytest.fail(f'Router did not start on {listen}')
+
+    time.sleep(0.3)
+    router_proc.send_signal(_signal.SIGINT)
+    try:
+        stdout_text, _ = router_proc.communicate(timeout=8)
+    except subprocess.TimeoutExpired:
+        router_proc.kill()
+        stdout_text, _ = router_proc.communicate()
+
+    lines = [ln.rstrip() for ln in stdout_text.splitlines()]
+
+    # The "from other hosts" hint must NOT use loopback 127.0.0.1
+    for line in lines:
+        if 'other host' in line.lower():
+            assert '127.0.0.1' not in line, (
+                f'B3: other-host hint must not show loopback 127.0.0.1.\n'
+                f'Offending line: {line!r}\n'
+                f'Full output:\n{stdout_text}'
+            )
+
+    # Wildcard listen acknowledgement must appear
+    assert any(
+        '0.0.0.0' in ln or 'all interface' in ln.lower() for ln in lines
+    ), f'Expected wildcard listen acknowledgement.\nOutput:\n{stdout_text}'
+
+
+def test_mesh_join_long_running(tmp_path: Path) -> None:
+    """I4: mesh join stays alive (foreground) and accumulates peer saves via replication."""
+    import signal as _signal
+
+    router_port = _free_port()
+    router_listen = f'tcp/127.0.0.1:{router_port}'
+    router_state = str(tmp_path / 'router_state')
+    join_state = str(tmp_path / 'join_state')
+    xdg_dir = str(tmp_path / 'xdg')
+
+    router_proc = subprocess.Popen(
+        [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', router_listen],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_subprocess_env(MESH_MEM_STATE_DIR=router_state, XDG_CONFIG_HOME=xdg_dir),
+    )
+
+    reachable = _wait_for_tcp('127.0.0.1', router_port, timeout=10.0)
+    if not reachable:
+        router_proc.terminate()
+        router_proc.wait(timeout=3)
+        pytest.fail(f'Router did not start on {router_listen}')
+
+    time.sleep(0.5)
+
+    join_proc = subprocess.Popen(
+        [sys.executable, '-m', 'mesh_mem', 'mesh', 'join', router_listen],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_subprocess_env(MESH_MEM_STATE_DIR=join_state, XDG_CONFIG_HOME=xdg_dir),
+    )
+
+    time.sleep(1.0)  # let join subscriber connect
+
+    try:
+        # mesh join must still be running (foreground, not immediately exited)
+        assert join_proc.poll() is None, (
+            f'mesh join exited immediately (returncode={join_proc.returncode}). '
+            'Expected foreground long-running process.'
+        )
+
+        unique_content = f'join-roundtrip-{router_port}'
+
+        # Save via router endpoint — join process subscriber should receive it
+        save_env = _subprocess_env(
+            ZENOH_CONNECT=router_listen,
+            MESH_MEM_BACKEND='zenoh',
+            MESH_MEM_STATE_DIR=str(tmp_path / 'save_state'),
+            XDG_CONFIG_HOME=xdg_dir,
+        )
+        save_result = subprocess.run(
+            [sys.executable, '-m', 'mesh_mem', 'save', unique_content],
+            env=save_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert save_result.returncode == 0, save_result.stderr
+
+        time.sleep(1.5)  # wait for replication to join's SQLite
+
+        # join process's SQLite should now contain the save
+        join_search_env = _subprocess_env(
+            ZENOH_CONNECT=router_listen,
+            MESH_MEM_BACKEND='zenoh',
+            MESH_MEM_STATE_DIR=join_state,
+            XDG_CONFIG_HOME=xdg_dir,
+        )
+        search_result = subprocess.run(
+            [sys.executable, '-m', 'mesh_mem', 'search', 'join-roundtrip'],
+            env=join_search_env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert search_result.returncode == 0, search_result.stderr
+        assert unique_content in search_result.stdout, (
+            f'join process did not accumulate peer save.\n'
+            f'join_state: {join_state}\nSearch stdout: {search_result.stdout!r}'
+        )
+
+    finally:
+        for proc in (join_proc, router_proc):
+            if proc.poll() is None:
+                proc.send_signal(_signal.SIGINT)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+
 def test_doctor_embedded_router_status(tmp_path: Path) -> None:
     """Doctor reports embedded router as running when mesh start is active."""
     port = _free_port()
