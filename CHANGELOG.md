@@ -10,6 +10,8 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-22
+
 ### Fixed
 
 - **Forward-compatibility for Observation schema**: when a peer running
