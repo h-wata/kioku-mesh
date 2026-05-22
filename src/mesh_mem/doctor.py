@@ -30,6 +30,7 @@ from .identity import state_dir
 
 ZENOH_DEFAULT_ENDPOINT = 'tcp/localhost:7447'
 ZENOH_CONNECT_TIMEOUT_SEC = 1.0
+MESH_ROUTER_DEFAULT_ENDPOINT = 'tcp/localhost:17447'
 
 
 class CheckStatus(str, Enum):
@@ -275,6 +276,50 @@ def _resolve_state_dir() -> Path:
     return state_dir()
 
 
+def check_embedded_router(
+    endpoint: str | None = None,
+    *,
+    timeout: float = ZENOH_CONNECT_TIMEOUT_SEC,
+    connect: Callable[[tuple[str, int], float], None] | None = None,
+) -> CheckResult:
+    """Probe the embedded zenoh router listen endpoint via TCP.
+
+    Reads ``MESH_MEM_ROUTER_ENDPOINT`` (default ``tcp/localhost:17447``).
+    A missing router is WARN (not FAIL) because zenohd or a remote router
+    may serve the same role.
+    """
+    raw = (
+        endpoint if endpoint is not None else os.environ.get('MESH_MEM_ROUTER_ENDPOINT', MESH_ROUTER_DEFAULT_ENDPOINT)
+    )
+    parsed = _parse_zenoh_endpoint(raw)
+    if parsed is None:
+        return CheckResult(
+            name='embedded_router',
+            status=CheckStatus.WARN,
+            summary=f'MESH_MEM_ROUTER_ENDPOINT={raw!r} is not a tcp/host:port endpoint',
+            hint='Set MESH_MEM_ROUTER_ENDPOINT to a tcp/host:port form (e.g. tcp/127.0.0.1:17447).',
+            details={'endpoint': raw},
+        )
+    host, port = parsed
+    probe = connect or _default_tcp_probe
+    try:
+        probe((host, port), timeout)
+    except OSError:
+        return CheckResult(
+            name='embedded_router',
+            status=CheckStatus.WARN,
+            summary=f'Embedded router not reachable at tcp/{host}:{port}',
+            hint='Run `mesh-mem mesh start` to start an in-process router (no zenohd needed).',
+            details={'endpoint': raw, 'host': host, 'port': port, 'running': False},
+        )
+    return CheckResult(
+        name='embedded_router',
+        status=CheckStatus.PASS,
+        summary=f'Embedded router listening on tcp/{host}:{port}',
+        details={'endpoint': raw, 'host': host, 'port': port, 'running': True},
+    )
+
+
 # -- Orchestration & rendering -------------------------------------------------
 
 
@@ -290,6 +335,7 @@ def run_all_checks() -> list[CheckResult]:
         check_config_file(),
         check_zenohd_reachable(),
         check_state_dir_hardlinks(),
+        check_embedded_router(),
     ]
 
 
