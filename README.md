@@ -1,54 +1,78 @@
 # mesh-mem
 
-> Persistent, mesh-synced memory for your AI coding agent.
-> Start on one machine in 30 seconds. Use the same memory across machines when you need it.
+Persistent, mesh-synced memory for your AI coding agent.
+Start on one machine in 30 seconds. Use the same memory across machines
+when you need it.
 
 ## 30-second local start
 
 ```bash
-# Install
-uv tool install git+https://github.com/h-wata/mesh-mem.git
+pip install -e git+https://github.com/h-wata/mesh-mem.git#egg=mesh-mem
+# or: uv tool install git+https://github.com/h-wata/mesh-mem.git
 ```
 
-<!-- TODO(#109): mesh-mem init --mode local — fill once W1 lands -->
-<!-- TODO(#108): mesh-mem demo output — fill once #108 lands -->
-<!-- TODO(#109): mesh-mem search <query> output — fill once W1 lands -->
+```
+$ mesh-mem init --mode local
+wrote ~/.config/mesh-mem/config.yaml
+local backend ready — no zenohd required.
+next: mesh-mem save "hello local"
+
+$ mesh-mem save "Chose Postgres over SQLite for analytics"
+saved: a1b2c3d4...
+
+$ mesh-mem search "Postgres"
+[note][2] 2026-05-22T07:51:47
+Chose Postgres over SQLite for analytics <id=a1b2c3d4...>
+
+$ mesh-mem mcp install
+```
+
+No daemon. No extra binary. Your agent starts reading and writing memory immediately.
 
 ## What this is
 
 mesh-mem gives your AI coding agents (Claude Code, Codex CLI, Gemini CLI…) a shared
 long-term memory that survives session resets and syncs across hosts over a LAN, VPN,
-or mesh-VPN. Unlike single-host solutions such as
-[engram](https://github.com/Gentleman-Programming/engram) or
-[claude-mem](https://github.com/thedotmack/claude-mem), mesh-mem stores every
-observation in a [Zenoh](https://zenoh.io/) + RocksDB mesh so that a decision saved on
-your desktop is instantly searchable on your laptop — or by a different agent on the
-same machine.
+or mesh-VPN. A decision saved on your desktop is instantly searchable on your laptop —
+or by a different agent on the same machine.
+
+### Architecture: Tier 0 / 1 / 2
+
+| Tier | What runs | What you get | Dependencies |
+|---|---|---|---|
+| **Tier 0** | SQLite only (no zenoh library started) | Single-machine persistence (save / search) | None beyond mesh-mem |
+| **Tier 1** | zenoh-python in `mode=router` (in-process) | Ephemeral multi-host mesh, no extra binary | zenoh-python |
+| **Tier 2** | auto-downloaded zenohd + zenoh-backend-rocksdb | Persistent multi-host mesh | zenohd (auto-provisioned) |
+
+**Tier 0** is the default `--mode local`. It writes to a local SQLite database and
+requires nothing beyond the mesh-mem package itself. Zero daemon, zero extra install.
+
+**Tier 1** lifts the same SQLite store into an in-process Zenoh router so multiple
+machines can share observations over TCP without running a separate `zenohd` binary.
+Sessions are ephemeral — observations sync while the router is running but are not
+replicated to persistent storage across hosts.
+
+**Tier 2** adds persistence across restarts by routing through `zenohd` with the
+RocksDB backend. Observations survive host reboots and propagate to peers that were
+offline during a write. This is the setup documented in the [Power users](#power-users-multi-host-mesh)
+section.
 
 ### What you get
 
-- **LAN / VPN / mesh-VPN shared memory** — observations saved on one host are
-  searchable on every other peer within seconds.
 - **Multi-agent support** — Claude Code, Codex CLI, Claude Desktop, Gemini CLI, and
   ChatGPT Desktop can all read and write the same memory pool.
-- **One-command MCP registration** — `mesh-mem mcp install --client claude-code` (or
-  `--client codex-cli`) wires the MCP server into your agent's config with sensible
-  defaults; no JSON / TOML hand-editing required.
-- **Self-diagnosis** — `mesh-mem doctor` checks zenohd reachability, config, and
+- **One-command MCP registration** — `mesh-mem mcp install` wires the MCP server into
+  your agent's config with sensible defaults; no JSON / TOML hand-editing required.
+- **Self-diagnosis** — `mesh-mem doctor` checks backend reachability, config, and
   storage health with actionable hints.
-- **SQLite-first local search** — fast substring search and tab-completion without
-  Zenoh round-trips; Zenoh full-scan available as fallback.
-- **Zenoh + RocksDB persistence** — survives `zenohd` restarts; cross-peer replication
-  is eventually consistent.
+- **SQLite-first local search** — fast substring search and tab-completion without any
+  network round-trips.
 - **Soft-delete with GC** — `mesh-mem delete` writes a tombstone; `mesh-mem gc`
-  physically purges expired records across the mesh.
+  physically purges expired records.
 - **stdio MCP transport** — works with all agents that support MCP stdio; no HTTP
   tunnel or auth layer needed for trusted-LAN usage.
 
 ## Try it (local-only quickstart)
-
-<!-- TODO(#109): ローカルモード起動手順をここに貼る — fill once W1 lands -->
-<!-- TODO(#108): mesh-mem demo の詳細をここに貼る — fill once #108 lands -->
 
 ### Install mesh-mem
 
@@ -69,34 +93,12 @@ After install, both `mesh-mem` (CLI) and `mesh-mem-mcp` (MCP server) land on `PA
 > - `mesh-mem-mcp` (two hyphens) — the **stdio MCP server**. Spawned by MCP clients
 >   automatically; running it from a terminal prints a usage message and exits.
 
-### Verify with `mesh-mem doctor`
+### Initialize local backend
 
 ```bash
-mesh-mem doctor          # human-readable PASS / FAIL with hints
-mesh-mem doctor --json   # machine-readable; same checks
-```
-
-Exit code: `0` all pass, `1` warnings, `2` any failure (scriptable). Current v0.3
-check set:
-
-- `zenohd_binary` — `zenohd` is on PATH
-- `config_file` — `~/.config/mesh-mem/zenohd.json5` exists (`mesh-mem init` if not)
-- `zenohd_reachable` — TCP probe to `ZENOH_CONNECT` (default `tcp/localhost:7447`)
-- `state_dir_hardlinks` — `MESH_MEM_STATE_DIR` is writable and supports POSIX hard links
-
-JSON shape:
-
-```json
-{
-  "ok": false,
-  "worst_status": "fail",
-  "checks": [
-    {"name": "zenohd_reachable", "status": "fail",
-     "summary": "tcp/127.0.0.1:7447 is not reachable",
-     "hint": "Start zenohd in another terminal: ...",
-     "details": {"endpoint": "tcp/127.0.0.1:7447", "host": "127.0.0.1", "port": 7447, "errno": 111}}
-  ]
-}
+mesh-mem init --mode local
+# wrote ~/.config/mesh-mem/config.yaml
+# local backend ready — no zenohd required.
 ```
 
 ### Save and search
@@ -113,6 +115,33 @@ mesh-mem save "store oidc tokens server-side, never in client cookies" \
 mesh-mem search "note"               # default --limit 50, summary-first display
 mesh-mem get-memory <observation_id> # full record (32-char id)
 mesh-mem status
+```
+
+### Verify with `mesh-mem doctor`
+
+```bash
+mesh-mem doctor          # human-readable PASS / FAIL with hints
+mesh-mem doctor --json   # machine-readable; same checks
+```
+
+Exit code: `0` all pass, `1` warnings, `2` any failure (scriptable). Current v0.3
+check set:
+
+- `config_file` — `~/.config/mesh-mem/config.yaml` exists (`mesh-mem init` if not)
+- `state_dir_hardlinks` — `MESH_MEM_STATE_DIR` is writable and supports POSIX hard links
+
+JSON shape:
+
+```json
+{
+  "ok": false,
+  "worst_status": "fail",
+  "checks": [
+    {"name": "config_file", "status": "fail",
+     "summary": "~/.config/mesh-mem/config.yaml not found",
+     "hint": "Run: mesh-mem init --mode local"}
+  ]
+}
 ```
 
 ## Use it with your agent (MCP)
@@ -139,7 +168,7 @@ mesh-mem mcp install --client codex-cli
 
 Both forms bake the absolute path to `mesh-mem-mcp` into the
 registration, set sensible `MESH_MEM_AGENT_FAMILY` / `MESH_MEM_CLIENT_ID`
-defaults per client, and route through `ZENOH_CONNECT=tcp/127.0.0.1:7447`.
+defaults per client.
 
 Useful flags:
 
@@ -170,27 +199,6 @@ traffic between spokes without a direct link, so adding a new spoke does
 **not** require touching any existing peer's config or restarting them.
 Verified empirically with a 3-PC test on 2026-05-10
 (`docs/poc-reports/topology-2026-05-10.md`).
-
-### Multi-host demo (expected flow)
-
-> **TODO: demo asset to be added — see [#89](https://github.com/h-wata/mesh-mem/issues/89).**
-> A screencast / animated GIF / asciinema recording is planned as a follow-up.
-
-Expected flow (two hosts sharing one save):
-
-```
-# Host A
-uv tool install git+https://github.com/h-wata/mesh-mem.git
-mesh-mem init && zenohd -c ~/.config/mesh-mem/zenohd.json5 &
-mesh-mem save "Today decided to use Zenoh for mesh transport" --project my-project
-
-# Host B (same steps, pointing at Hub A)
-uv tool install git+https://github.com/h-wata/mesh-mem.git
-mesh-mem init --mode spoke --connect <Host-A-IP>
-zenohd -c ~/.config/mesh-mem/zenohd.json5 &
-mesh-mem search "zenoh"
-# → shows what Host A just saved
-```
 
 ### Step 1 — Install zenohd
 
@@ -344,12 +352,13 @@ PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
 
 | Flag | Purpose |
 |------|---------|
-| `--mode localhost` (default) | loopback + in-memory volume; no rocksdb, no replication |
+| `--mode local` (default) | SQLite-only local backend; no zenoh, no daemon |
+| `--mode localhost` | loopback + in-memory volume; no rocksdb, no replication |
 | `--mode hub` | LAN-facing router with rocksdb + replication; spokes dial in |
 | `--mode spoke` | rocksdb + replication; dials the hub (requires `--connect`) |
 | `--listen ENDPOINT` | repeatable. Accepts `ip`, `ip:port`, or `tcp/ip:port`. If omitted on hub/spoke, an interactive picker lists detected IFs. |
 | `--connect ENDPOINT` | repeatable. Required for `--mode spoke`. |
-| `--out PATH` | override output path (default: `~/.config/mesh-mem/zenohd.json5`, honors `XDG_CONFIG_HOME`) |
+| `--out PATH` | override output path (default: `~/.config/mesh-mem/config.yaml`, honors `XDG_CONFIG_HOME`) |
 | `--force` | overwrite an existing file |
 | `--print` | emit to stdout instead of writing a file |
 | `--install-systemd` | also write a user-scope systemd unit at `~/.config/systemd/user/mesh-mem-zenohd.service` so `zenohd` starts on login. Linux only — macOS / Windows / non-systemd hosts get a clear error. |
@@ -397,7 +406,8 @@ stays fast even when the mesh is large.
 
 ### Architecture summary
 
-- **Source of truth:** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.
+- **Source of truth (Tier 0):** SQLite local database under `MESH_MEM_STATE_DIR`.
+- **Source of truth (Tier 2):** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.
 - **Read path:** SQLite local sidecar index by default; Zenoh full-scan fallback with `MESH_MEM_DISABLE_INDEX=1`.
 - **Delete model:** logical delete is an existence-based tombstone; physical delete is handled by `mesh-mem gc`.
 - **Identity:** `agent_family` / `client_id` come from env, `pc_id` is persisted per host, `session_id` is stable per process.
@@ -642,7 +652,8 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 ### Requirements
 
 - Python >= 3.10
-- Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). Older `zenohd` 1.5 builds will talk to a 1.9 client but do not ship rocksdb replication as first-class; stick to 1.9 on real hosts. See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
+- For Tier 0 (local mode): no extra dependencies beyond mesh-mem itself.
+- For Tier 2 (multi-host): Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
 - `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
 - NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
 
