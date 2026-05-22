@@ -48,6 +48,7 @@ versions without a migration path until `1.0.0`.
 - **MCP server instructions add an explicit SKIP list and type/importance guidance** (#73). PR/Issue lifecycle ticks, restated PR/ADR/CHANGELOG content, in-conversation progress logs, and bare `tests pass` notes are now called out as save-skip cases. `decision` / `bug` / `pattern` / `config` are preferred over `summary`; `importance` 1-2 invites reconsidering whether to save at all.
 - **Docs: install guidance now leads with `uv tool install`.** README Quick start and `docs/mcp-clients.md` recommend `uv tool install git+https://github.com/h-wata/mesh-mem.git` (or `--editable .` for a local checkout), which exposes `mesh-mem` / `mesh-mem-mcp` at `~/.local/bin/` without venv activation or full-path invocation. MCP registration examples updated accordingly. The manual `python3 -m venv ~/.venv/mesh-mem` flow is retained as a fallback. No code or runtime behaviour change.
 - docs: README rewritten around v0.3 hero + Tier 0/1/2 narrative (#110)
+- docs: README Power users section polish — Features ordering, internal anchors, mesh-specific doctor placement (#111)
 
 ### Documentation
 
