@@ -7,8 +7,8 @@ when you need it.
 ## 30-second local start
 
 ```bash
-pip install -e git+https://github.com/h-wata/mesh-mem.git#egg=kioku-mesh
-# or: uv tool install git+https://github.com/h-wata/mesh-mem.git
+pip install -e git+https://github.com/h-wata/kioku-mesh.git#egg=kioku-mesh
+# or: uv tool install git+https://github.com/h-wata/kioku-mesh.git
 ```
 
 ```
@@ -83,7 +83,7 @@ section.
 
 ```bash
 # recommended
-uv tool install git+https://github.com/h-wata/mesh-mem.git
+uv tool install git+https://github.com/h-wata/kioku-mesh.git
 # alternatives:
 #   uv tool install --editable .                          # local checkout
 #   python3 -m venv ~/.venv/mesh-mem && \

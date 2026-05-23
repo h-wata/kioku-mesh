@@ -35,10 +35,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/h-wata/mesh-mem"
-Repository = "https://github.com/h-wata/mesh-mem"
-Issues = "https://github.com/h-wata/mesh-mem/issues"
-Changelog = "https://github.com/h-wata/mesh-mem/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/h-wata/kioku-mesh"
+Repository = "https://github.com/h-wata/kioku-mesh"
+Issues = "https://github.com/h-wata/kioku-mesh/issues"
+Changelog = "https://github.com/h-wata/kioku-mesh/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

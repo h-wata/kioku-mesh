@@ -24,7 +24,7 @@ the Windows equivalent is `C:\Users\<user>\.venv\kioku-mesh\Scripts\<binary>.exe
 - kioku-mesh is **not published on PyPI yet**. Install from a checkout:
 
   ```powershell
-  git clone https://github.com/h-wata/mesh-mem.git
+  git clone https://github.com/h-wata/kioku-mesh.git
   cd kioku-mesh
   python -m venv $env:USERPROFILE\.venv\kioku-mesh
   & "$env:USERPROFILE\.venv\kioku-mesh\Scripts\python.exe" -m pip install -e .

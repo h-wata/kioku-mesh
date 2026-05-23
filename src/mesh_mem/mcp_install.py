@@ -130,7 +130,7 @@ def build_install_plan(
         raise FileNotFoundError(
             'kioku-mesh-mcp not on PATH. Install kioku-mesh first '
             '(`uv tool install kioku-mesh` from PyPI, or '
-            '`uv tool install git+https://github.com/h-wata/mesh-mem.git`).'
+            '`uv tool install git+https://github.com/h-wata/kioku-mesh.git`).'
         )
     env: dict[str, str] = {
         'ZENOH_CONNECT': _DEFAULT_ZENOH_CONNECT,

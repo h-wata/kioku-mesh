@@ -23,7 +23,7 @@ identity 環境変数、CLI コマンド、MCP 登録の作法は同じで、違
 - kioku-mesh は **まだ PyPI 公開していません**。checkout からインストールします。
 
   ```powershell
-  git clone https://github.com/h-wata/mesh-mem.git
+  git clone https://github.com/h-wata/kioku-mesh.git
   cd kioku-mesh
   python -m venv $env:USERPROFILE\.venv\kioku-mesh
   & "$env:USERPROFILE\.venv\kioku-mesh\Scripts\python.exe" -m pip install -e .
