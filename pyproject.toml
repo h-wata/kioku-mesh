@@ -14,11 +14,31 @@ authors = [
     { name = "h-wata" },
 ]
 keywords = ["mesh", "distributed-memory", "zenoh", "mcp", "agent", "memory"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Utilities",
+]
 dependencies = [
     "eclipse-zenoh>=1.9.0",
     "fastmcp>=0.1.0",
     "platformdirs>=4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/h-wata/mesh-mem"
+Repository = "https://github.com/h-wata/mesh-mem"
+Issues = "https://github.com/h-wata/mesh-mem/issues"
+Changelog = "https://github.com/h-wata/mesh-mem/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
