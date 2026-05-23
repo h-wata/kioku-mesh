@@ -1,4 +1,4 @@
-"""Register ``mesh-mem-mcp`` with supported MCP clients (#85).
+"""Register ``kioku-mesh-mcp`` with supported MCP clients (#85).
 
 v0.3 scope: Claude Code (via ``claude mcp add``) and Codex CLI (via direct
 edit of ``~/.codex/config.toml``). Claude Desktop is deferred until #87
@@ -7,7 +7,7 @@ are intentional — the manual recipes in ``docs/mcp-clients.md`` still
 cover those clients.
 
 Design notes:
-- The absolute path to ``mesh-mem-mcp`` is resolved at install time
+- The absolute path to ``kioku-mesh-mcp`` is resolved at install time
   (``shutil.which``) and baked into the registration. The MCP launcher
   (Claude Code, Codex CLI) is invoked from environments that may not
   inherit an interactive shell's PATH, so PATH-relative invocations break.
@@ -36,7 +36,7 @@ from typing import Callable
 
 
 class MCPClient(str, Enum):
-    """MCP clients that ``mesh-mem mcp install`` supports."""
+    """MCP clients that ``kioku-mesh mcp install`` supports."""
 
     CLAUDE_CODE = 'claude-code'
     CODEX_CLI = 'codex-cli'
@@ -55,7 +55,7 @@ _DEFAULT_CLIENT_ID: dict[MCPClient, str] = {
 # Registration key default. Underscore form matches existing docs/mcp-clients.md
 # examples and the most common existing installs in the wild; TOML accepts both
 # without quoting so the choice is purely conventional.
-DEFAULT_REGISTRY_NAME = 'mesh_mem'
+DEFAULT_REGISTRY_NAME = 'kioku_mesh'
 
 # Default Zenoh transport endpoint baked into installed env. Matches the same
 # default used by store.py:get_session().
@@ -66,7 +66,7 @@ _DEFAULT_ZENOH_CONNECT = 'tcp/127.0.0.1:7447'
 class InstallPlan:
     """All the info one client installer needs.
 
-    ``command`` is the absolute path to ``mesh-mem-mcp``. ``env`` is the
+    ``command`` is the absolute path to ``kioku-mesh-mcp``. ``env`` is the
     fully-resolved env block (defaults already merged with user overrides).
     """
 
@@ -113,23 +113,24 @@ def build_install_plan(
 
     Args:
         client: which MCP client to register with.
-        name: registry key (e.g. ``mesh_mem`` or ``mesh-mem``).
-        extra_env: extra env vars merged on top of the default mesh-mem env.
+        name: registry key (e.g. ``kioku_mesh`` or ``kioku-mesh``).
+        extra_env: extra env vars merged on top of the default kioku-mesh env.
         mesh_mem_mcp_path: pin a specific binary path (for tests or non-PATH
             installs). When omitted, resolved via ``shutil.which``.
         which: PATH resolver, defaults to ``shutil.which``. Tests inject a fake.
 
     Raises:
-        FileNotFoundError: when ``mesh-mem-mcp`` can't be resolved.
+        FileNotFoundError: when ``kioku-mesh-mcp`` can't be resolved.
         ValueError: when ``name`` is not a TOML / Claude-safe bare key.
     """
     _validate_registry_name(name)
     resolver = which or shutil.which
-    command = mesh_mem_mcp_path or resolver('mesh-mem-mcp')
+    command = mesh_mem_mcp_path or resolver('kioku-mesh-mcp')
     if not command:
         raise FileNotFoundError(
-            'mesh-mem-mcp not on PATH. Install mesh-mem first '
-            '(`uv tool install git+https://github.com/h-wata/mesh-mem.git`).'
+            'kioku-mesh-mcp not on PATH. Install kioku-mesh first '
+            '(`uv tool install kioku-mesh` from PyPI, or '
+            '`uv tool install git+https://github.com/h-wata/mesh-mem.git`).'
         )
     env: dict[str, str] = {
         'ZENOH_CONNECT': _DEFAULT_ZENOH_CONNECT,
@@ -162,7 +163,7 @@ def install_claude_code(
     run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
     which: Callable[[str], str | None] | None = None,
 ) -> str:
-    """Register ``mesh-mem-mcp`` with Claude Code.
+    """Register ``kioku-mesh-mcp`` with Claude Code.
 
     The CLI route via ``claude mcp add`` is the only registration path that
     Claude Code actually reads — entries under ``~/.claude/settings.json``
@@ -227,7 +228,7 @@ def _render_codex_toml_block(plan: InstallPlan) -> str:
     wild and is easier for users to edit by hand.
     """
     lines = [
-        '# Added by `mesh-mem mcp install --client codex-cli`. Re-run with --force to update.',
+        '# Added by `kioku-mesh mcp install --client codex-cli`. Re-run with --force to update.',
         f'[mcp_servers.{plan.name}]',
         f'command = "{plan.command}"',
         '',
@@ -283,7 +284,7 @@ def install_codex_cli(
     dry_run: bool = False,
     config_path: Path | None = None,
 ) -> str:
-    """Register ``mesh-mem-mcp`` with Codex CLI by editing ``config.toml``.
+    """Register ``kioku-mesh-mcp`` with Codex CLI by editing ``config.toml``.
 
     Codex CLI reads ``mcp_servers.<name>`` tables from its TOML config.
     There is no upstream CLI command analogous to ``claude mcp add``, so
@@ -312,7 +313,7 @@ def install_codex_cli(
     return f'wrote mcp_servers.{plan.name} to {target}'
 
 
-# -- Public entry point (called by `mesh-mem mcp install` handler) --------------
+# -- Public entry point (called by `kioku-mesh mcp install` handler) --------------
 
 
 def install(

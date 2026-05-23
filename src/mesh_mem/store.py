@@ -1,4 +1,4 @@
-"""Zenoh session wrapper for mesh-mem.
+"""Zenoh session wrapper for kioku-mesh.
 
 Responsibilities:
     - open / close / retry the underlying ``zenoh.Session``
@@ -66,10 +66,10 @@ _pending_drain_in_progress = False
 _pending_drain_last_run_iso = ''
 _pending_drain_total_succeeded = 0
 
-# Default rebuild-on-init policy. Long-lived processes (mesh-mem-mcp) keep
+# Default rebuild-on-init policy. Long-lived processes (kioku-mesh-mcp) keep
 # the default ``True`` so the local SQLite index aligns with zenoh once at
 # startup. One-shot CLI invocations call ``set_rebuild_on_init_default(False)``
-# from ``__main__.main`` so each ``mesh-mem save/search/...`` does not pay
+# from ``__main__.main`` so each ``kioku-mesh save/search/...`` does not pay
 # the rebuild_from_zenoh cost on a populated mesh (#38). Env vars
 # MESH_MEM_FORCE_REBUILD=1 and MESH_MEM_SKIP_REBUILD=1 override this default,
 # and an explicit ``set_rebuild_on_init_explicit(True/False)`` (the CLI's
@@ -224,7 +224,7 @@ def get_index() -> LocalIndex:
     (default ``True``) align once at startup, while one-shot CLI invocations
     skip the ~15s scan on a populated mesh (#38). Set
     ``MESH_MEM_FORCE_REBUILD=1`` to opt back in for a CLI run, or pass
-    ``--rebuild`` to ``mesh-mem``. Zenoh errors are logged and swallowed
+    ``--rebuild`` to ``kioku-mesh``. Zenoh errors are logged and swallowed
     so a missing router cannot block reads/writes.
     """
     global _index, _subscribers
@@ -366,7 +366,7 @@ def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:
 
 
 def mesh_ready_label(min_ready_sec: float = 5.0) -> str:
-    """Human-readable readiness string for ``mesh-mem status``.
+    """Human-readable readiness string for ``kioku-mesh status``.
 
     Returns ``'yes'`` when ready, ``'waiting (Xs)'`` showing elapsed seconds
     since session start, or ``'waiting (no session)'`` before any session opens.
@@ -727,7 +727,7 @@ def start_pending_drain_background(limit: int | None = None) -> bool:
         thread = threading.Thread(
             target=_run_pending_drain_background,
             args=(limit, stop_event),
-            name='mesh-mem-pending-drain',
+            name='kioku-mesh-pending-drain',
             daemon=True,
         )
         _pending_drain_stop_event = stop_event
@@ -764,7 +764,7 @@ _OBS_KEY_SEGMENTS = 7  # mem / {obs|tomb} / agent / client / pc / session / obs_
 
 
 def _obs_id_from_key(key_expr: str) -> str | None:
-    """Extract a 32-hex observation_id from a canonical mesh-mem key.
+    """Extract a 32-hex observation_id from a canonical kioku-mesh key.
 
     Conservative parser. Accepts only the exact ``mem/{obs|tomb}/
     {agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}``
@@ -1519,7 +1519,7 @@ def gc_expired_shadows(
     caller's responsibility, typically by running
     :meth:`LocalIndex.rebuild_from_zenoh` first. The CLI ``_cmd_gc``
     driver does that explicitly before invoking this function so that
-    one-shot ``mesh-mem gc`` (which skips startup rebuild per #38)
+    one-shot ``kioku-mesh gc`` (which skips startup rebuild per #38)
     still reaches the discovery branch.
 
     If the live Zenoh query fails the sweep is skipped entirely

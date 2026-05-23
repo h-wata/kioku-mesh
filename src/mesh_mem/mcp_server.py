@@ -1,4 +1,4 @@
-"""FastMCP server exposing mesh-mem tools to coding agents.
+"""FastMCP server exposing kioku-mesh tools to coding agents.
 
 Identity fields (agent_family, client_id, pc_id, session_id) are resolved
 from environment/state on the server side. They are intentionally NOT
@@ -26,7 +26,7 @@ from .store import start_pending_drain_background
 from .store import stop_pending_drain_background
 
 _INSTRUCTIONS = """\
-mesh-mem provides a Zenoh-backed shared memory across coding agents and hosts.
+kioku-mesh provides a Zenoh-backed shared memory across coding agents and hosts.
 Treat this as ACTIVE PROTOCOL — do not wait for the user to ask.
 
 PROACTIVE SAVE — call ``save_observation`` IMMEDIATELY after ANY of these:
@@ -69,7 +69,7 @@ still worth saving after the SKIP rules. Prefer adding ``subject`` + ``summary``
 so search results stay scannable.
 """
 
-mcp = FastMCP('mesh-mem', instructions=_INSTRUCTIONS)
+mcp = FastMCP('kioku-mesh', instructions=_INSTRUCTIONS)
 
 
 def _split_zenoh_connect_endpoints(raw: str | None) -> list[str]:
@@ -314,7 +314,7 @@ def get_memory_status() -> str:
         last_save_at = recent[0].created_at if recent else '-'
         lines = [
             f'last_save_at: {last_save_at}',
-            f'mesh-mem version: {__version__}',
+            f'kioku-mesh version: {__version__}',
             f'backend: {status.mode}',
             f'python: {sys.executable}',
             f'pc_id: {get_pc_id()}',
@@ -357,19 +357,19 @@ def _is_tty_misinvocation() -> bool:
 
 
 def main() -> None:
-    """Entry point for the ``mesh-mem-mcp`` console script."""
+    """Entry point for the ``kioku-mesh-mcp`` console script."""
     if _is_tty_misinvocation():
         print(
-            'mesh-mem-mcp is the stdio MCP server. It is meant to be spawned\n'
+            'kioku-mesh-mcp is the stdio MCP server. It is meant to be spawned\n'
             'by an MCP client (Claude Code, Codex CLI, Claude Desktop, etc.),\n'
             'not run interactively.\n'
             '\n'
             'If you wanted to register this server with a client, run:\n'
-            '    mesh-mem mcp install --client claude-code\n'
-            '    mesh-mem mcp install --client codex-cli\n'
+            '    kioku-mesh mcp install --client claude-code\n'
+            '    kioku-mesh mcp install --client codex-cli\n'
             '\n'
             'To force interactive launch anyway (debugging), pipe stdin from /dev/null:\n'
-            '    mesh-mem-mcp < /dev/null\n'
+            '    kioku-mesh-mcp < /dev/null\n'
             '\n'
             'Or set MESH_MEM_MCP_ALLOW_TTY=1 to bypass this check.',
             file=sys.stderr,

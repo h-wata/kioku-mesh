@@ -42,7 +42,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
 
-# Issue #32: long-running processes (mesh-mem-mcp) keep the index connection
+# Issue #32: long-running processes (kioku-mesh-mcp) keep the index connection
 # open indefinitely, which blocks SQLite's automatic WAL checkpoint from
 # completing the truncate phase. The WAL therefore grows unbounded — observed
 # 130 MB on a host that had been writing for weeks. Issue an explicit

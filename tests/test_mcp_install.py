@@ -76,7 +76,7 @@ def test_build_install_plan_extra_env_overrides_default() -> None:
 
 
 def test_build_install_plan_raises_when_binary_missing() -> None:
-    with pytest.raises(FileNotFoundError, match='mesh-mem-mcp'):
+    with pytest.raises(FileNotFoundError, match='kioku-mesh-mcp'):
         build_install_plan(MCPClient.CODEX_CLI, which=lambda _n: None)
 
 
@@ -98,7 +98,7 @@ def test_build_install_plan_rejects_unsafe_registry_name(bad_name: str) -> None:
         build_install_plan(MCPClient.CODEX_CLI, name=bad_name, mesh_mem_mcp_path='/x/mesh-mem-mcp')
 
 
-@pytest.mark.parametrize('good_name', ['mesh_mem', 'mesh-mem', 'foo-bar', 'X42', 'a'])
+@pytest.mark.parametrize('good_name', ['kioku_mesh', 'mesh-mem', 'foo-bar', 'X42', 'a'])
 def test_build_install_plan_accepts_bare_key_names(good_name: str) -> None:
     """All TOML-spec bare keys must be accepted."""
     plan = build_install_plan(MCPClient.CODEX_CLI, name=good_name, mesh_mem_mcp_path='/x/mesh-mem-mcp')
@@ -111,25 +111,25 @@ def test_build_install_plan_accepts_bare_key_names(good_name: str) -> None:
 def test_build_claude_add_command_includes_env_and_command() -> None:
     plan = InstallPlan(
         client=MCPClient.CLAUDE_CODE,
-        name='mesh_mem',
+        name='kioku_mesh',
         command='/x/mesh-mem-mcp',
         env={'A': '1', 'B': '2'},
     )
     cmd = _build_claude_add_command('/usr/bin/claude', plan)
-    assert cmd[:5] == ['/usr/bin/claude', 'mcp', 'add', 'mesh_mem', '-s']
+    assert cmd[:5] == ['/usr/bin/claude', 'mcp', 'add', 'kioku_mesh', '-s']
     assert '-e' in cmd and 'A=1' in cmd
     assert cmd[-2:] == ['--', '/x/mesh-mem-mcp']
 
 
 def test_install_claude_code_dry_run_emits_command() -> None:
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={'A': '1'})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={'A': '1'})
     out = install_claude_code(plan, dry_run=True, which=lambda _n: '/usr/bin/claude')
-    assert '/usr/bin/claude mcp add mesh_mem' in out
+    assert '/usr/bin/claude mcp add kioku_mesh' in out
     assert '-e A=1' in out
 
 
 def test_install_claude_code_fresh_register_runs_add() -> None:
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
     calls: list[list[str]] = []
 
     def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -139,18 +139,18 @@ def test_install_claude_code_fresh_register_runs_add() -> None:
         return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
 
     msg = install_claude_code(plan, run=fake_run, which=lambda _n: '/usr/bin/claude')
-    assert 'registered mesh_mem' in msg
+    assert 'registered kioku_mesh' in msg
     # list called first, then add (no remove).
     assert calls[0][1:3] == ['mcp', 'list']
-    assert calls[-1][1:4] == ['mcp', 'add', 'mesh_mem']
+    assert calls[-1][1:4] == ['mcp', 'add', 'kioku_mesh']
 
 
 def test_install_claude_code_refuses_when_already_registered() -> None:
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
 
     def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         if argv[1:3] == ['mcp', 'list']:
-            return subprocess.CompletedProcess(argv, 0, stdout='mesh_mem: /old/path - Connected\n', stderr='')
+            return subprocess.CompletedProcess(argv, 0, stdout='kioku_mesh: /old/path - Connected\n', stderr='')
         return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
 
     msg = install_claude_code(plan, run=fake_run, which=lambda _n: '/usr/bin/claude')
@@ -159,41 +159,41 @@ def test_install_claude_code_refuses_when_already_registered() -> None:
 
 
 def test_install_claude_code_force_removes_then_adds() -> None:
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
     invocations: list[list[str]] = []
 
     def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         invocations.append(argv[1:])
         if argv[1:3] == ['mcp', 'list']:
-            return subprocess.CompletedProcess(argv, 0, stdout='mesh_mem: /old - Connected\n', stderr='')
+            return subprocess.CompletedProcess(argv, 0, stdout='kioku_mesh: /old - Connected\n', stderr='')
         return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
 
     msg = install_claude_code(plan, run=fake_run, force=True, which=lambda _n: '/usr/bin/claude')
-    assert 'registered mesh_mem' in msg
+    assert 'registered kioku_mesh' in msg
     # Order must be: list -> remove -> add.
     assert invocations[0][:2] == ['mcp', 'list']
-    assert invocations[1][:3] == ['mcp', 'remove', 'mesh_mem']
-    assert invocations[2][:3] == ['mcp', 'add', 'mesh_mem']
+    assert invocations[1][:3] == ['mcp', 'remove', 'kioku_mesh']
+    assert invocations[2][:3] == ['mcp', 'add', 'kioku_mesh']
 
 
 def test_install_claude_code_force_raises_when_remove_fails() -> None:
     """Codex review #97: a failed `claude mcp remove` must surface, not get masked by add failure."""
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
 
     def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         if argv[1:3] == ['mcp', 'list']:
-            return subprocess.CompletedProcess(argv, 0, stdout='mesh_mem: /old - Connected\n', stderr='')
+            return subprocess.CompletedProcess(argv, 0, stdout='kioku_mesh: /old - Connected\n', stderr='')
         if argv[1:3] == ['mcp', 'remove']:
             return subprocess.CompletedProcess(argv, 1, stdout='', stderr='permission denied')
         # Any subsequent call (notably the would-be add) must not happen.
         raise AssertionError(f'unexpected call after failed remove: {argv}')
 
-    with pytest.raises(RuntimeError, match='claude mcp remove mesh_mem failed'):
+    with pytest.raises(RuntimeError, match='claude mcp remove kioku_mesh failed'):
         install_claude_code(plan, run=fake_run, force=True, which=lambda _n: '/usr/bin/claude')
 
 
 def test_install_claude_code_raises_on_subprocess_failure() -> None:
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
 
     def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         if argv[1:3] == ['mcp', 'list']:
@@ -205,7 +205,7 @@ def test_install_claude_code_raises_on_subprocess_failure() -> None:
 
 
 def test_install_claude_code_missing_claude_binary() -> None:
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
     with pytest.raises(FileNotFoundError, match='claude binary'):
         install_claude_code(plan, which=lambda _n: None)
 
@@ -216,31 +216,31 @@ def test_install_claude_code_missing_claude_binary() -> None:
 def test_render_codex_toml_block_shape() -> None:
     plan = InstallPlan(
         client=MCPClient.CODEX_CLI,
-        name='mesh_mem',
+        name='kioku_mesh',
         command='/x/mesh-mem-mcp',
         env={'A': '1', 'B': '2'},
     )
     block = _render_codex_toml_block(plan)
-    assert '[mcp_servers.mesh_mem]' in block
+    assert '[mcp_servers.kioku_mesh]' in block
     assert 'command = "/x/mesh-mem-mcp"' in block
-    assert '[mcp_servers.mesh_mem.env]' in block
+    assert '[mcp_servers.kioku_mesh.env]' in block
     assert 'A = "1"' in block
     assert 'B = "2"' in block
 
 
 def test_install_codex_cli_writes_new_file(tmp_path: Path) -> None:
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='mesh_mem', command='/x/mesh-mem-mcp', env={'A': '1'})
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/x/mesh-mem-mcp', env={'A': '1'})
     target = tmp_path / 'sub' / 'config.toml'
     msg = install_codex_cli(plan, config_path=target)
     assert target.is_file()
     body = target.read_text()
-    assert '[mcp_servers.mesh_mem]' in body
+    assert '[mcp_servers.kioku_mesh]' in body
     assert 'A = "1"' in body
-    assert 'wrote mcp_servers.mesh_mem' in msg
+    assert 'wrote mcp_servers.kioku_mesh' in msg
 
 
 def test_install_codex_cli_appends_to_existing_file(tmp_path: Path) -> None:
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
     target = tmp_path / 'config.toml'
     target.write_text('model = "gpt-5"\n[other_section]\nkey = "value"\n')
     install_codex_cli(plan, config_path=target)
@@ -249,14 +249,14 @@ def test_install_codex_cli_appends_to_existing_file(tmp_path: Path) -> None:
     assert 'model = "gpt-5"' in body
     assert '[other_section]' in body
     # New block appended.
-    assert '[mcp_servers.mesh_mem]' in body
+    assert '[mcp_servers.kioku_mesh]' in body
 
 
 def test_install_codex_cli_refuses_when_already_present(tmp_path: Path) -> None:
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='mesh_mem', command='/x/mesh-mem-mcp', env={})
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/x/mesh-mem-mcp', env={})
     target = tmp_path / 'config.toml'
     target.write_text(
-        '[mcp_servers.mesh_mem]\ncommand = "/old/mesh-mem-mcp"\n\n[mcp_servers.mesh_mem.env]\nOLD = "1"\n'
+        '[mcp_servers.kioku_mesh]\ncommand = "/old/mesh-mem-mcp"\n\n[mcp_servers.kioku_mesh.env]\nOLD = "1"\n'
     )
     msg = install_codex_cli(plan, config_path=target)
     assert msg.startswith('error:')
@@ -268,19 +268,19 @@ def test_install_codex_cli_refuses_when_already_present(tmp_path: Path) -> None:
 def test_install_codex_cli_force_replaces_block(tmp_path: Path) -> None:
     plan = InstallPlan(
         client=MCPClient.CODEX_CLI,
-        name='mesh_mem',
+        name='kioku_mesh',
         command='/new/mesh-mem-mcp',
         env={'NEW': '1'},
     )
     target = tmp_path / 'config.toml'
     target.write_text(
         'model = "gpt-5"\n\n'
-        '[mcp_servers.mesh_mem]\ncommand = "/old/mesh-mem-mcp"\n\n'
-        '[mcp_servers.mesh_mem.env]\nOLD = "1"\n\n'
+        '[mcp_servers.kioku_mesh]\ncommand = "/old/mesh-mem-mcp"\n\n'
+        '[mcp_servers.kioku_mesh.env]\nOLD = "1"\n\n'
         '[mcp_servers.codegraph]\ncommand = "codegraph"\n'
     )
     msg = install_codex_cli(plan, force=True, config_path=target)
-    assert 'wrote mcp_servers.mesh_mem' in msg
+    assert 'wrote mcp_servers.kioku_mesh' in msg
     body = target.read_text()
     # Old values gone, new values present.
     assert '/old/mesh-mem-mcp' not in body
@@ -293,12 +293,12 @@ def test_install_codex_cli_force_replaces_block(tmp_path: Path) -> None:
 
 
 def test_install_codex_cli_force_preserves_blocks_before_and_after(tmp_path: Path) -> None:
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='mesh_mem', command='/new/x', env={})
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/new/x', env={})
     target = tmp_path / 'config.toml'
     target.write_text(
         '[before]\nbk = "1"\n\n'
-        '[mcp_servers.mesh_mem]\ncommand = "/old"\n'
-        '[mcp_servers.mesh_mem.tools.foo]\napproval_mode = "approve"\n\n'
+        '[mcp_servers.kioku_mesh]\ncommand = "/old"\n'
+        '[mcp_servers.kioku_mesh.tools.foo]\napproval_mode = "approve"\n\n'
         '[after]\nak = "2"\n'
     )
     install_codex_cli(plan, force=True, config_path=target)
@@ -310,17 +310,17 @@ def test_install_codex_cli_force_preserves_blocks_before_and_after(tmp_path: Pat
 
 
 def test_install_codex_cli_dry_run_does_not_touch_file(tmp_path: Path) -> None:
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='mesh_mem', command='/x', env={})
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/x', env={})
     target = tmp_path / 'config.toml'
     target.write_text('# existing\n')
     msg = install_codex_cli(plan, dry_run=True, config_path=target)
     assert 'would write to' in msg
-    assert '[mcp_servers.mesh_mem]' in msg
+    assert '[mcp_servers.kioku_mesh]' in msg
     assert target.read_text() == '# existing\n'  # untouched
 
 
 def test_install_codex_cli_rejects_unparseable_toml(tmp_path: Path) -> None:
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='mesh_mem', command='/x', env={})
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/x', env={})
     target = tmp_path / 'config.toml'
     target.write_text('garbage = [not, closed,\n')
     with pytest.raises(RuntimeError, match='cannot parse'):
@@ -332,19 +332,19 @@ def test_install_codex_cli_rejects_unparseable_toml(tmp_path: Path) -> None:
 
 def test_replace_codex_block_no_existing_appends() -> None:
     existing = 'model = "gpt-5"\n'
-    new = _replace_codex_block(existing, 'mesh_mem', '[mcp_servers.mesh_mem]\ncommand = "/x"')
+    new = _replace_codex_block(existing, 'kioku_mesh', '[mcp_servers.kioku_mesh]\ncommand = "/x"')
     assert 'model = "gpt-5"' in new
-    assert '[mcp_servers.mesh_mem]' in new
-    assert new.count('[mcp_servers.mesh_mem]') == 1
+    assert '[mcp_servers.kioku_mesh]' in new
+    assert new.count('[mcp_servers.kioku_mesh]') == 1
 
 
 def test_replace_codex_block_only_replaces_matching_name() -> None:
     existing = (
         '[mcp_servers.other]\ncommand = "/other"\n\n'
-        '[mcp_servers.mesh_mem]\ncommand = "/old"\n\n'
-        '[mcp_servers.mesh_mem.env]\nA = "1"\n'
+        '[mcp_servers.kioku_mesh]\ncommand = "/old"\n\n'
+        '[mcp_servers.kioku_mesh.env]\nA = "1"\n'
     )
-    new = _replace_codex_block(existing, 'mesh_mem', '[mcp_servers.mesh_mem]\ncommand = "/new"')
+    new = _replace_codex_block(existing, 'kioku_mesh', '[mcp_servers.kioku_mesh]\ncommand = "/new"')
     assert '/other' in new
     assert '/new' in new
     assert '/old' not in new
@@ -362,8 +362,8 @@ def test_cli_mcp_install_codex_writes_and_exits_zero(
     monkeypatch.setattr(mcp_install, '_default_codex_config_path', lambda: target)
     rc = cli_main(['mcp', 'install', '--client', 'codex-cli'])
     assert rc == 0
-    assert '[mcp_servers.mesh_mem]' in target.read_text()
-    assert 'wrote mcp_servers.mesh_mem' in capsys.readouterr().out
+    assert '[mcp_servers.kioku_mesh]' in target.read_text()
+    assert 'wrote mcp_servers.kioku_mesh' in capsys.readouterr().out
 
 
 def test_cli_mcp_install_codex_already_registered_exits_one(
@@ -371,7 +371,7 @@ def test_cli_mcp_install_codex_already_registered_exits_one(
 ) -> None:
     monkeypatch.setattr(mcp_install.shutil, 'which', lambda name: f'/usr/bin/{name}')
     target = tmp_path / 'codex.toml'
-    target.write_text('[mcp_servers.mesh_mem]\ncommand = "/old"\n')
+    target.write_text('[mcp_servers.kioku_mesh]\ncommand = "/old"\n')
     monkeypatch.setattr(mcp_install, '_default_codex_config_path', lambda: target)
     rc = cli_main(['mcp', 'install', '--client', 'codex-cli'])
     assert rc == 1
@@ -384,7 +384,7 @@ def test_cli_mcp_install_missing_mesh_mem_mcp_exits_two(
     monkeypatch.setattr(mcp_install.shutil, 'which', lambda _name: None)
     rc = cli_main(['mcp', 'install', '--client', 'codex-cli'])
     assert rc == 2
-    assert 'mesh-mem-mcp' in capsys.readouterr().err
+    assert 'kioku-mesh-mcp' in capsys.readouterr().err
 
 
 def test_cli_mcp_install_extra_env_overrides_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

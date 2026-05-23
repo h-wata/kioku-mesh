@@ -5,12 +5,23 @@ All notable changes to this project will be documented in this file.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-mesh-mem is in `0.x`: APIs and on-disk storage schema may change between minor
+kioku-mesh is in `0.x`: APIs and on-disk storage schema may change between minor
 versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
 ## [0.3.0] - 2026-05-22
+
+### Renamed
+
+- **PyPI distribution and CLI renamed `mesh-mem` → `kioku-mesh`**. The original
+  name was rejected by PyPI's similarity check (collides with an unrelated
+  `meshmem` AI-memory package). Internal artifacts deliberately preserved so
+  existing users only swap the binary: on-disk paths (`~/.config/mesh-mem/`,
+  `~/.local/share/mesh-mem/`), env-var prefix `MESH_MEM_*`, systemd unit name
+  `mesh-mem-zenohd.service`, and Python import name `mesh_mem` are unchanged.
+  See `docs/migration.md` for the `uv tool uninstall mesh-mem &&
+  uv tool install kioku-mesh && kioku-mesh mcp install --force` upgrade.
 
 ### Fixed
 

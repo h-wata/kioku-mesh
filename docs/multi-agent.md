@@ -7,7 +7,7 @@ observations land at non-colliding Zenoh keys.
 
 ## Identity tiers
 
-mesh-mem composes the key prefix from four levels:
+kioku-mesh composes the key prefix from four levels:
 
 | Tier | Source | Purpose |
 |------|--------|---------|
@@ -40,7 +40,7 @@ claude
 # Autonomous agent (e.g. cron / systemd timer)
 export MESH_MEM_AGENT_FAMILY=auto-agent
 export MESH_MEM_CLIENT_ID=nightly-cleanup
-~/.venv/mesh-mem/bin/mesh-mem gc --retention-days 30
+~/.venv/mesh-mem/bin/kioku-mesh gc --retention-days 30
 ```
 
 ## Naming conventions (recommended)
@@ -66,13 +66,13 @@ export MESH_MEM_CLIENT_ID=claude-code-bar
 
 ```bash
 # Only this Claude Code instance
-mesh-mem search "auth" --client-id claude-instance-1
+kioku-mesh search "auth" --client-id claude-instance-1
 
 # Everything from any Claude Code on any peer
-mesh-mem search "auth" --agent-family claude-code
+kioku-mesh search "auth" --agent-family claude-code
 
 # A specific autonomous agent
-mesh-mem search "" --client-id nightly-cleanup --limit 100
+kioku-mesh search "" --client-id nightly-cleanup --limit 100
 ```
 
 ## MCP-launched agents
@@ -89,7 +89,7 @@ arguments do not expose identity.
 {
   "mcpServers": {
     "mesh_mem": {
-      "command": "/home/USER/.venv/mesh-mem/bin/mesh-mem-mcp",
+      "command": "/home/USER/.venv/mesh-mem/bin/kioku-mesh-mcp",
       "env": {
         "ZENOH_CONNECT": "tcp/127.0.0.1:7447",
         "MESH_MEM_AGENT_FAMILY": "claude-code",

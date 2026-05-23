@@ -2,12 +2,12 @@
 
 > **Two binaries — know the difference**
 >
-> - `mesh-mem` (one hyphen) — the **CLI**. Run this yourself: `mesh-mem mcp install`, `mesh-mem status`, etc.
-> - `mesh-mem-mcp` (two hyphens) — the **stdio MCP server**. It is spawned in the background by an MCP
+> - `kioku-mesh` (one hyphen) — the **CLI**. Run this yourself: `kioku-mesh mcp install`, `kioku-mesh status`, etc.
+> - `kioku-mesh-mcp` (two hyphens) — the **stdio MCP server**. It is spawned in the background by an MCP
 >   client (Claude Code, Codex CLI, Claude Desktop…); you do not type this command directly.
 >   Running it from a terminal will print a usage message and exit.
 
-Register the installed `mesh-mem-mcp` console script. Use the **absolute path** to the installed binary — typically `~/.local/bin/mesh-mem-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/mesh-mem-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
+Register the installed `kioku-mesh-mcp` console script. Use the **absolute path** to the installed binary — typically `~/.local/bin/kioku-mesh-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/kioku-mesh-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
 
 ## Claude Code
 
@@ -18,7 +18,7 @@ claude mcp add mesh_mem -s user \
   -e ZENOH_CONNECT=tcp/127.0.0.1:7447 \
   -e MESH_MEM_AGENT_FAMILY=claude \
   -e MESH_MEM_CLIENT_ID=claude-code \
-  -- /home/USER/.local/bin/mesh-mem-mcp     # uv tool install path (or /home/USER/.venv/mesh-mem/bin/mesh-mem-mcp for a manual venv)
+  -- /home/USER/.local/bin/kioku-mesh-mcp     # uv tool install path (or /home/USER/.venv/mesh-mem/bin/kioku-mesh-mcp for a manual venv)
 
 claude mcp list   # expect: mesh_mem: ... - ✓ Connected
 ```
@@ -34,7 +34,7 @@ sessions.
 
 ```bash
 claude -p --permission-mode bypassPermissions --output-format json \
-  "mesh-mem MCP の save_observation で 'smoke' を保存して" \
+  "kioku-mesh MCP の save_observation で 'smoke' を保存して" \
   | jq '{result, denials:.permission_denials, error:.is_error}'
 ```
 
@@ -48,8 +48,8 @@ Claude Desktop does read `mcpServers` from its own config file:
 ```json
 {
   "mcpServers": {
-    "mesh-mem": {
-      "command": "/home/USER/.local/bin/mesh-mem-mcp",
+    "kioku-mesh": {
+      "command": "/home/USER/.local/bin/kioku-mesh-mcp",
       "env": {
         "ZENOH_CONNECT": "tcp/localhost:7447",
         "MESH_MEM_AGENT_FAMILY": "claude",
@@ -70,12 +70,12 @@ Follow the same pattern with `codex` / `chatgpt` family and the matching `*-cli`
 
 ## Optional: session id pinning
 
-Agents that expose a launch hook can set `MESH_MEM_SESSION_ID` to a value they control (e.g. the conversation id). When unset, mesh-mem autogenerates `{YYYYMMDDTHHMMSSZ}-{short-uuid}` once per process and caches it.
+Agents that expose a launch hook can set `MESH_MEM_SESSION_ID` to a value they control (e.g. the conversation id). When unset, kioku-mesh autogenerates `{YYYYMMDDTHHMMSSZ}-{short-uuid}` once per process and caches it.
 
 ## Claude Code SessionStart hook
 
 Claude Code supports `SessionStart` hooks from `~/.claude/settings.json`. A
-hook can load recent mesh-mem activity from the current project and inject it
+hook can load recent kioku-mesh activity from the current project and inject it
 into the first prompt of a new session, which is especially useful when the
 activity happened on another PC and replicated through Zenoh.
 
@@ -85,8 +85,8 @@ under `~/.claude/hooks/`:
 ```bash
 install -d ~/.claude/hooks
 cp /ABSOLUTE/PATH/TO/mesh-mem/scripts/hooks/session-start.sh \
-  ~/.claude/hooks/session-start-mesh-mem.sh
-chmod +x ~/.claude/hooks/session-start-mesh-mem.sh
+  ~/.claude/hooks/session-start-kioku-mesh.sh
+chmod +x ~/.claude/hooks/session-start-kioku-mesh.sh
 ```
 
 Then add a `SessionStart` hook entry to `~/.claude/settings.json`:
@@ -100,7 +100,7 @@ Then add a `SessionStart` hook entry to `~/.claude/settings.json`:
         "hooks": [
           {
             "type": "command",
-            "command": "~/.claude/hooks/session-start-mesh-mem.sh"
+            "command": "~/.claude/hooks/session-start-kioku-mesh.sh"
           }
         ]
       }
@@ -113,13 +113,13 @@ What the sample does:
 
 - derives `PROJECT=$(basename "$PWD")`
 - computes a UTC ISO8601 `--since` timestamp for 7 days ago via embedded Python
-- runs `mesh-mem search --project "$PROJECT" --since "$SINCE" --limit 10 --format markdown`
+- runs `kioku-mesh search --project "$PROJECT" --since "$SINCE" --limit 10 --format markdown`
 - prints a top-level heading plus markdown bullets when matches exist
 - stays silent when no rows match, so the session reminder does not get noise
 
 To verify it:
 
-1. Save a few observations under the current project with `mesh-mem save ... -p "$PROJECT"`.
+1. Save a few observations under the current project with `kioku-mesh save ... -p "$PROJECT"`.
 2. Start a fresh Claude Code session in that project.
-3. Confirm the first prompt contains a `## Recent mesh-mem context ...` section.
+3. Confirm the first prompt contains a `## Recent kioku-mesh context ...` section.
 4. Run `/hooks` in Claude Code if you want to confirm the hook is loaded from `~/.claude/settings.json`.

@@ -1,4 +1,4 @@
-"""Subprocess smoke test for the ``mesh-mem-mcp`` console script.
+"""Subprocess smoke test for the ``kioku-mesh-mcp`` console script.
 
 Spawns the installed entry-point binary, speaks MCP over stdio through
 ``fastmcp.client.transports.StdioTransport``, and exercises both the
@@ -39,14 +39,14 @@ _INGEST_SETTLE = 0.25
 
 
 def _find_mesh_mem_mcp() -> str | None:
-    """Locate the ``mesh-mem-mcp`` console script, preferring the active interpreter's venv."""
+    """Locate the ``kioku-mesh-mcp`` console script, preferring the active interpreter's venv."""
     # Prefer the binary right next to the interpreter running the test — this
     # matches the venv layout that `pip install -e .[dev]` produces and avoids
     # picking up a stale system-wide install.
-    candidate = Path(sys.executable).parent / 'mesh-mem-mcp'
+    candidate = Path(sys.executable).parent / 'kioku-mesh-mcp'
     if candidate.exists():
         return str(candidate)
-    return shutil.which('mesh-mem-mcp')
+    return shutil.which('kioku-mesh-mcp')
 
 
 MESH_MEM_MCP = _find_mesh_mem_mcp()
@@ -54,10 +54,10 @@ MESH_MEM_MCP = _find_mesh_mem_mcp()
 
 @pytest.mark.skipif(
     MESH_MEM_MCP is None,
-    reason='mesh-mem-mcp console script not installed — run `pip install -e .[dev]` to enable',
+    reason='kioku-mesh-mcp console script not installed — run `pip install -e .[dev]` to enable',
 )
 def test_subprocess_list_tools() -> None:
-    """``mesh-mem-mcp`` spawns cleanly and exposes the registered tool definitions.
+    """``kioku-mesh-mcp`` spawns cleanly and exposes the registered tool definitions.
 
     Deliberately does NOT depend on ``single_zenohd`` — ``list_tools`` only
     exercises MCP startup and the decorator-based tool registry, never
@@ -85,7 +85,7 @@ def test_subprocess_list_tools() -> None:
 
 @pytest.mark.skipif(
     MESH_MEM_MCP is None,
-    reason='mesh-mem-mcp console script not installed',
+    reason='kioku-mesh-mcp console script not installed',
 )
 def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None:  # noqa: ARG001
     """End-to-end smoke: subprocess saves, the parent process reads it back from the router."""
@@ -665,4 +665,4 @@ def test_cli_bulk_delete_emits_local_index_hint(
     rc = cli_main(['delete', '--project', 'bulk-hint', '--yes'])
     assert rc == 0
     captured = capsys.readouterr()
-    assert 'mesh-mem --rebuild gc --retention-days 0 --project <name>' in captured.err
+    assert 'kioku-mesh --rebuild gc --retention-days 0 --project <name>' in captured.err

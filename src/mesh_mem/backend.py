@@ -1,4 +1,4 @@
-"""Backend abstraction for mesh-mem.
+"""Backend abstraction for kioku-mesh.
 
 ``get_backend()`` returns either a LocalBackend (SQLite-only, no zenohd) or a
 ZenohBackend (existing store.py) based on ``config.get_backend_mode()``.
@@ -39,7 +39,7 @@ class BackendStatus:
 
 @runtime_checkable
 class MemoryBackend(Protocol):
-    """Common surface for all mesh-mem backends."""
+    """Common surface for all kioku-mesh backends."""
 
     def put_observation(self, obs: Observation) -> None: ...
     def put_tombstone(self, obs: Observation, reason: str = '') -> None: ...

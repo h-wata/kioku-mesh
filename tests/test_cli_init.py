@@ -426,7 +426,7 @@ def test_default_systemd_unit_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, t
 def test_render_systemd_unit_bakes_absolute_paths() -> None:
     body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd')
     assert '[Unit]' in body
-    assert 'Description=mesh-mem zenohd router' in body
+    assert 'Description=kioku-mesh zenohd router' in body
     # Paths are double-quoted so systemd's unquoted-whitespace splitter doesn't
     # break ExecStart when the path contains spaces (Codex review on #95).
     assert 'ExecStart="/opt/zenoh/bin/zenohd" -c "/x/y/zenohd.json5"' in body

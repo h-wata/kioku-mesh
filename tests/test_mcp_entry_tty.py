@@ -1,6 +1,6 @@
-"""Tests for TTY misinvocation detection in mesh-mem-mcp entry point.
+"""Tests for TTY misinvocation detection in kioku-mesh-mcp entry point.
 
-Verifies that ``mesh-mem-mcp`` exits with code 2 when stdin is a TTY,
+Verifies that ``kioku-mesh-mcp`` exits with code 2 when stdin is a TTY,
 passes through when stdin is redirected, and respects MESH_MEM_MCP_ALLOW_TTY.
 Linux-only (pty module).
 """
@@ -19,7 +19,7 @@ _MCP_ENTRY = [sys.executable, '-m', 'mesh_mem.mcp_server']
 
 
 def _run_via_pty(extra_env: dict[str, str] | None = None, timeout: float = 5.0) -> subprocess.CompletedProcess[bytes]:
-    """Launch mesh-mem-mcp with a real PTY as stdin."""
+    """Launch kioku-mesh-mcp with a real PTY as stdin."""
     import pty
 
     env = os.environ.copy()
