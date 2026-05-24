@@ -213,7 +213,7 @@ def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> Non
             return result.data
 
     text = _run(_go())
-    assert 'mesh-mem version' in text
+    assert 'kioku-mesh version' in text
     assert 'pc_id' in text
     assert 'session_id' in text
     assert 'zenoh_session: connected' in text
