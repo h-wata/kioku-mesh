@@ -135,10 +135,10 @@ spoke (the strong test — proves transit through the hub):
 
 ```bash
 # on peer2 (spoke)
-mesh-mem save "ping from peer2" --project mesh-check --tags marker
+kioku-mesh save "ping from peer2" --project mesh-check --tags marker
 
 # on peer5 (a different spoke, no direct link to peer2)
-mesh-mem search "ping from peer2" --limit 5
+kioku-mesh search "ping from peer2" --limit 5
 # expect: 1 hit, project=mesh-check — traffic transited via peer1
 ```
 

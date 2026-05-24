@@ -1,4 +1,4 @@
-"""Diagnostic checks backing `mesh-mem doctor` (#84).
+"""Diagnostic checks backing `kioku-mesh doctor` (#84).
 
 The doctor command exists so a first-touch user can answer "why isn't this
 working" without reading the README's Troubleshooting / Time sync / MCP
@@ -148,7 +148,7 @@ def check_zenohd_reachable(
             summary=f'tcp/{host}:{port} is not reachable',
             hint=(
                 'Start zenohd in another terminal: `zenohd -c ~/.config/mesh-mem/zenohd.json5`. '
-                'Run `mesh-mem init` first if the config file is missing.'
+                'Run `kioku-mesh init` first if the config file is missing.'
             ),
             details={'endpoint': raw, 'host': host, 'port': port, 'error': type(e).__name__, 'errno': e.errno},
         )
@@ -169,7 +169,7 @@ def _default_tcp_probe(addr: tuple[str, int], timeout: float) -> None:
 def check_zenohd_binary(which: Callable[[str], str | None] | None = None) -> CheckResult:
     """Verify the ``zenohd`` binary is on PATH.
 
-    A missing binary is the most common first-touch failure: `mesh-mem init`
+    A missing binary is the most common first-touch failure: `kioku-mesh init`
     can write a config, but starting zenohd requires the router to be
     installed separately (apt / cargo / build-from-source).
     """
@@ -196,7 +196,7 @@ def check_zenohd_binary(which: Callable[[str], str | None] | None = None) -> Che
 
 
 def check_config_file(path: Path | None = None) -> CheckResult:
-    """Verify that a `mesh-mem init`-generated config exists at the default location."""
+    """Verify that a `kioku-mesh init`-generated config exists at the default location."""
     target = path if path is not None else _default_config_path()
     if target.is_file():
         return CheckResult(
@@ -209,13 +209,13 @@ def check_config_file(path: Path | None = None) -> CheckResult:
         name='config_file',
         status=CheckStatus.FAIL,
         summary=f'zenohd config missing at {target}',
-        hint='Run `mesh-mem init` to generate a starter config.',
+        hint='Run `kioku-mesh init` to generate a starter config.',
         details={'path': str(target)},
     )
 
 
 def _default_config_path() -> Path:
-    """Mirror the path `mesh-mem init` writes (XDG_CONFIG_HOME-aware)."""
+    """Mirror the path `kioku-mesh init` writes (XDG_CONFIG_HOME-aware)."""
     base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
     return Path(base) / 'mesh-mem' / 'zenohd.json5'
 
@@ -252,7 +252,7 @@ def check_state_dir_hardlinks(state_dir_path: Path | None = None) -> CheckResult
                 status=CheckStatus.FAIL,
                 summary=f'state dir {target} does not support hard links',
                 hint=(
-                    'mesh-mem stores pc_id via an atomic os.link publish. Move MESH_MEM_STATE_DIR '
+                    'kioku-mesh stores pc_id via an atomic os.link publish. Move MESH_MEM_STATE_DIR '
                     'onto ext4 / btrfs / xfs / tmpfs / NFSv3+ (FAT / exFAT / some SMB shares do not qualify).'
                 ),
                 details={'path': str(target), 'error': type(e).__name__, 'errno': e.errno},
@@ -309,7 +309,7 @@ def check_embedded_router(
             name='embedded_router',
             status=CheckStatus.WARN,
             summary=f'Embedded router not reachable at tcp/{host}:{port}',
-            hint='Run `mesh-mem mesh start` to start an in-process router (no zenohd needed).',
+            hint='Run `kioku-mesh mesh start` to start an in-process router (no zenohd needed).',
             details={'endpoint': raw, 'host': host, 'port': port, 'running': False},
         )
     # TCP reachable — try a zenoh peer probe to get router identity.
@@ -375,7 +375,7 @@ def to_json(results: list[CheckResult]) -> str:
 
     Shape:
         {
-          "version": "<mesh-mem version>",
+          "version": "<kioku-mesh version>",
           "ok": bool,
           "worst_status": "pass" | "warn" | "fail",
           "checks": [{"name", "status", "summary", "hint", "details"}, ...]

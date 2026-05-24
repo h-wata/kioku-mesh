@@ -172,7 +172,7 @@ def test_check_config_file_missing(tmp_path: Path) -> None:
     target = tmp_path / 'missing' / 'zenohd.json5'
     result = check_config_file(target)
     assert result.status is CheckStatus.FAIL
-    assert 'mesh-mem init' in result.hint
+    assert 'kioku-mesh init' in result.hint
 
 
 def test_default_config_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -235,7 +235,7 @@ def _sample_results() -> list[CheckResult]:
             name='config_file',
             status=CheckStatus.FAIL,
             summary='zenohd config missing',
-            hint='Run mesh-mem init',
+            hint='Run kioku-mesh init',
             details={'path': '/x/y/zenohd.json5'},
         ),
     ]
@@ -255,7 +255,7 @@ def test_format_text_shows_status_and_hint() -> None:
     rendered = format_text(_sample_results())
     assert '[PASS] zenohd_binary' in rendered
     assert '[FAIL] config_file' in rendered
-    assert 'hint: Run mesh-mem init' in rendered
+    assert 'hint: Run kioku-mesh init' in rendered
     assert 'verdict: one or more checks failed' in rendered
 
 

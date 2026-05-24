@@ -1,4 +1,4 @@
-"""Resolve identity values for mesh-mem.
+"""Resolve identity values for kioku-mesh.
 
 Order of precedence per identity:
     - env var (when defined)
@@ -6,14 +6,14 @@ Order of precedence per identity:
     - auto-generated on first access (cached for process lifetime)
 
 ``pc_id`` and ``session_id`` MUST be stable for the lifetime of the process.
-Re-generating ``session_id`` per call would fragment the mesh-mem key
+Re-generating ``session_id`` per call would fragment the kioku-mesh key
 space across Observation/Heartbeat emissions and break searchability.
 
 Filesystem requirement:
     ``MESH_MEM_STATE_DIR`` must reside on a filesystem that supports POSIX
     hard links (ext4 / btrfs / xfs / tmpfs / NFSv3+). FAT / exFAT / certain
     older SMB mounts do NOT and will cause ``get_pc_id()`` to raise
-    ``OSError`` on first run. mesh-mem targets Linux dev hosts where the
+    ``OSError`` on first run. kioku-mesh targets Linux dev hosts where the
     default location (``~/.local/share/mesh-mem``) sits on such a
     filesystem out of the box; point the env var at a non-hardlink mount
     at your own risk.
@@ -34,7 +34,7 @@ _session_id_cache: str | None = None
 
 
 class IdentitySource(str, Enum):
-    """Where an identity value came from. Used for `mesh-mem status` display."""
+    """Where an identity value came from. Used for `kioku-mesh status` display."""
 
     ENV = 'env'
     # Reserved for future launcher detection (Claude Code / Gemini CLI env
@@ -105,8 +105,8 @@ def state_dir() -> pathlib.Path:
            - Linux:   ``~/.local/share/mesh-mem`` (fixed; ``XDG_DATA_HOME``
              is intentionally NOT honored to preserve pre-v0.2.1 behavior
              and avoid a silent migration for users who set it)
-           - macOS:   ``~/Library/Application Support/mesh-mem``
-           - Windows: ``%LOCALAPPDATA%\mesh-mem``
+           - macOS:   ``~/Library/Application Support/kioku-mesh``
+           - Windows: ``%LOCALAPPDATA%\kioku-mesh``
 
     On macOS / Windows the default is resolved through ``platformdirs``;
     those platforms had no pre-v0.2.1 hardcoded path to preserve.
@@ -134,7 +134,7 @@ def get_pc_id() -> str:
     """Return the per-host stable UUID, generating+persisting it on first call.
 
     The create-if-absent path uses a **temp-file + ``os.link`` atomic publish**
-    so two mesh-mem processes racing on a fresh host cannot observe a
+    so two kioku-mesh processes racing on a fresh host cannot observe a
     half-written ``pc_id``:
 
         1. write the candidate UUID to a uniquely-named temp file

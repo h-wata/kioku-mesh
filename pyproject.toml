@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mesh-mem"
-version = "0.2.5"
+name = "kioku-mesh"
+version = "0.3.0"
 description = "Cross-agent distributed memory over a mesh transport (currently Zenoh)"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -14,11 +14,31 @@ authors = [
     { name = "h-wata" },
 ]
 keywords = ["mesh", "distributed-memory", "zenoh", "mcp", "agent", "memory"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Utilities",
+]
 dependencies = [
     "eclipse-zenoh>=1.9.0",
     "fastmcp>=0.1.0",
     "platformdirs>=4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/h-wata/kioku-mesh"
+Repository = "https://github.com/h-wata/kioku-mesh"
+Issues = "https://github.com/h-wata/kioku-mesh/issues"
+Changelog = "https://github.com/h-wata/kioku-mesh/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -36,8 +56,8 @@ completion = [
 ]
 
 [project.scripts]
-mesh-mem = "mesh_mem.__main__:main"
-mesh-mem-mcp = "mesh_mem.mcp_server:main"
+kioku-mesh = "mesh_mem.__main__:main"
+kioku-mesh-mcp = "mesh_mem.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mesh_mem"]

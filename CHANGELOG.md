@@ -5,10 +5,23 @@ All notable changes to this project will be documented in this file.
 The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-mesh-mem is in `0.x`: APIs and on-disk storage schema may change between minor
+kioku-mesh is in `0.x`: APIs and on-disk storage schema may change between minor
 versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-05-22
+
+### Renamed
+
+- **PyPI distribution and CLI renamed `mesh-mem` → `kioku-mesh`**. The original
+  name was rejected by PyPI's similarity check (collides with an unrelated
+  `meshmem` AI-memory package). Internal artifacts deliberately preserved so
+  existing users only swap the binary: on-disk paths (`~/.config/mesh-mem/`,
+  `~/.local/share/mesh-mem/`), env-var prefix `MESH_MEM_*`, systemd unit name
+  `mesh-mem-zenohd.service`, and Python import name `mesh_mem` are unchanged.
+  See `docs/migration.md` for the `uv tool uninstall mesh-mem &&
+  uv tool install kioku-mesh && kioku-mesh mcp install --force` upgrade.
 
 ### Fixed
 
@@ -49,7 +62,7 @@ versions without a migration path until `1.0.0`.
 - **`mesh-mem delete` no longer aborts at 10 000 matches** (#66). The bulk-delete path now pages via a `(created_at, observation_id)` DESC cursor (`LocalIndex.search` gained an inclusive `until_iso` filter and a stable tiebreaker), tombstoning all matching rows regardless of size. `--batch-size` (default `1000`, max `MAX_SEARCH=10000`) controls per-page and progress granularity. Individual `put_tombstone` failures no longer abort the sweep — they increment a `failures` counter and the process exits non-zero only at the end. When the target set exceeds `MAX_SEARCH` the interactive prompt prints an extra warning suggesting `mesh-mem --rebuild gc --retention-days 0 --project ...` as the faster path when the rows live only in the local SQLite index (ADR-0010 / ADR-0011 shadow-sweep). The same hint is appended to stderr on every bulk-delete completion to discourage raw `DELETE FROM obs_index` workarounds.
 
 - **MCP server instructions add an explicit SKIP list and type/importance guidance** (#73). PR/Issue lifecycle ticks, restated PR/ADR/CHANGELOG content, in-conversation progress logs, and bare `tests pass` notes are now called out as save-skip cases. `decision` / `bug` / `pattern` / `config` are preferred over `summary`; `importance` 1-2 invites reconsidering whether to save at all.
-- **Docs: install guidance now leads with `uv tool install`.** README Quick start and `docs/mcp-clients.md` recommend `uv tool install git+https://github.com/h-wata/mesh-mem.git` (or `--editable .` for a local checkout), which exposes `mesh-mem` / `mesh-mem-mcp` at `~/.local/bin/` without venv activation or full-path invocation. MCP registration examples updated accordingly. The manual `python3 -m venv ~/.venv/mesh-mem` flow is retained as a fallback. No code or runtime behaviour change.
+- **Docs: install guidance now leads with `uv tool install`.** README Quick start and `docs/mcp-clients.md` recommend `uv tool install git+https://github.com/h-wata/kioku-mesh.git` (or `--editable .` for a local checkout), which exposes `mesh-mem` / `mesh-mem-mcp` at `~/.local/bin/` without venv activation or full-path invocation. MCP registration examples updated accordingly. The manual `python3 -m venv ~/.venv/mesh-mem` flow is retained as a fallback. No code or runtime behaviour change.
 - docs: README rewritten around v0.3 hero + Tier 0/1/2 narrative (#110)
 - docs: README Power users section polish — Features ordering, internal anchors, mesh-specific doctor placement (#111)
 

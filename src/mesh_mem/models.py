@@ -1,4 +1,4 @@
-"""Domain models for mesh-mem.
+"""Domain models for kioku-mesh.
 
 Observation is immutable: updates MUST be emitted with a fresh
 ``observation_id``. Deletion is represented by a Tombstone under a mirrored

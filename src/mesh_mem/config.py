@@ -1,7 +1,7 @@
 """Read and write ~/.config/mesh-mem/config.yaml.
 
 This config is separate from the zenohd JSON5 config and stores
-mesh-mem-specific runtime settings such as which backend to use.
+kioku-mesh-specific runtime settings such as which backend to use.
 """
 
 from __future__ import annotations
