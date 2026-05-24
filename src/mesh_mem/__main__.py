@@ -998,7 +998,9 @@ def _cmd_mesh_start(args: argparse.Namespace) -> int:
         if _detected:
             _hint_ip = _detected[0]
             _all_ips = ', '.join(_detected)
-            print(f'  from other hosts: ZENOH_CONNECT=tcp/{_hint_ip}:{_port} MESH_MEM_BACKEND=zenoh kioku-mesh save ...')
+            print(
+                f'  from other hosts: ZENOH_CONNECT=tcp/{_hint_ip}:{_port} MESH_MEM_BACKEND=zenoh kioku-mesh save ...'
+            )
             print(f'                    ^ auto-detected IPs: {_all_ips}')
         else:
             print(
