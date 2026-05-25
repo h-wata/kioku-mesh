@@ -601,9 +601,8 @@ chronyc tracking | grep 'Last offset'
 
 ##### PoC verification
 
-See [docs/poc-reports/raw/TASK-122-ntp-skew-result.yaml](docs/poc-reports/raw/TASK-122-ntp-skew-result.yaml)
-and [docs/poc-reports/SUMMARY.md §8.4](docs/poc-reports/SUMMARY.md#84-ntp-skew-境界テスト-部分実施結果task-122)
-for the full skew boundary test results. Key findings: replication integrity held at ±10 s skew,
+See [docs/poc-reports/SUMMARY.md §8.4](docs/poc-reports/SUMMARY.md#84-ntp-skew-境界テスト-部分実施結果task-122)
+for the skew boundary test results. Key findings: replication integrity held at ±10 s skew,
 but `--since-iso` filter cutoffs shifted proportionally and `timedatectl` proved unreliable as
 an inter-host alignment signal.
 
@@ -640,6 +639,10 @@ kioku-mesh development is Linux-first and **WSL2 is strongly recommended on Wind
 ### Continuous Integration
 
 Pull requests run lint (pre-commit) and tests automatically (see #22).
+
+### Developer scripts
+
+Only a small number of maintained helper scripts remain under `scripts/`. At the moment, the documented ones are the 5-peer smoke test (`scripts/smoke_5peer_mesh.py`) and the Claude Code SessionStart hook sample (`scripts/hooks/session-start.sh`).
 
 ### Development
 

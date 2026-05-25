@@ -8,6 +8,8 @@ Linux-only (pty module).
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -15,12 +17,24 @@ import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform == 'win32', reason='pty not available on Windows')
 
-_MCP_ENTRY = [sys.executable, '-m', 'mesh_mem.mcp_server']
+
+def _find_kioku_mesh_mcp() -> str | None:
+    """Locate the installed ``kioku-mesh-mcp`` script for subprocess tests."""
+    candidate = Path(sys.executable).parent / 'kioku-mesh-mcp'
+    if candidate.exists():
+        return str(candidate)
+    return shutil.which('kioku-mesh-mcp')
+
+
+KIOKU_MESH_MCP = _find_kioku_mesh_mcp()
+_MCP_ENTRY = [KIOKU_MESH_MCP] if KIOKU_MESH_MCP is not None else None
 
 
 def _run_via_pty(extra_env: dict[str, str] | None = None, timeout: float = 5.0) -> subprocess.CompletedProcess[bytes]:
     """Launch kioku-mesh-mcp with a real PTY as stdin."""
     import pty
+
+    assert _MCP_ENTRY is not None
 
     env = os.environ.copy()
     if extra_env:
@@ -51,6 +65,10 @@ def _run_via_pty(extra_env: dict[str, str] | None = None, timeout: float = 5.0) 
             os.close(slave_fd)
 
 
+@pytest.mark.skipif(
+    _MCP_ENTRY is None,
+    reason='kioku-mesh-mcp console script not installed — run `pip install -e .[dev]` to enable',
+)
 def test_tty_exits_with_code_2() -> None:
     """TTY stdin → exit 2 with usage message on stderr."""
     result = _run_via_pty()
@@ -58,8 +76,13 @@ def test_tty_exits_with_code_2() -> None:
     assert b'stdio MCP server' in result.stderr, f'expected usage in stderr, got {result.stderr!r}'
 
 
+@pytest.mark.skipif(
+    _MCP_ENTRY is None,
+    reason='kioku-mesh-mcp console script not installed — run `pip install -e .[dev]` to enable',
+)
 def test_stdin_redirect_does_not_exit_2() -> None:
     """Non-TTY stdin (pipe) → no immediate sys.exit(2); stdio loop entered."""
+    assert _MCP_ENTRY is not None
     proc = subprocess.Popen(
         _MCP_ENTRY,
         stdin=subprocess.PIPE,
@@ -78,6 +101,10 @@ def test_stdin_redirect_does_not_exit_2() -> None:
     assert proc.returncode != 2, f'unexpected TTY-guard exit on pipe stdin (returncode={proc.returncode})'
 
 
+@pytest.mark.skipif(
+    _MCP_ENTRY is None,
+    reason='kioku-mesh-mcp console script not installed — run `pip install -e .[dev]` to enable',
+)
 def test_allow_tty_env_bypasses_check() -> None:
     """MESH_MEM_MCP_ALLOW_TTY=1 with TTY stdin → stdio loop entered, no exit 2."""
     result = _run_via_pty(extra_env={'MESH_MEM_MCP_ALLOW_TTY': '1'}, timeout=2.0)

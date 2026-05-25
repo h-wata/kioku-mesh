@@ -29,6 +29,12 @@ Thumbs.db
 # mesh-mem local state
 .local-state/
 
+# Claude Code local settings / scheduled task locks (per-user, never committed)
+.claude/
+
+# CodeGraph index DB (auto-rebuildable, can grow tens of MB)
+.codegraph/
+
 # generated survey summaries (re-creatable via /survey)
 pdf_summary_*.md
 
