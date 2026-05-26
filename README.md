@@ -1,55 +1,83 @@
 # kioku-mesh
 
-Persistent, mesh-synced memory for your AI coding agent.
-Start on one machine in 30 seconds. Use the same memory across machines
-when you need it.
+[![PyPI](https://img.shields.io/pypi/v/kioku-mesh.svg)](https://pypi.org/project/kioku-mesh/)
+[![Python](https://img.shields.io/pypi/pyversions/kioku-mesh.svg)](https://pypi.org/project/kioku-mesh/)
+[![License](https://img.shields.io/github/license/h-wata/kioku-mesh.svg)](LICENSE)
 
-## 30-second local start
+Persistent, mesh-synced memory for your AI coding agent. Start on one machine in
+30 seconds, then share the same memory across machines when you need it.
+
+> **kioku** (記憶) is Japanese for "memory".
+
+kioku-mesh gives your AI coding agents (Claude Code, Codex CLI, Gemini CLI, …) a
+shared long-term memory that survives session resets and syncs across hosts over a
+LAN, VPN, or mesh-VPN. A decision saved on your desktop is instantly searchable on
+your laptop — or by a different agent on the same machine.
+
+## Contents
+
+- [Quickstart](#quickstart)
+- [What you get](#what-you-get)
+- [Architecture: Local vs Mesh](#architecture-local-vs-mesh)
+- [Use it with your agent (MCP)](#use-it-with-your-agent-mcp)
+- [Power users: multi-host mesh](#power-users-multi-host-mesh)
+- [Reference / config / troubleshooting](#reference--config--troubleshooting)
+- [Roadmap](#roadmap)
+- [Acknowledgments](#acknowledgments)
+
+## Quickstart
 
 ```bash
+# install
 pip install kioku-mesh
 # or: uv tool install kioku-mesh
+
+# initialize the local backend (no zenohd required)
+kioku-mesh init --mode local
+
+# save and search
+kioku-mesh save "Chose Postgres over SQLite for analytics"
+kioku-mesh search "Postgres"
+
+# wire up your agent
+kioku-mesh mcp install --client claude-code
 ```
 
-```
-$ kioku-mesh init --mode local
-wrote ~/.config/mesh-mem/config.yaml
-local backend ready — no zenohd required.
-next: kioku-mesh save "hello local"
+After install, both `kioku-mesh` (CLI) and `kioku-mesh-mcp` (MCP server) land on
+`PATH`. They are different binaries: `kioku-mesh` is the CLI you run; `kioku-mesh-mcp`
+is the stdio MCP server spawned by your agent (running it directly prints usage and
+exits).
 
-$ kioku-mesh save "Chose Postgres over SQLite for analytics"
-saved: a1b2c3d4...
+For structured saves (`--memory-type` / `--importance` / `--subject` / `--summary`),
+`doctor` self-diagnosis, and install alternatives (uv tool / venv / editable), see
+[Reference / config / troubleshooting](#reference--config--troubleshooting).
 
-$ kioku-mesh search "Postgres"
-[note][2] 2026-05-22T07:51:47
-Chose Postgres over SQLite for analytics <id=a1b2c3d4...>
+## What you get
 
-$ kioku-mesh mcp install --client claude-code
-```
+- **Single-machine persistence** — `--mode local` gives one-machine memory with no
+  daemon and no extra install.
+- **One-command MCP registration** — `kioku-mesh mcp install --client {claude-code,codex-cli}`
+  bakes the right config into your agent.
+- **Multi-agent, multi-host shared memory** — multiple agents (Claude Code, Codex CLI,
+  Gemini CLI, …) on multiple machines read and write the same memory pool.
+- **Soft-delete with GC** — `delete` writes a tombstone; `gc` physically purges
+  expired records.
+- **Self-diagnosis** — `kioku-mesh doctor` checks backend reachability, config, and
+  storage with actionable hints.
 
-No daemon. No extra binary. Your agent starts reading and writing memory immediately.
-
-## What this is
-
-kioku-mesh gives your AI coding agents (Claude Code, Codex CLI, Gemini CLI…) a shared
-long-term memory that survives session resets and syncs across hosts over a LAN, VPN,
-or mesh-VPN. A decision saved on your desktop is instantly searchable on your laptop —
-or by a different agent on the same machine.
-
-### Architecture: local vs mesh
+## Architecture: Local vs Mesh
 
 | Mode | What runs | What you get | Dependencies |
 |---|---|---|---|
 | **Local** (default) | SQLite only (no zenoh library started) | Single-machine persistence (save / search) | None beyond kioku-mesh |
 | **Mesh** | `zenohd` + zenoh-backend-rocksdb | Persistent multi-host mesh | zenohd (auto-provisioned) |
 
-**Local** is the default `--mode local`. It writes to a local SQLite database and
-requires nothing beyond the kioku-mesh package itself. Zero daemon, zero extra install.
+**Local** is the default `--mode local`. SQLite-backed, zero daemon, zero extra
+install.
 
-**Mesh** adds persistence across restarts AND multi-host replication by routing through
-`zenohd` with the RocksDB backend. Observations survive host reboots and propagate to
-peers that were offline during a write. This is the setup documented in the
-[Power users](#power-users-multi-host-mesh) section.
+**Mesh** adds persistence across restarts AND multi-host replication via `zenohd`
++ RocksDB. Observations survive host reboots and propagate to peers that were
+offline during a write. See [Power users: multi-host mesh](#power-users-multi-host-mesh).
 
 > **Try mesh without zenohd (demo path).** `kioku-mesh mesh start` / `mesh join` open
 > an in-process Zenoh router (no `zenohd` binary required) so you can see multi-host
@@ -58,112 +86,7 @@ peers that were offline during a write. This is the setup documented in the
 > replayed later. Use this to evaluate mesh before installing `zenohd`; switch to the
 > Mesh mode above for production.
 
-### What you get
-
-- **Single-machine persistence** — save and search on one machine, no daemon, no extra
-  install (Local mode, `--mode local`). Your agent's memory survives session resets.
-- **One-command MCP registration** — `kioku-mesh mcp install --client {claude-code,codex-cli}` wires the MCP server into
-  your agent's config with sensible defaults; no JSON / TOML hand-editing required.
-- **Multi-agent support** — Claude Code, Codex CLI, Claude Desktop, Gemini CLI, and
-  ChatGPT Desktop can all read and write the same memory pool.
-- **Self-diagnosis** — `kioku-mesh doctor` checks backend reachability, config, and
-  storage health with actionable hints.
-- **SQLite-first local search** — fast substring search and tab-completion without any
-  network round-trips.
-- **Soft-delete with GC** — `kioku-mesh delete` writes a tombstone; `kioku-mesh gc`
-  physically purges expired records.
-- **stdio MCP transport** — works with all agents that support MCP stdio; no HTTP
-  tunnel or auth layer needed for trusted-LAN usage.
-- **Multi-host shared memory (opt-in)** — extend to a multi-machine mesh via
-  [Power users: multi-host mesh](#power-users-multi-host-mesh). No changes to
-  save / search / MCP workflows required.
-
-## Try it (local-only quickstart)
-
-### Install kioku-mesh
-
-```bash
-# recommended — from PyPI
-pip install kioku-mesh
-# or:
-uv tool install kioku-mesh
-
-# alternatives (development / bleeding-edge):
-#   uv tool install git+https://github.com/h-wata/kioku-mesh.git    # latest main
-#   uv tool install --editable .                                    # local checkout
-#   python3 -m venv ~/.venv/mesh-mem && \
-#     ~/.venv/mesh-mem/bin/pip install -e '.[dev]'
-```
-
-After install, both `kioku-mesh` (CLI) and `kioku-mesh-mcp` (MCP server) land on `PATH`.
-
-> **Two binaries — know the difference**
->
-> - `kioku-mesh` (one hyphen) — the **CLI**. Run this yourself.
-> - `kioku-mesh-mcp` (two hyphens) — the **stdio MCP server**. Spawned by MCP clients
->   automatically; running it from a terminal prints a usage message and exits.
-
-### Initialize local backend
-
-```bash
-kioku-mesh init --mode local
-# wrote ~/.config/mesh-mem/config.yaml
-# local backend ready — no zenohd required.
-```
-
-### Save and search
-
-```bash
-# basic save
-kioku-mesh save "note content" --project demo --tags a,b
-
-# structured save (memory_type / importance / subject / summary; all optional)
-kioku-mesh save "store oidc tokens server-side, never in client cookies" \
-    --project demo --memory-type decision --importance 4 \
-    --subject "auth flow" --summary "pick OIDC over session cookies"
-
-kioku-mesh search "note"               # default --limit 50, summary-first display
-kioku-mesh get-memory <observation_id> # full record (32-char id)
-kioku-mesh status
-```
-
-### Verify with `kioku-mesh doctor`
-
-```bash
-kioku-mesh doctor          # human-readable PASS / FAIL with hints
-kioku-mesh doctor --json   # machine-readable; same checks
-```
-
-Exit code: `0` all pass, `1` warnings, `2` any failure (scriptable). Current v0.3
-check set:
-
-- `config_file` — `~/.config/mesh-mem/config.yaml` exists (`kioku-mesh init` if not)
-- `state_dir_hardlinks` — `MESH_MEM_STATE_DIR` is writable and supports POSIX hard links
-
-JSON shape:
-
-```json
-{
-  "ok": false,
-  "worst_status": "fail",
-  "checks": [
-    {"name": "config_file", "status": "fail",
-     "summary": "~/.config/mesh-mem/config.yaml not found",
-     "hint": "Run: kioku-mesh init --mode local"}
-  ]
-}
-```
-
-Ready to use memory across multiple machines? See [Power users: multi-host mesh](#power-users-multi-host-mesh).
-
 ## Use it with your agent (MCP)
-
-> **Two binaries — know the difference**
->
-> - `kioku-mesh` (one hyphen) — the **CLI**. Run this yourself: `kioku-mesh mcp install --client claude-code`, `kioku-mesh status`, etc.
-> - `kioku-mesh-mcp` (two hyphens) — the **stdio MCP server**. It is spawned in the background by an MCP
->   client (Claude Code, Codex CLI, Claude Desktop…); you do not type this command directly.
->   Running it from a terminal will print a usage message and exit.
 
 ### One-shot install: `kioku-mesh mcp install`
 
@@ -198,7 +121,7 @@ upstream config schemas.
 
 ### Manual registration
 
-Register the `kioku-mesh-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — typically `~/.local/bin/kioku-mesh-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/kioku-mesh-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([Japanese](docs/mcp-clients.ja.md)).
+Register the `kioku-mesh-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — run `which kioku-mesh-mcp` (or `where.exe` on Windows) to resolve it regardless of installer (`pip --user`, `uv tool`, `pipx`, venv, etc.). The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([Japanese](docs/mcp-clients.ja.md)).
 
 ## Power users: multi-host mesh
 
@@ -456,39 +379,13 @@ kioku-mesh composes Zenoh keys from a 4-tier identity (`agent_family` / `client_
 
 #### systemd unit (zenohd)
 
-Easiest path is `kioku-mesh init --install-systemd` (#86), which writes both
+Use `kioku-mesh init --install-systemd` (#86): it writes both
 `~/.config/mesh-mem/zenohd.json5` AND
 `~/.config/systemd/user/mesh-mem-zenohd.service` in one step, with the
 absolute `zenohd` path baked in. Enable with `systemctl --user daemon-reload &&
 systemctl --user enable --now mesh-mem-zenohd`.
 
-The manual template below is still documented for operators who want
-custom paths or system-scope (`/etc/systemd/system/`). Drop it at
-`~/.config/systemd/user/mesh-mem-zenohd.service` and enable with the same
-command. **Replace `/ABSOLUTE/PATH/TO/kioku-mesh` with the actual checkout
-path on the host** — the unit has no way to discover where you cloned the
-repo.
-
-```ini
-[Unit]
-Description=kioku-mesh zenohd router
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem
-ExecStartPre=/usr/bin/install -d %h/.local/share/mesh-mem
-# EDIT: absolute path to your kioku-mesh checkout, plus home or office config.
-ExecStart=/usr/bin/zenohd -c /ABSOLUTE/PATH/TO/mesh-mem/config/zenohd_home.json5
-Restart=on-failure
-RestartSec=5s
-
-[Install]
-WantedBy=default.target
-```
-
-Swap `zenohd_home.json5` for `zenohd_office.json5` on the office host. For system-scope, move to `/etc/systemd/system/` and replace `%h` with an absolute home path too.
+For system-scope auto-start with the apt-installed `zenohd`, see the drop-in override below. For arbitrary custom paths, hand-write the unit yourself — operators who need that path can read a systemd unit reference.
 
 #### Auto-start with systemd (system-wide drop-in)
 
@@ -670,9 +567,19 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 - `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
 - NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
 
-### Migration
+## Roadmap
 
-Migration notes from the `zenoh-mem` → `mesh-mem` v0.1.x transition (state directory move from `~/.local/share/zenoh-mem` to `~/.local/share/mesh-mem`) live in [docs/migration.md](docs/migration.md). The v0.3.0 PyPI rename from `mesh-mem` to `kioku-mesh` keeps all on-disk paths (`~/.local/share/mesh-mem`, `~/.config/mesh-mem/`) unchanged — only the package name and CLI binary changed.
+Near-term work items (no committed dates; tracked here informally):
+
+- **Native macOS support** — currently uninvestigated. Will need brew-installed
+  `zenohd` and a launchd unit equivalent of the systemd recipe; smoke testing on
+  Apple Silicon and Intel hosts.
+- **Native Windows support** — currently Linux-first / WSL2 recommended. Partial
+  native path documented in [docs/windows-setup.md](docs/windows-setup.md); goal is
+  first-class parity (Python install, `zenohd`, Defender Firewall, `w32time`, NSSM
+  service).
+- **`mcp install --client claude-desktop`** — currently deferred pending macOS /
+  Windows config-path verification; couples naturally with the two items above.
 
 ## Acknowledgments
 
