@@ -1440,9 +1440,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_mesh = sub.add_parser(
         'mesh',
-        help='Embedded zenoh router management (Tier 1 — no zenohd binary required)',
+        help='Embedded zenoh router for try-it / demo (no zenohd binary required)',
         description=(
-            'Tier 1 ephemeral multi-host mesh without zenohd binary.\n\n'
+            'Ephemeral multi-host mesh without the zenohd binary. Intended as a\n'
+            'try-it / demo path — cross-host replication is NOT persistent across\n'
+            'router restarts, and writes made while a peer was offline are not\n'
+            'replayed later. For production multi-host use, install zenohd and\n'
+            'follow the Power users section in the README.\n\n'
             '60-second multi-host start:\n'
             '  Host A: kioku-mesh mesh start\n'
             '  Host B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 MESH_MEM_BACKEND=zenoh '

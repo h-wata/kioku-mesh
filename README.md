@@ -36,31 +36,32 @@ long-term memory that survives session resets and syncs across hosts over a LAN,
 or mesh-VPN. A decision saved on your desktop is instantly searchable on your laptop —
 or by a different agent on the same machine.
 
-### Architecture: Tier 0 / 1 / 2
+### Architecture: local vs mesh
 
-| Tier | What runs | What you get | Dependencies |
+| Mode | What runs | What you get | Dependencies |
 |---|---|---|---|
-| **Tier 0** | SQLite only (no zenoh library started) | Single-machine persistence (save / search) | None beyond kioku-mesh |
-| **Tier 1** | zenoh-python in `mode=router` (in-process) | Ephemeral multi-host mesh, no extra binary | zenoh-python |
-| **Tier 2** | auto-downloaded zenohd + zenoh-backend-rocksdb | Persistent multi-host mesh | zenohd (auto-provisioned) |
+| **Local** (default) | SQLite only (no zenoh library started) | Single-machine persistence (save / search) | None beyond kioku-mesh |
+| **Mesh** | `zenohd` + zenoh-backend-rocksdb | Persistent multi-host mesh | zenohd (auto-provisioned) |
 
-**Tier 0** is the default `--mode local`. It writes to a local SQLite database and
+**Local** is the default `--mode local`. It writes to a local SQLite database and
 requires nothing beyond the kioku-mesh package itself. Zero daemon, zero extra install.
 
-**Tier 1** lifts the same SQLite store into an in-process Zenoh router so multiple
-machines can share observations over TCP without running a separate `zenohd` binary.
-Sessions are ephemeral — observations sync while the router is running but are not
-replicated to persistent storage across hosts.
+**Mesh** adds persistence across restarts AND multi-host replication by routing through
+`zenohd` with the RocksDB backend. Observations survive host reboots and propagate to
+peers that were offline during a write. This is the setup documented in the
+[Power users](#power-users-multi-host-mesh) section.
 
-**Tier 2** adds persistence across restarts by routing through `zenohd` with the
-RocksDB backend. Observations survive host reboots and propagate to peers that were
-offline during a write. This is the setup documented in the [Power users](#power-users-multi-host-mesh)
-section.
+> **Try mesh without zenohd (demo path).** `kioku-mesh mesh start` / `mesh join` open
+> an in-process Zenoh router (no `zenohd` binary required) so you can see multi-host
+> sync working in 60 seconds. Cross-host replication is **ephemeral** — observations
+> sync while every peer is online, but writes made while a peer was offline are not
+> replayed later. Use this to evaluate mesh before installing `zenohd`; switch to the
+> Mesh mode above for production.
 
 ### What you get
 
 - **Single-machine persistence** — save and search on one machine, no daemon, no extra
-  install (Tier 0, `--mode local`). Your agent's memory survives session resets.
+  install (Local mode, `--mode local`). Your agent's memory survives session resets.
 - **One-command MCP registration** — `kioku-mesh mcp install --client {claude-code,codex-cli}` wires the MCP server into
   your agent's config with sensible defaults; no JSON / TOML hand-editing required.
 - **Multi-agent support** — Claude Code, Codex CLI, Claude Desktop, Gemini CLI, and
@@ -415,8 +416,8 @@ stays fast even when the mesh is large.
 
 ### Architecture summary
 
-- **Source of truth (Tier 0):** SQLite local database under `MESH_MEM_STATE_DIR`.
-- **Source of truth (Tier 2):** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.
+- **Source of truth (Local mode):** SQLite local database under `MESH_MEM_STATE_DIR`.
+- **Source of truth (Mesh mode):** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.
 - **Read path:** SQLite local sidecar index by default; Zenoh full-scan fallback with `MESH_MEM_DISABLE_INDEX=1`.
 - **Delete model:** logical delete is an existence-based tombstone; physical delete is handled by `kioku-mesh gc`.
 - **Identity:** `agent_family` / `client_id` come from env, `pc_id` is persisted per host, `session_id` is stable per process.
@@ -663,8 +664,9 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 ### Requirements
 
 - Python >= 3.10
-- For Tier 0 (local mode): no extra dependencies beyond kioku-mesh itself.
-- For Tier 2 (multi-host): Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
+- For Local mode: no extra dependencies beyond kioku-mesh itself.
+- For Mesh mode (multi-host): Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
+- For the demo-only ephemeral mesh path (`mesh start` / `mesh join`): just `zenoh-python` — already a dependency of kioku-mesh. No `zenohd` binary required.
 - `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
 - NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
 

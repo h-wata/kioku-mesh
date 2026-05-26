@@ -3,6 +3,12 @@
 Date: 2026-05-22
 Author: W2 (fix-forward per TASK-206)
 
+> **2026-05-26 update:** "Tier 1" has been removed from the public README as a
+> first-class architecture tier (Tier 0 / 1 / 2 → Local / Mesh, with the
+> in-process router demoted to a "try mesh without zenohd" demo path). The
+> code paths (`mesh start` / `mesh join`) and the analysis below remain
+> accurate. See ADR-0013 for the naming-change rationale.
+
 ## Problem Statement (B1)
 
 The original `mesh start` implementation opened an in-process zenoh router
