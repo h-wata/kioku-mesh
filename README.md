@@ -23,6 +23,7 @@ your laptop — or by a different agent on the same machine.
 - [Power users: multi-host mesh](#power-users-multi-host-mesh)
 - [Reference / config / troubleshooting](#reference--config--troubleshooting)
 - [Roadmap](#roadmap)
+- [Contributing](#contributing)
 - [Acknowledgments](#acknowledgments)
 
 ## Quickstart
@@ -200,7 +201,7 @@ After restarting zenohd or your host, kioku-mesh may briefly return fewer result
 peer alignment completes (typically 5–10 s, up to ~3 min for cold-era data). Use
 `kioku-mesh status` to check readiness (`mesh_ready: yes` when alignment is complete).
 
-### Multi-host mesh setup
+### Step 3 — Multi-host mesh setup
 
 <a id="multi-host-mesh-setup"></a>
 
@@ -278,102 +279,6 @@ To run the localhost 5-peer smoke test (requires `pip install -e '.[dev,test]'`)
 pip install -e '.[dev,test]'   # installs PyYAML and other test deps
 PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
 ```
-
-## Reference / config / troubleshooting
-
-### `kioku-mesh init` flags
-
-| Flag | Purpose |
-|------|---------|
-| `--mode local` (default) | SQLite-only local backend; no zenoh, no daemon |
-| `--mode localhost` | loopback + in-memory volume; no rocksdb, no replication |
-| `--mode hub` | LAN-facing router with rocksdb + replication; spokes dial in |
-| `--mode spoke` | rocksdb + replication; dials the hub (requires `--connect`) |
-| `--listen ENDPOINT` | repeatable. Accepts `ip`, `ip:port`, or `tcp/ip:port`. If omitted on hub/spoke, an interactive picker lists detected IFs. |
-| `--connect ENDPOINT` | repeatable. Required for `--mode spoke`. |
-| `--out PATH` | override output path (default: `~/.config/mesh-mem/config.yaml`, honors `XDG_CONFIG_HOME`) |
-| `--force` | overwrite an existing file |
-| `--print` | emit to stdout instead of writing a file |
-| `--install-systemd` | also write a user-scope systemd unit at `~/.config/systemd/user/mesh-mem-zenohd.service` so `zenohd` starts on login. Linux only — macOS / Windows / non-systemd hosts get a clear error. |
-
-### CLI startup: `--rebuild` and `MESH_MEM_FORCE_REBUILD`
-
-`kioku-mesh` (the CLI) is a one-shot process. Since v0.2.4 it **skips** the startup
-`rebuild_from_zenoh` scan by default — on a populated mesh that scan can add ~15 s to
-*every* CLI invocation (#38). The local SQLite index still converges via the
-replication subscriber while the process is running, so `save` / `search` /
-`get-memory` / `delete` / `status` all see live writes from this and other peers.
-
-Long-running processes (`kioku-mesh-mcp`, autonomous agents) keep the default — they pay
-the rebuild cost once at startup.
-
-Opt back in for a single CLI run when you need the index aligned with the on-disk Zenoh
-storage:
-
-```bash
-kioku-mesh --rebuild status               # explicit per-invocation flag
-MESH_MEM_FORCE_REBUILD=1 kioku-mesh search hello   # env-level equivalent
-```
-
-Full resolution order: `--rebuild` flag > `MESH_MEM_FORCE_REBUILD` >
-`MESH_MEM_SKIP_REBUILD` > module default (`True` for long-lived processes, `False` for
-the CLI).
-
-### Shell completion (optional)
-
-`kioku-mesh` ships an [argcomplete](https://kislyuk.github.io/argcomplete/)-based
-completer for bash / zsh (#76):
-
-```bash
-pip install -e '.[completion]'
-# bash
-eval "$(register-python-argcomplete kioku-mesh)"
-# zsh: add to ~/.zshrc
-#   autoload -U bashcompinit && bashcompinit
-#   eval "$(register-python-argcomplete kioku-mesh)"
-```
-
-`--project` / `--pc-id` / `--by-pc-id` use dynamic completers that read distinct
-values from the **local SQLite index only** (no Zenoh round-trip) so tab-completion
-stays fast even when the mesh is large.
-
-### Architecture summary
-
-- **Source of truth (Local mode):** SQLite local database under `MESH_MEM_STATE_DIR`.
-- **Source of truth (Mesh mode):** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.
-- **Read path:** SQLite local sidecar index by default; Zenoh full-scan fallback with `MESH_MEM_DISABLE_INDEX=1`.
-- **Delete model:** logical delete is an existence-based tombstone; physical delete is handled by `kioku-mesh gc`.
-- **Identity:** `agent_family` / `client_id` come from env, `pc_id` is persisted per host, `session_id` is stable per process.
-- **Interfaces:** CLI (`kioku-mesh`) and stdio MCP server (`kioku-mesh-mcp`) share the same store primitives.
-
-### Status & known limitations
-
-kioku-mesh is a LAN / VPN / mesh-VPN shared memory for trusted peers. Trust comes from network admission, not transport-level auth. LAN replication, DR, and split-brain recovery have been verified on a 2-host setup (1,192 writes across a ~24 h partition, data integrity verified G3 / G4 / Tombstone); the default read path uses a SQLite sidecar index backed by Zenoh + RocksDB.
-
-#### Scope decision: no transport-level auth or encryption
-
-kioku-mesh intentionally carries no in-protocol authentication or encryption. `mem/**` and `mem/tomb/**` are readable and writable by anyone who can reach port 7447 — the security boundary is the network itself. This is a deliberate scope choice: trusted-peer shared memory on a LAN, VPN, or mesh-VPN (Tailscale, WireGuard) where admission control is handled at the network layer.
-
-> ⚠️ **Do not expose port 7447 to untrusted networks.** Never open to the internet or to an untrusted LAN segment. See [Firewall](#firewall) for per-peer allow rules.
-
-**stdio MCP transport only.** Works with Claude Code, Claude Desktop, Gemini CLI, and Codex CLI. Web apps (`claude.ai`, `chatgpt.com`) are not supported — they require HTTP/SSE transport + tunnel + auth, which is out of this project's current scope.
-
-#### Versioning
-
-kioku-mesh follows SemVer with the explicit caveat that **`0.x` is experimental**: minor version bumps may include breaking changes to APIs and on-disk storage schema. The CHANGELOG announces every break, but a stable migration path is only guaranteed from `1.0` onward. `1.0` will lock in API stability and the storage schema.
-
-#### Operational notes
-
-- **Cold-era resync is step-function, not incremental.** After reconnect, a peer that has been offline may show 0 obs for 97–282 s before jumping to the full count. Hot/warm-era reconvergence stays at ~5 s as designed. See `plan.md` for the real-world validation results.
-- **gc broadcast is best-effort.** A replica unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.
-- **MAX_SEARCH is a return-size cap, not a scan budget.** The default search path is the SQLite sidecar index with case-insensitive substring matching against `payload_json`; `MAX_SEARCH=10000`. With `MESH_MEM_DISABLE_INDEX=1`, the legacy Zenoh full-scan fallback is used. No FTS5 full-text search.
-- **Logical vs physical delete.** `kioku-mesh delete` / `delete_memory` write a tombstone; the observation is hidden from `search` but still stored. `kioku-mesh gc --retention-days N` (default 30) physically removes expired tombstones plus their observations. `kioku-mesh gc --force-id <obs_id>` broadcasts a best-effort immediate purge to every replica.
-
-See [docs/Spec.md](./docs/Spec.md) for the current behavior, [plan.md](./plan.md) for design notes, and `gh issue list --state open` for live tracking.
-
-### Multi-agent identity (single host, multiple agents)
-
-kioku-mesh composes Zenoh keys from a 4-tier identity (`agent_family` / `client_id` / `pc_id` / `session_id`) so two agents on the same host land at non-colliding keys. Setup recipes for multiple terminals, `direnv`, and MCP-launched agents live in [docs/multi-agent.md](docs/multi-agent.md) ([Japanese](docs/multi-agent.ja.md)).
 
 ### Operations
 
@@ -533,39 +438,107 @@ kioku-mesh gc --force-id <32-char observation_id>
 
 `gc --force-id` always exits 0 once the broadcast has been sent — even when the local replica never held the record — because a reachable peer may have completed the purge.
 
-### Windows host setup
+## Reference / config / troubleshooting
 
-kioku-mesh development is Linux-first and **WSL2 is strongly recommended on Windows**. Native Windows host setup — Python install, zenohd + RocksDB plugin, Windows Defender Firewall, `w32time` sync, NSSM service registration — lives in [docs/windows-setup.md](docs/windows-setup.md) ([Japanese](docs/windows-setup.ja.md)).
+### `kioku-mesh init` flags
 
-### Continuous Integration
+| Flag | Purpose |
+|------|---------|
+| `--mode local` (default) | SQLite-only local backend; no zenoh, no daemon |
+| `--mode localhost` | loopback + in-memory volume; no rocksdb, no replication |
+| `--mode hub` | LAN-facing router with rocksdb + replication; spokes dial in |
+| `--mode spoke` | rocksdb + replication; dials the hub (requires `--connect`) |
+| `--listen ENDPOINT` | repeatable. Accepts `ip`, `ip:port`, or `tcp/ip:port`. If omitted on hub/spoke, an interactive picker lists detected IFs. |
+| `--connect ENDPOINT` | repeatable. Required for `--mode spoke`. |
+| `--out PATH` | override output path (default: `~/.config/mesh-mem/config.yaml`, honors `XDG_CONFIG_HOME`) |
+| `--force` | overwrite an existing file |
+| `--print` | emit to stdout instead of writing a file |
+| `--install-systemd` | also write a user-scope systemd unit at `~/.config/systemd/user/mesh-mem-zenohd.service` so `zenohd` starts on login. Linux only — macOS / Windows / non-systemd hosts get a clear error. |
 
-Pull requests run lint (pre-commit) and tests automatically (see #22).
+### CLI startup: `--rebuild` and `MESH_MEM_FORCE_REBUILD`
 
-### Developer scripts
+`kioku-mesh` (the CLI) is a one-shot process. Since v0.2.4 it **skips** the startup
+`rebuild_from_zenoh` scan by default — on a populated mesh that scan can add ~15 s to
+*every* CLI invocation (#38). The local SQLite index still converges via the
+replication subscriber while the process is running, so `save` / `search` /
+`get-memory` / `delete` / `status` all see live writes from this and other peers.
 
-Only a small number of maintained helper scripts remain under `scripts/`. At the moment, the documented ones are the 5-peer smoke test (`scripts/smoke_5peer_mesh.py`) and the Claude Code SessionStart hook sample (`scripts/hooks/session-start.sh`).
+Long-running processes (`kioku-mesh-mcp`, autonomous agents) keep the default — they pay
+the rebuild cost once at startup.
 
-### Development
+Opt back in for a single CLI run when you need the index aligned with the on-disk Zenoh
+storage:
 
 ```bash
-# Install with test dependencies (required to run MCP smoke tests)
-pip install -e '.[dev,test]'
-
-# Run all tests
-pytest tests/ -q
-
-# Run only MCP smoke tests
-pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
+kioku-mesh --rebuild status               # explicit per-invocation flag
+MESH_MEM_FORCE_REBUILD=1 kioku-mesh search hello   # env-level equivalent
 ```
 
-### Requirements
+Full resolution order: `--rebuild` flag > `MESH_MEM_FORCE_REBUILD` >
+`MESH_MEM_SKIP_REBUILD` > module default (`True` for long-lived processes, `False` for
+the CLI).
 
-- Python >= 3.10
-- For Local mode: no extra dependencies beyond kioku-mesh itself.
-- For Mesh mode (multi-host): Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
-- For the demo-only ephemeral mesh path (`mesh start` / `mesh join`): just `zenoh-python` — already a dependency of kioku-mesh. No `zenohd` binary required.
-- `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
-- NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
+### Shell completion (optional)
+
+`kioku-mesh` ships an [argcomplete](https://kislyuk.github.io/argcomplete/)-based
+completer for bash / zsh (#76):
+
+```bash
+pip install -e '.[completion]'
+# bash
+eval "$(register-python-argcomplete kioku-mesh)"
+# zsh: add to ~/.zshrc
+#   autoload -U bashcompinit && bashcompinit
+#   eval "$(register-python-argcomplete kioku-mesh)"
+```
+
+`--project` / `--pc-id` / `--by-pc-id` use dynamic completers that read distinct
+values from the **local SQLite index only** (no Zenoh round-trip) so tab-completion
+stays fast even when the mesh is large.
+
+### Internal architecture
+
+- **Source of truth (Local mode):** SQLite local database under `MESH_MEM_STATE_DIR`.
+- **Source of truth (Mesh mode):** Zenoh + RocksDB storage under `mem/obs/**` and `mem/tomb/**`.
+- **Read path:** SQLite local sidecar index by default; Zenoh full-scan fallback with `MESH_MEM_DISABLE_INDEX=1`.
+- **Delete model:** logical delete is an existence-based tombstone; physical delete is handled by `kioku-mesh gc`.
+- **Identity:** `agent_family` / `client_id` come from env, `pc_id` is persisted per host, `session_id` is stable per process.
+- **Interfaces:** CLI (`kioku-mesh`) and stdio MCP server (`kioku-mesh-mcp`) share the same store primitives.
+
+### Status & known limitations
+
+kioku-mesh is a LAN / VPN / mesh-VPN shared memory for trusted peers. Trust comes from network admission, not transport-level auth. LAN replication, DR, and split-brain recovery have been verified on a 2-host setup (1,192 writes across a ~24 h partition, data integrity verified G3 / G4 / Tombstone); the default read path uses a SQLite sidecar index backed by Zenoh + RocksDB.
+
+#### Scope decision: no transport-level auth or encryption
+
+kioku-mesh intentionally carries no in-protocol authentication or encryption. `mem/**` and `mem/tomb/**` are readable and writable by anyone who can reach port 7447 — the security boundary is the network itself. This is a deliberate scope choice: trusted-peer shared memory on a LAN, VPN, or mesh-VPN (Tailscale, WireGuard) where admission control is handled at the network layer.
+
+> ⚠️ **Do not expose port 7447 to untrusted networks.** Never open to the internet or to an untrusted LAN segment. See [Firewall](#firewall) for per-peer allow rules.
+
+**stdio MCP transport only.** Works with Claude Code, Claude Desktop, Gemini CLI, and Codex CLI. Web apps (`claude.ai`, `chatgpt.com`) are not supported — they require HTTP/SSE transport + tunnel + auth, which is out of this project's current scope.
+
+#### Versioning
+
+kioku-mesh follows SemVer with the explicit caveat that **`0.x` is experimental**: minor version bumps may include breaking changes to APIs and on-disk storage schema. The CHANGELOG announces every break, but a stable migration path is only guaranteed from `1.0` onward. `1.0` will lock in API stability and the storage schema.
+
+#### Operational notes
+
+- **Cold-era resync is step-function, not incremental.** After reconnect, a peer that has been offline may show 0 obs for 97–282 s before jumping to the full count. Hot/warm-era reconvergence stays at ~5 s as designed. See `plan.md` for the real-world validation results.
+- **gc broadcast is best-effort.** A replica unreachable during `gc --force-id` catches up on its next local `gc --retention-days` run; there is no delivery-confirmation channel.
+- **MAX_SEARCH is a return-size cap, not a scan budget.** The default search path is the SQLite sidecar index with case-insensitive substring matching against `payload_json`; `MAX_SEARCH=10000`. With `MESH_MEM_DISABLE_INDEX=1`, the legacy Zenoh full-scan fallback is used. No FTS5 full-text search.
+- **Logical vs physical delete.** `kioku-mesh delete` / `delete_memory` write a tombstone; the observation is hidden from `search` but still stored. `kioku-mesh gc --retention-days N` (default 30) physically removes expired tombstones plus their observations. `kioku-mesh gc --force-id <obs_id>` broadcasts a best-effort immediate purge to every replica.
+
+See [docs/Spec.md](./docs/Spec.md) for the current behavior, [plan.md](./plan.md) for design notes, and `gh issue list --state open` for live tracking.
+
+### Multi-agent identity (single host, multiple agents)
+
+kioku-mesh composes Zenoh keys from a 4-tier identity (`agent_family` / `client_id` / `pc_id` / `session_id`) so two agents on the same host land at non-colliding keys. Setup recipes for multiple terminals, `direnv`, and MCP-launched agents live in [docs/multi-agent.md](docs/multi-agent.md) ([Japanese](docs/multi-agent.ja.md)).
+
+### Platform notes
+
+- **Linux**: first-class, develop-and-deploy target.
+- **Windows**: WSL2 is strongly recommended. Native Windows host setup (Python install, `zenohd` + RocksDB plugin, Windows Defender Firewall, `w32time` sync, NSSM service registration) lives in [docs/windows-setup.md](docs/windows-setup.md) ([Japanese](docs/windows-setup.ja.md)).
+- **macOS**: uninvestigated. Tracked in [Roadmap](#roadmap).
 
 ## Roadmap
 
@@ -580,6 +553,38 @@ Near-term work items (no committed dates; tracked here informally):
   service).
 - **`mcp install --client claude-desktop`** — currently deferred pending macOS /
   Windows config-path verification; couples naturally with the two items above.
+
+## Contributing
+
+### Requirements
+
+- Python >= 3.10
+- For Local mode: no extra dependencies beyond kioku-mesh itself.
+- For Mesh mode (multi-host): Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
+- For the demo-only ephemeral mesh path (`mesh start` / `mesh join`): just `zenoh-python` — already a dependency of kioku-mesh. No `zenohd` binary required.
+- `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
+- NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
+
+### Development
+
+```bash
+# Install with test dependencies (required to run MCP smoke tests)
+pip install -e '.[dev,test]'
+
+# Run all tests
+pytest tests/ -q
+
+# Run only MCP smoke tests
+pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
+```
+
+### Continuous Integration
+
+Pull requests run lint (pre-commit) and tests automatically (see #22).
+
+### Developer scripts
+
+Only a small number of maintained helper scripts remain under `scripts/`. At the moment, the documented ones are the 5-peer smoke test (`scripts/smoke_5peer_mesh.py`) and the Claude Code SessionStart hook sample (`scripts/hooks/session-start.sh`).
 
 ## Acknowledgments
 
