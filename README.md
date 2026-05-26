@@ -7,8 +7,8 @@ when you need it.
 ## 30-second local start
 
 ```bash
-pip install -e git+https://github.com/h-wata/kioku-mesh.git#egg=kioku-mesh
-# or: uv tool install git+https://github.com/h-wata/kioku-mesh.git
+pip install kioku-mesh
+# or: uv tool install kioku-mesh
 ```
 
 ```
@@ -82,10 +82,14 @@ section.
 ### Install kioku-mesh
 
 ```bash
-# recommended
-uv tool install git+https://github.com/h-wata/kioku-mesh.git
-# alternatives:
-#   uv tool install --editable .                          # local checkout
+# recommended — from PyPI
+pip install kioku-mesh
+# or:
+uv tool install kioku-mesh
+
+# alternatives (development / bleeding-edge):
+#   uv tool install git+https://github.com/h-wata/kioku-mesh.git    # latest main
+#   uv tool install --editable .                                    # local checkout
 #   python3 -m venv ~/.venv/mesh-mem && \
 #     ~/.venv/mesh-mem/bin/pip install -e '.[dev]'
 ```
@@ -193,7 +197,7 @@ upstream config schemas.
 
 ### Manual registration
 
-Register the `kioku-mesh-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — typically `~/.local/bin/kioku-mesh-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/kioku-mesh-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([日本語版](docs/mcp-clients.ja.md)).
+Register the `kioku-mesh-mcp` console script in each agent's MCP config. Use the **absolute path** to the installed binary — typically `~/.local/bin/kioku-mesh-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/kioku-mesh-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Per-client setup (Claude Code via `claude mcp add`, Claude Desktop, Gemini CLI, Codex CLI, ChatGPT Desktop), the non-interactive `claude -p` smoke recipe, optional `MESH_MEM_SESSION_ID` pinning, and the Claude Code **SessionStart hook** for cross-peer context injection all live in [docs/mcp-clients.md](docs/mcp-clients.md) ([Japanese](docs/mcp-clients.ja.md)).
 
 ## Power users: multi-host mesh
 
@@ -445,7 +449,7 @@ See [docs/Spec.md](./docs/Spec.md) for the current behavior, [plan.md](./plan.md
 
 ### Multi-agent identity (single host, multiple agents)
 
-kioku-mesh composes Zenoh keys from a 4-tier identity (`agent_family` / `client_id` / `pc_id` / `session_id`) so two agents on the same host land at non-colliding keys. Setup recipes for multiple terminals, `direnv`, and MCP-launched agents live in [docs/multi-agent.md](docs/multi-agent.md) ([日本語版](docs/multi-agent.ja.md)).
+kioku-mesh composes Zenoh keys from a 4-tier identity (`agent_family` / `client_id` / `pc_id` / `session_id`) so two agents on the same host land at non-colliding keys. Setup recipes for multiple terminals, `direnv`, and MCP-launched agents live in [docs/multi-agent.md](docs/multi-agent.md) ([Japanese](docs/multi-agent.ja.md)).
 
 ### Operations
 
@@ -601,10 +605,9 @@ chronyc tracking | grep 'Last offset'
 
 ##### PoC verification
 
-See [docs/poc-reports/SUMMARY.md §8.4](docs/poc-reports/SUMMARY.md#84-ntp-skew-境界テスト-部分実施結果task-122)
-for the skew boundary test results. Key findings: replication integrity held at ±10 s skew,
-but `--since-iso` filter cutoffs shifted proportionally and `timedatectl` proved unreliable as
-an inter-host alignment signal.
+Skew boundary tests (±10 s on a 2-host setup) confirmed: replication integrity holds,
+but `--since-iso` filter cutoffs shift proportionally and `timedatectl` is not
+a reliable inter-host alignment signal — use `chronyc tracking` instead.
 
 #### Retention / gc
 
@@ -634,7 +637,7 @@ kioku-mesh gc --force-id <32-char observation_id>
 
 ### Windows host setup
 
-kioku-mesh development is Linux-first and **WSL2 is strongly recommended on Windows**. Native Windows host setup — Python install, zenohd + RocksDB plugin, Windows Defender Firewall, `w32time` sync, NSSM service registration — lives in [docs/windows-setup.md](docs/windows-setup.md) ([日本語版](docs/windows-setup.ja.md)).
+kioku-mesh development is Linux-first and **WSL2 is strongly recommended on Windows**. Native Windows host setup — Python install, zenohd + RocksDB plugin, Windows Defender Firewall, `w32time` sync, NSSM service registration — lives in [docs/windows-setup.md](docs/windows-setup.md) ([Japanese](docs/windows-setup.ja.md)).
 
 ### Continuous Integration
 
@@ -669,15 +672,21 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 
 Migration notes from the `zenoh-mem` → `mesh-mem` v0.1.x transition (state directory move from `~/.local/share/zenoh-mem` to `~/.local/share/mesh-mem`) live in [docs/migration.md](docs/migration.md). The v0.3.0 PyPI rename from `mesh-mem` to `kioku-mesh` keeps all on-disk paths (`~/.local/share/mesh-mem`, `~/.config/mesh-mem/`) unchanged — only the package name and CLI binary changed.
 
-## Acknowledgments (日本語)
+## Acknowledgments
 
-kioku-mesh は先行する "AI エージェント向け永続メモリ" プロジェクトから大きなインスピレーションを受けています。設計思想・API 形状のアイデアを参考にさせてもらった各プロジェクトに感謝します。
+kioku-mesh draws significant inspiration from earlier "persistent memory for AI agents"
+projects. Thanks to the following for design ideas and API shape that we studied
+while building this:
 
-- **[engram](https://github.com/Gentleman-Programming/engram)** by Gentleman-Programming — MCP ベースのクロスセッションメモリ (MIT)。`save_observation` / `search_memory` のツール分割と "observation" という単位の切り出しは engram の設計を参考にしています。
-- **[claude-mem](https://github.com/thedotmack/claude-mem)** by Alex Newman ([@thedotmack](https://github.com/thedotmack)) — Claude Code プラグイン、セッションの自動キャプチャ & 圧縮 (AGPL-3.0)。"エージェントの長期記憶を別プロセスに切り出す" という発想の先例として大きく影響を受けました。
+- **[engram](https://github.com/Gentleman-Programming/engram)** by Gentleman-Programming — MCP-based cross-session memory (MIT). The split between `save_observation` / `search_memory` and the "observation" as a primary unit follow engram's design.
+- **[claude-mem](https://github.com/thedotmack/claude-mem)** by Alex Newman ([@thedotmack](https://github.com/thedotmack)) — a Claude Code plugin for automatic session capture and compression (AGPL-3.0). The idea of factoring an agent's long-term memory into a separate process was a strong precedent for this work.
 
-両プロジェクトからはコードを引いていません（いずれも参考・インスピレーション）。差別化ポイントは Zenoh メッシュによる **マルチホスト・マルチエージェント共有** です。
+No code is copied from either project — both are referenced for inspiration only.
+kioku-mesh's distinguishing contribution is **multi-host, multi-agent shared memory
+over a Zenoh mesh**.
 
-### 設計ドキュメント
+### Design documents
 
-現状仕様は [docs/Spec.md](./docs/Spec.md) にまとめています。設計判断の背景は [docs/adr/](./docs/adr/) を、検証記録は [docs/poc-reports/](./docs/poc-reports/) を参照してください。
+Current specifications live in [docs/Spec.md](./docs/Spec.md). Background for design
+decisions is recorded in [docs/adr/](./docs/adr/), and validation results in
+[docs/poc-reports/](./docs/poc-reports/).
