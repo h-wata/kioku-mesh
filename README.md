@@ -24,7 +24,7 @@ $ kioku-mesh search "Postgres"
 [note][2] 2026-05-22T07:51:47
 Chose Postgres over SQLite for analytics <id=a1b2c3d4...>
 
-$ kioku-mesh mcp install
+$ kioku-mesh mcp install --client claude-code
 ```
 
 No daemon. No extra binary. Your agent starts reading and writing memory immediately.
@@ -61,7 +61,7 @@ section.
 
 - **Single-machine persistence** — save and search on one machine, no daemon, no extra
   install (Tier 0, `--mode local`). Your agent's memory survives session resets.
-- **One-command MCP registration** — `kioku-mesh mcp install` wires the MCP server into
+- **One-command MCP registration** — `kioku-mesh mcp install --client {claude-code,codex-cli}` wires the MCP server into
   your agent's config with sensible defaults; no JSON / TOML hand-editing required.
 - **Multi-agent support** — Claude Code, Codex CLI, Claude Desktop, Gemini CLI, and
   ChatGPT Desktop can all read and write the same memory pool.
@@ -159,7 +159,7 @@ Ready to use memory across multiple machines? See [Power users: multi-host mesh]
 
 > **Two binaries — know the difference**
 >
-> - `kioku-mesh` (one hyphen) — the **CLI**. Run this yourself: `kioku-mesh mcp install`, `kioku-mesh status`, etc.
+> - `kioku-mesh` (one hyphen) — the **CLI**. Run this yourself: `kioku-mesh mcp install --client claude-code`, `kioku-mesh status`, etc.
 > - `kioku-mesh-mcp` (two hyphens) — the **stdio MCP server**. It is spawned in the background by an MCP
 >   client (Claude Code, Codex CLI, Claude Desktop…); you do not type this command directly.
 >   Running it from a terminal will print a usage message and exit.
