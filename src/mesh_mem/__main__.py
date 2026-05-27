@@ -1086,6 +1086,10 @@ def _cmd_init_local(args: argparse.Namespace) -> int:
     print(f'wrote {written}')
     print('local backend ready — no zenohd required.')
     print('next: kioku-mesh save "hello local"')
+    print(
+        'scale up: for multi-host mesh, install zenohd then '
+        '`kioku-mesh init --mode hub --force` (see README §Power users).'
+    )
     return 0
 
 
@@ -1167,7 +1171,34 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f'next: zenohd -c {config_path}')
     if args.mode in ('hub', 'spoke'):
         print('also: export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"')
+    _print_mode_followup(args.mode, listen)
     return 0
+
+
+def _print_mode_followup(mode: str, listen_endpoints: list[str]) -> None:
+    """Print mode-specific scale-up / cross-peer guidance after init."""
+    if mode == 'localhost':
+        print('scale up:')
+        print('  · single-host persistence (no zenohd): kioku-mesh init --mode local --force')
+        print('  · multi-host mesh:                     kioku-mesh init --mode hub --force')
+        print('  see README §Power users for the mesh walkthrough.')
+    elif mode == 'hub':
+        hint_ip = _first_lan_ip_from_listen(listen_endpoints) or '<this-host-ip>'
+        print(
+            f'on each spoke: kioku-mesh init --mode spoke --listen 127.0.0.1 '
+            f'--listen <spoke-lan-ip> --connect {hint_ip}:7447'
+        )
+    elif mode == 'spoke':
+        print("on the hub: confirm --listen includes this spoke's reachable IP, then restart zenohd.")
+
+
+def _first_lan_ip_from_listen(listen_endpoints: list[str]) -> str | None:
+    """Return the first non-loopback IP from a list of `tcp/HOST:PORT` endpoints."""
+    for ep in listen_endpoints:
+        host = ep.split('/', 1)[-1].rsplit(':', 1)[0]
+        if host and not host.startswith('127.') and host != '0.0.0.0':
+            return host
+    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -1339,15 +1370,27 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser(
         'init',
         help='Generate a starter zenohd config under ~/.config/mesh-mem/',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            'Generate a starter config. Pick --mode by the deployment shape you want:\n'
+            '\n'
+            '  localhost  (default) zenohd + loopback + memory volume.\n'
+            "             Quickest 'does it run?' check. NOT persistent across zenohd restarts.\n"
+            '  local      SQLite only, no zenohd. Single-host persistent storage with zero daemon.\n'
+            '  hub        zenohd + rocksdb + LAN listener. Central peer that spokes dial in to\n'
+            '             (multi-host mesh, persistent).\n'
+            '  spoke      zenohd + rocksdb, dials a hub via --connect (multi-host mesh, persistent).\n'
+            '\n'
+            'Typical flow: run `kioku-mesh init` first to confirm everything wires up, then re-run\n'
+            'with --mode <local|hub|spoke> --force once you know which deployment you want.\n'
+            'See README §Power users for the multi-host walkthrough.'
+        ),
     )
     p_init.add_argument(
         '--mode',
         default='localhost',
         choices=_INIT_MODES,
-        help=(
-            'localhost (loopback+memory, default) / hub (LAN listener) / '
-            'spoke (dials a hub) / local (SQLite-only, no zenohd)'
-        ),
+        help='deployment shape: localhost (default) / local / hub / spoke. See full descriptions above.',
     )
     p_init.add_argument(
         '--listen',
