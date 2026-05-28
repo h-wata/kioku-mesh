@@ -19,6 +19,7 @@ your laptop — or by a different agent on the same machine.
 - [Quickstart](#quickstart)
 - [What you get](#what-you-get)
 - [Architecture: Local vs Mesh](#architecture-local-vs-mesh)
+  - [Picking a `--mode`](#picking-a---mode)
 - [Use it with your agent (MCP)](#use-it-with-your-agent-mcp)
 - [Power users: multi-host mesh](#power-users-multi-host-mesh)
 - [Reference / config / troubleshooting](#reference--config--troubleshooting)
@@ -70,15 +71,31 @@ For structured saves (`--memory-type` / `--importance` / `--subject` / `--summar
 
 | Mode | What runs | What you get | Dependencies |
 |---|---|---|---|
-| **Local** (default) | SQLite only (no zenoh library started) | Single-machine persistence (save / search) | None beyond kioku-mesh |
+| **Local** | SQLite only (no zenoh library started) | Single-machine persistence (save / search) | None beyond kioku-mesh |
 | **Mesh** | `zenohd` + zenoh-backend-rocksdb | Persistent multi-host mesh | zenohd (auto-provisioned) |
 
-**Local** is the default `--mode local`. SQLite-backed, zero daemon, zero extra
-install.
+**Local** is what the Quickstart sets up (`--mode local`). SQLite-backed, zero
+daemon, zero extra install.
 
 **Mesh** adds persistence across restarts AND multi-host replication via `zenohd`
 + RocksDB. Observations survive host reboots and propagate to peers that were
 offline during a write. See [Power users: multi-host mesh](#power-users-multi-host-mesh).
+
+### Picking a `--mode`
+
+`kioku-mesh init --mode` accepts four shapes. Pick by deployment intent:
+
+| Intent | `--mode` | Persistent? | Needs zenohd? |
+|---|---|---|---|
+| "I want persistence on one box with zero extra install" | `local` | yes (SQLite) | no |
+| "Just confirm everything wires up" (CLI default) | `localhost` | no (memory volume) | yes |
+| "Always-on peer that spokes dial in to" | `hub` | yes (RocksDB) | yes |
+| "Peer that dials a hub" | `spoke` | yes (RocksDB) | yes |
+
+Switching modes is just re-running `kioku-mesh init --mode <new> --force`.
+Note that `local` (SQLite) and `hub`/`spoke` (RocksDB via zenohd) use
+**separate stores** — saves made under one don't automatically appear under
+the other.
 
 > **Try mesh without zenohd (demo path).** `kioku-mesh mesh start` / `mesh join` open
 > an in-process Zenoh router (no `zenohd` binary required) so you can see multi-host
@@ -183,12 +200,16 @@ path — re-check your install.
 ### Step 2 — Configure and start zenohd
 
 ```bash
-kioku-mesh init          # writes ~/.config/mesh-mem/zenohd.json5 (loopback, single host)
+kioku-mesh init          # writes ~/.config/mesh-mem/zenohd.json5 (--mode localhost: loopback, single host)
 zenohd -c ~/.config/mesh-mem/zenohd.json5   # leave running in another terminal
 ```
 
-The default `init` writes a single-host config: loopback listen, in-memory volume (no
-RocksDB dependency, no persistence across restarts), multicast scouting disabled.
+The CLI default (`--mode localhost`) writes a single-host config: loopback listen,
+in-memory volume (no RocksDB dependency, **no persistence across zenohd restarts**),
+multicast scouting disabled. Use it to confirm everything wires up, then re-run with
+`--mode hub` or `--mode spoke --force` for the multi-host setup below. (For
+single-host persistence with no zenohd, use `--mode local` instead — see
+[Picking a `--mode`](#picking-a---mode).)
 
 To pin identity across runs:
 

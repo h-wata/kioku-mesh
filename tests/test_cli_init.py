@@ -194,6 +194,58 @@ def test_init_localhost_rejects_connect(tmp_path: Path) -> None:
     assert not (tmp_path / 'should_not_exist.json5').exists()
 
 
+def test_init_localhost_prints_scale_up_hints(xdg_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = cli_main(['init'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'scale up:' in out
+    assert '--mode local --force' in out
+    assert '--mode hub --force' in out
+
+
+def test_init_hub_prints_spoke_invocation_with_detected_ip(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target = tmp_path / 'hub.json5'
+    rc = cli_main(
+        [
+            'init',
+            '--mode',
+            'hub',
+            '--listen',
+            '127.0.0.1',
+            '--listen',
+            '192.168.7.42',
+            '--out',
+            str(target),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'on each spoke:' in out
+    assert '--mode spoke' in out
+    assert '--connect 192.168.7.42:7447' in out
+
+
+def test_init_spoke_prints_hub_side_reminder(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    target = tmp_path / 'spoke.json5'
+    rc = cli_main(
+        [
+            'init',
+            '--mode',
+            'spoke',
+            '--listen',
+            '127.0.0.1',
+            '--connect',
+            '192.168.1.1',
+            '--out',
+            str(target),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'on the hub:' in out
+    assert '--listen' in out
+
+
 def test_init_non_interactive_hub_requires_listen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Force non-TTY so the interactive picker is skipped.
     monkeypatch.setattr('sys.stdin', io.StringIO(''))

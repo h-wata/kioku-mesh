@@ -169,6 +169,19 @@ def test_cli_init_local_writes_config(tmp_path: Path, monkeypatch: pytest.Monkey
     assert 'backend: local' in content
 
 
+def test_cli_init_local_prints_mesh_upgrade_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    from mesh_mem.__main__ import main as cli_main
+
+    rc = cli_main(['init', '--mode', 'local'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'scale up:' in out
+    assert '--mode hub --force' in out
+
+
 def test_cli_init_local_to_stdout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
