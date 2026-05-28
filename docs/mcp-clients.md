@@ -72,6 +72,29 @@ Follow the same pattern with `codex` / `chatgpt` family and the matching `*-cli`
 
 Agents that expose a launch hook can set `MESH_MEM_SESSION_ID` to a value they control (e.g. the conversation id). When unset, kioku-mesh autogenerates `{YYYYMMDDTHHMMSSZ}-{short-uuid}` once per process and caches it.
 
+## Deferred tool loading — lowering save activation energy
+
+Some MCP clients (e.g. Claude Code's `ToolSearch` deferred-tools mechanism) lazy-load
+tool schemas. A proactive tool like `save_observation` then needs an extra "load the
+schema" step the moment the agent decides to save, which raises the activation energy
+and — in long sessions — nudges the agent to skip saving. kioku-mesh **cannot fix this
+server-side**: MCP has no always-load hint, so whether a registered tool stays resident
+is the client's call. See `docs/design/issue-104-mcp-eager-load-deferred-tools.md` for
+the full analysis and the upstream proposals.
+
+What you can do today:
+
+1. **Rely on the named tools (already shipped).** The server `instructions` and each
+   tool docstring name `save_observation` explicitly, so even when the schema is
+   deferred the agent fetches one known name instead of searching blindly.
+2. **Prime project memory (most effective).** Add a one-line rule to your project
+   `./CLAUDE.md` (or `~/.claude/CLAUDE.md`) that names the tool, e.g. *"After a
+   decision, bug fix, discovery, or convention, call `mesh_mem`'s `save_observation`
+   proactively."* Keeping the tool name in the prompt makes the first deferred fetch
+   reliably fire.
+3. **Pin the tool (clients that support it).** If your client can mark specific MCP
+   tools as always-loaded / pinned, pin the kioku-mesh save tools.
+
 ## Claude Code SessionStart hook
 
 Claude Code supports `SessionStart` hooks from `~/.claude/settings.json`. A

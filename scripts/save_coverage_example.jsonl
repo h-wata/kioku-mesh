@@ -1,0 +1,7 @@
+{"ts": "2026-05-28T09:00:00Z", "type": "opportunity", "kind": "decision", "label": "chose greedy 1:1 matching for coverage"}
+{"ts": "2026-05-28T09:01:30Z", "type": "save", "memory_type": "decision", "observation_id": "obs-decision"}
+{"ts": "2026-05-28T10:00:00Z", "type": "opportunity", "kind": "bug", "label": "fixed null-deref in the trace parser"}
+{"ts": "2026-05-28T10:04:00Z", "type": "save", "memory_type": "bug", "observation_id": "obs-bug"}
+{"ts": "2026-05-28T11:00:00Z", "type": "opportunity", "kind": "pattern", "label": "established the session-start reminder convention"}
+{"ts": "2026-05-28T18:30:00Z", "type": "opportunity", "kind": "config", "label": "tuned window-seconds default to 1800"}
+{"ts": "2026-05-28T18:33:00Z", "type": "save", "memory_type": "config", "observation_id": "obs-config"}

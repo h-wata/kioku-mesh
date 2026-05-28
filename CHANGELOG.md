@@ -10,6 +10,27 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Proactive-save opportunity-coverage prototype** (#105): `scripts/save_coverage.py`
+  turns a flat JSONL trace of `opportunity` / `save` events into a single objective
+  number — `coverage = (opportunities followed by a save) / (opportunities)` — using
+  greedy one-to-one matching inside a configurable time window (`--window-seconds`,
+  default 1800s). Reports missed opportunities and orphan saves; `--require-type-match`
+  gates on `kind`/`memory_type` agreement and `--min-coverage` exits non-zero for CI
+  gating. This replaces PR #103's purely qualitative (dogfooding) acceptance with a
+  measurable signal. The tool lives outside the `mesh_mem` package (server changes are
+  out of scope) with an example trace and unit tests. Design: `docs/design/issue-105-proactive-save-opportunity-coverage.md`.
+
+### Documentation
+
+- **Design: MCP client deferred-tool activation energy** (#104): documents why kioku-mesh
+  cannot fix deferred/lazy loading of `save_observation` server-side (MCP has no
+  always-load hint), drafts two upstream proposals (a `ToolAnnotations` `eagerHint` and a
+  client-side per-tool pin), and adds a "Deferred tool loading" workaround section to
+  `docs/mcp-clients.md` / `docs/mcp-clients.ja.md` (rely on the named tools, prime project
+  memory, pin where supported). Design: `docs/design/issue-104-mcp-eager-load-deferred-tools.md`.
+
 ### Changed
 
 - **"Tier 1" removed as a first-class architecture tier; rebranded as the demo path for `mesh start` / `mesh join`.** The README architecture table is now `Local` (SQLite, default) vs `Mesh` (zenohd + RocksDB, persistent multi-host); the in-process zenoh router (`mesh start` / `mesh join`) is documented as a "try mesh without zenohd" demo path, with the ephemeral cross-host replication caveat called out explicitly. Rationale: the Tier 0 → 1 → 2 progression broke monotonicity (Tier 1 loses cross-host persistence relative to Tier 0's local persistence), and Tier 1's only real use case is "evaluate mesh before installing zenohd" — first-class tier status overstated its value and increased onboarding cognitive load. CLI help for `mesh` / `mesh start` / `mesh join` updated accordingly. No code or runtime behavior change. See ADR-0013 for the full rationale.
