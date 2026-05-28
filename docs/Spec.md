@@ -114,10 +114,12 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 状態ディレクトリ:
 
-- `MESH_MEM_STATE_DIR` が非空ならそれを使用。
+- `MESH_MEM_STATE_DIR` が非空ならそれを使用。空文字列は「未設定」扱いで OS 既定へ fallthrough する（cwd 相対が必要なときは `.` を指定）。
 - Linux は `~/.local/share/mesh-mem` 固定。`XDG_DATA_HOME` は互換性維持のため無視。
-- macOS は `~/Library/Application Support/kioku-mesh` 相当を `platformdirs` で解決。
-- Windows は `%LOCALAPPDATA%\kioku-mesh` 相当を `platformdirs` で解決。
+- macOS は `~/Library/Application Support/mesh-mem` 相当を `platformdirs` で解決。
+- Windows は `%LOCALAPPDATA%\mesh-mem` 相当を `platformdirs` で解決。
+
+いずれのプラットフォームでもディレクトリ名は `mesh-mem` です（パッケージ rename 前からの後方互換のため `kioku-mesh` ではなく `mesh-mem` を維持）。
 
 ## 5. 保存・検索・取得
 

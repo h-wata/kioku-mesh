@@ -135,8 +135,8 @@ w32tm /stripchart /computer:192.168.1.10 /samples:5 /dataonly
 
 v0.2.1 以降、kioku-mesh は OS ごとに state ディレクトリを解決します：
 
-- **Windows**: `%LOCALAPPDATA%\kioku-mesh`（例: `C:\Users\<user>\AppData\Local\kioku-mesh`）— `platformdirs` 経由
-- **macOS**: `~/Library/Application Support/kioku-mesh` — `platformdirs` 経由
+- **Windows**: `%LOCALAPPDATA%\mesh-mem`（例: `C:\Users\<user>\AppData\Local\mesh-mem`）— `platformdirs` 経由
+- **macOS**: `~/Library/Application Support/mesh-mem` — `platformdirs` 経由
 - **Linux**: `~/.local/share/mesh-mem`（固定、v0.2.0 から不変。
   `XDG_DATA_HOME` は **意図的に honor しない**。v0.2.1 以前のパスを保ち、
   XDG を設定済みのユーザを silent migration しないため）

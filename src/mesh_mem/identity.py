@@ -105,8 +105,8 @@ def state_dir() -> pathlib.Path:
            - Linux:   ``~/.local/share/mesh-mem`` (fixed; ``XDG_DATA_HOME``
              is intentionally NOT honored to preserve pre-v0.2.1 behavior
              and avoid a silent migration for users who set it)
-           - macOS:   ``~/Library/Application Support/kioku-mesh``
-           - Windows: ``%LOCALAPPDATA%\kioku-mesh``
+           - macOS:   ``~/Library/Application Support/mesh-mem``
+           - Windows: ``%LOCALAPPDATA%\mesh-mem``
 
     On macOS / Windows the default is resolved through ``platformdirs``;
     those platforms had no pre-v0.2.1 hardcoded path to preserve.

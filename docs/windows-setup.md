@@ -138,8 +138,8 @@ reliable NTP server with `w32tm /config /update /manualpeerlist:"time.cloudflare
 
 From v0.2.1 onward, kioku-mesh resolves its state directory per OS:
 
-- **Windows**: `%LOCALAPPDATA%\kioku-mesh` (e.g. `C:\Users\<user>\AppData\Local\kioku-mesh`) — via `platformdirs`
-- **macOS**: `~/Library/Application Support/kioku-mesh` — via `platformdirs`
+- **Windows**: `%LOCALAPPDATA%\mesh-mem` (e.g. `C:\Users\<user>\AppData\Local\mesh-mem`) — via `platformdirs`
+- **macOS**: `~/Library/Application Support/mesh-mem` — via `platformdirs`
 - **Linux**: `~/.local/share/mesh-mem` (fixed, unchanged from v0.2.0;
   `XDG_DATA_HOME` is intentionally NOT honored to preserve the
   pre-v0.2.1 path and avoid silently migrating users who had set it)
