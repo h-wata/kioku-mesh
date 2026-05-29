@@ -168,9 +168,24 @@ zenohd -c ~/.config/kioku-mesh/zenohd.json5
 ```
 
 Keep port `7447/tcp` reachable only between trusted peers. Do not expose it to
-the internet or an untrusted LAN. kioku-mesh relies on network admission
-(Tailscale, WireGuard, firewall rules, or a trusted LAN), not transport-level
-authentication.
+the internet or an untrusted LAN. By default kioku-mesh relies on network
+admission (Tailscale, WireGuard, firewall rules, or a trusted LAN) rather than
+transport-level authentication.
+
+When network admission alone is not enough, enable **mutual TLS**: every peer
+presents a certificate signed by your own private CA, and zenohd refuses any
+unverified link. Each peer's private key is generated locally and never leaves
+the host — only CSRs and signed certs (all non-secret) are exchanged.
+
+```bash
+kioku-mesh tls init-ca                       # once, on the CA host
+kioku-mesh tls request --san <this-host-ip>  # on each peer -> sign on the CA host
+kioku-mesh tls install --cert peer.crt --ca ca.crt
+kioku-mesh init --mode <hub|spoke> --tls --listen ... --force
+```
+
+See [docs/mtls.md](docs/mtls.md) for the full walkthrough, the trust model, and
+certificate rotation.
 
 For a full walkthrough with firewall notes, five-peer examples, add/remove
 procedures, and smoke tests, see
