@@ -1,5 +1,41 @@
 # Migration
 
+## オンディスクパスの `mesh-mem` → `kioku-mesh` 改名 (v0.4.0 予定, #128)
+
+v0.3.0 では binary 名のみ改名し、オンディスクのデータパスは `mesh-mem` のまま据え置いていました (下記参照)。v0.4.0 でこれらも `kioku-mesh` に揃えます。
+
+| パス | 旧 | 新 |
+|---|---|---|
+| Config dir | `~/.config/mesh-mem/` | `~/.config/kioku-mesh/` |
+| State dir | `~/.local/share/mesh-mem/` | `~/.local/share/kioku-mesh/` |
+| systemd unit (生成物) | `mesh-mem-zenohd.service` | `kioku-mesh-zenohd.service` |
+
+**環境変数 prefix (`MESH_MEM_*`) と Python import (`mesh_mem`) は据え置き** です。
+
+**前提：先に新バージョン (#128 を含むビルド) を install すること。** フォールバックの読み替えは新コードにしか入っていません。旧バージョンのまま `kioku-mesh` パスへ mv すると、旧コードは `mesh-mem` しか見ないため動かなくなります。新コードさえ入っていれば旧 `mesh-mem` のまま動き続ける（警告のみ）ので、慌てず後から mv できます。
+
+```bash
+# 新バージョンを install（例: ブランチ / リリース後の PyPI / main）
+uv tool install --reinstall --from 'git+https://github.com/h-wata/kioku-mesh@main' kioku-mesh
+kioku-mesh --version
+```
+
+**自動移行はしません。** 新パスが無く旧パスだけがある場合、kioku-mesh は旧パスをそのまま読みつつ警告を出します。データは保持されるので、好きなタイミングで手動移行してください。
+
+```bash
+# zenohd と MCP サーバを止めてから（開いた SQLite/RocksDB を動かしたまま mv しない）
+systemctl --user stop kioku-mesh-zenohd 2>/dev/null || true   # 旧 unit 名なら mesh-mem-zenohd
+pkill -f kioku-mesh-mcp; pkill -f mesh-mem-mcp
+
+# config / state を移行
+mv ~/.config/mesh-mem      ~/.config/kioku-mesh
+mv ~/.local/share/mesh-mem ~/.local/share/kioku-mesh
+mv ~/.local/state/mesh-mem ~/.local/state/kioku-mesh 2>/dev/null || true
+
+# systemd unit を使っている場合は ExecStart / ROCKSDB_ROOT のパスも書き換え、daemon-reload
+# その後 zenohd / MCP を再起動し、`kioku-mesh doctor` で確認
+```
+
 ## `mesh-mem` → `kioku-mesh` (v0.3.0)
 
 v0.3.0 で PyPI 配布名と CLI バイナリ名が `mesh-mem` から `kioku-mesh` に変更されました。

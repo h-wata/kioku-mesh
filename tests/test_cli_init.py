@@ -1,4 +1,4 @@
-"""Tests for ``mesh-mem init``.
+"""Tests for ``kioku-mesh init``.
 
 The init subcommand never opens a Zenoh session, so these tests run without
 ``zenohd``: they invoke ``cli_main`` directly and assert on file contents,
@@ -29,17 +29,22 @@ from mesh_mem.__main__ import main as cli_main
 def xdg_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect XDG_CONFIG_HOME so init writes into the test sandbox."""
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    return tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5'
+    return tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5'
 
 
 def test_default_init_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'custom'))
-    assert _default_init_path() == tmp_path / 'custom' / 'mesh-mem' / 'zenohd.json5'
+    assert _default_init_path() == tmp_path / 'custom' / 'kioku-mesh' / 'zenohd.json5'
 
 
-def test_default_init_path_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_default_init_path_falls_back_to_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv('XDG_CONFIG_HOME', raising=False)
-    assert _default_init_path() == Path.home() / '.config' / 'mesh-mem' / 'zenohd.json5'
+    # Sandbox HOME so the legacy-path fallback (#128) does not pick up a real
+    # ~/.config/mesh-mem on the dev machine running the suite.
+    fake_home = tmp_path / 'home'
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
+    assert _default_init_path() == fake_home / '.config' / 'kioku-mesh' / 'zenohd.json5'
 
 
 @pytest.mark.parametrize(
@@ -223,6 +228,37 @@ def test_init_hub_prints_spoke_invocation_with_detected_ip(tmp_path: Path, capsy
     assert 'on each spoke:' in out
     assert '--mode spoke' in out
     assert '--connect 192.168.7.42:7447' in out
+
+
+def test_init_hub_export_hint_follows_legacy_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # On a host where only the legacy ~/.local/share/mesh-mem exists, the
+    # ROCKSDB_ROOT hint must point there too, not at an empty kioku-mesh dir,
+    # so zenohd does not orphan the existing RocksDB store (#128).
+    fake_home = tmp_path / 'home'
+    (fake_home / '.local' / 'share' / 'mesh-mem').mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
+    import mesh_mem.paths as paths_mod
+
+    paths_mod._warned.clear()
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(tmp_path / 'hub.json5')])
+    assert rc == 0
+    assert 'ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"' in capsys.readouterr().out
+
+
+def test_init_hub_export_hint_uses_new_path_when_fresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_home = tmp_path / 'home'
+    (fake_home / '.local' / 'share').mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
+    import mesh_mem.paths as paths_mod
+
+    paths_mod._warned.clear()
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(tmp_path / 'hub.json5')])
+    assert rc == 0
+    assert 'ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/kioku-mesh"' in capsys.readouterr().out
 
 
 def test_init_spoke_prints_hub_side_reminder(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -467,23 +503,33 @@ def force_systemd_supported(monkeypatch: pytest.MonkeyPatch) -> None:
 def systemd_unit_under(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect both XDG_CONFIG_HOME branches into the test sandbox."""
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    return tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service'
+    return tmp_path / 'xdg' / 'systemd' / 'user' / 'kioku-mesh-zenohd.service'
 
 
 def test_default_systemd_unit_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'custom'))
-    assert _default_systemd_user_unit_path() == tmp_path / 'custom' / 'systemd' / 'user' / 'mesh-mem-zenohd.service'
+    assert _default_systemd_user_unit_path() == tmp_path / 'custom' / 'systemd' / 'user' / 'kioku-mesh-zenohd.service'
 
 
 def test_render_systemd_unit_bakes_absolute_paths() -> None:
-    body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd')
+    body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd', '%h/.local/share/kioku-mesh')
     assert '[Unit]' in body
     assert 'Description=kioku-mesh zenohd router' in body
     # Paths are double-quoted so systemd's unquoted-whitespace splitter doesn't
     # break ExecStart when the path contains spaces (Codex review on #95).
     assert 'ExecStart="/opt/zenoh/bin/zenohd" -c "/x/y/zenohd.json5"' in body
-    assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem' in body
+    assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/kioku-mesh' in body
+    assert 'ExecStartPre=/usr/bin/install -d %h/.local/share/kioku-mesh' in body
     assert 'WantedBy=default.target' in body
+
+
+def test_render_systemd_unit_uses_given_rocksdb_root() -> None:
+    # The legacy fallback resolves to mesh-mem on a partially-migrated host;
+    # the unit must follow so an existing RocksDB store is not orphaned (#128).
+    body = _render_systemd_unit(Path('/x/zenohd.json5'), '/usr/bin/zenohd', '%h/.local/share/mesh-mem')
+    assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem' in body
+    assert 'ExecStartPre=/usr/bin/install -d %h/.local/share/mesh-mem' in body
+    assert 'kioku-mesh' not in body.split('ROCKSDB_ROOT=', 1)[1].splitlines()[0]
 
 
 def test_render_systemd_unit_quotes_paths_with_whitespace() -> None:
@@ -491,12 +537,13 @@ def test_render_systemd_unit_quotes_paths_with_whitespace() -> None:
     body = _render_systemd_unit(
         Path('/home/u/My Configs/zenohd.json5'),
         '/opt/zen oh/bin/zenohd',
+        '%h/.local/share/kioku-mesh',
     )
     assert 'ExecStart="/opt/zen oh/bin/zenohd" -c "/home/u/My Configs/zenohd.json5"' in body
 
 
 def test_render_systemd_unit_escapes_backslashes_and_quotes() -> None:
-    body = _render_systemd_unit(Path('/p/has"quote/zenohd.json5'), '/p/has\\back/zenohd')
+    body = _render_systemd_unit(Path('/p/has"quote/zenohd.json5'), '/p/has\\back/zenohd', '%h/.local/share/kioku-mesh')
     # Backslashes and double-quotes inside the value are backslash-escaped
     # per systemd's POSIX-shell-like quoting rules.
     assert 'ExecStart="/p/has\\\\back/zenohd" -c "/p/has\\"quote/zenohd.json5"' in body
@@ -515,7 +562,7 @@ def test_init_install_systemd_writes_unit(
     body = systemd_unit_under.read_text()
     assert f'ExecStart="/usr/bin/zenohd" -c "{xdg_config}"' in body
     out = capsys.readouterr().out
-    assert 'systemctl --user enable --now mesh-mem-zenohd' in out
+    assert 'systemctl --user enable --now kioku-mesh-zenohd' in out
 
 
 def test_init_install_systemd_refuses_overwrite_without_force(
@@ -555,8 +602,8 @@ def test_init_install_systemd_print_emits_both_bodies(
     assert '[Unit]' in out
     assert 'ExecStart="/usr/bin/zenohd" -c' in out
     # No file should have been written under --print.
-    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
-    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
+    assert not (tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'kioku-mesh-zenohd.service').exists()
 
 
 def test_init_install_systemd_falls_back_when_zenohd_missing(
@@ -590,8 +637,8 @@ def test_init_install_systemd_rejects_macos(monkeypatch: pytest.MonkeyPatch, tmp
     rc = cli_main(['init', '--install-systemd'])
     assert rc == 2
     # Neither file should be written when the platform check trips.
-    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
-    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
+    assert not (tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'kioku-mesh-zenohd.service').exists()
 
 
 def test_init_install_systemd_rejects_missing_systemctl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -600,7 +647,7 @@ def test_init_install_systemd_rejects_missing_systemctl(monkeypatch: pytest.Monk
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     rc = cli_main(['init', '--install-systemd'])
     assert rc == 2
-    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5').exists()
 
 
 def test_init_install_systemd_rejects_unreachable_user_manager(
@@ -619,8 +666,8 @@ def test_init_install_systemd_rejects_unreachable_user_manager(
     err = capsys.readouterr().err
     assert 'systemctl --user show-environment failed' in err
     # Neither file should be written when the probe trips — Codex review on #95.
-    assert not (tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5').exists()
-    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'mesh-mem-zenohd.service').exists()
+    assert not (tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5').exists()
+    assert not (tmp_path / 'xdg' / 'systemd' / 'user' / 'kioku-mesh-zenohd.service').exists()
 
 
 def test_init_install_systemd_rejects_probe_timeout(
