@@ -10,6 +10,17 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-05-29
+
+### Fixed
+
+- **Fresh spoke no longer reports `count: 0` after joining a populated mesh (#133, PR #134).** `get_index()` now rebuilds the local SQLite index once when it is empty, even under the one-shot CLI's default skip (#38). A newly provisioned spoke that has already replicated rows into zenoh-rocksdb previously showed `count: 0` from `status` / `search` until `kioku-mesh --rebuild status` was run by hand, because the index is only backfilled by an explicit rebuild and the replication subscriber ingests only *new* writes. Explicit opt-outs (`set_rebuild_on_init_explicit(False)` / `MESH_MEM_SKIP_REBUILD=1`) are honored, and the populated-index fast path is unchanged.
+- **`kioku-mesh init --install-systemd` against an existing config no longer demands `--force` or rewrites the config (#133, PR #134).** Installing the systemd unit on top of an already-provisioned `zenohd.json5` is now a pure add-on: the existing config is reused unchanged and only the unit is generated. `--force` still overwrites the config when explicitly requested.
+
+### Added
+
+- **`kioku-mesh init --mode spoke` now prints the post-start backfill step (#133, PR #134).** The completion output points at the one-time `kioku-mesh --rebuild status` so the empty-index `count: 0` state during onboarding is self-explanatory rather than looking like a failure.
+
 ## [0.3.1] - 2026-05-29
 
 ### Changed

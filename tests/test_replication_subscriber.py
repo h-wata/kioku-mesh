@@ -323,11 +323,44 @@ def test_set_rebuild_on_init_default_false_skips_rebuild(
     monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
     monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
 
+    # Seed a row directly (bypassing get_index's rebuild path) so the index is
+    # NON-empty: the empty-index auto-rebuild override only backfills a fresh
+    # spoke, so the default-skip path (#38) is asserted on a populated index.
+    seed = LocalIndex.connect()
+    seed.upsert(_mk_obs('seed', project='skip-default'))
+    seed.close()
+
     store._reset_index()
     store.set_rebuild_on_init_default(False)
     store.get_index()
 
-    assert not rebuild_calls, 'rebuild must be skipped when default policy is False'
+    assert not rebuild_calls, 'rebuild must be skipped when default policy is False on a populated index'
+
+
+def test_empty_index_rebuilds_despite_default_false(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """Empty index backfills via rebuild even when the default policy is False (spoke-onboarding self-heal)."""
+    from mesh_mem.local_index import LocalIndex
+    from mesh_mem.local_index import RebuildStats
+
+    rebuild_calls: list[bool] = []
+    orig = LocalIndex.rebuild_from_zenoh
+
+    def tracking_rebuild(self: LocalIndex, session: object) -> RebuildStats:
+        rebuild_calls.append(True)
+        return orig(self, session)
+
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
+    monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
+    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+
+    store._reset_index()
+    store.set_rebuild_on_init_default(False)
+    store.get_index()  # empty index -> override forces a one-time rebuild
+
+    assert rebuild_calls, 'empty index must rebuild even when the default policy is False'
 
 
 def test_force_rebuild_env_overrides_module_default(
@@ -419,9 +452,16 @@ def test_cli_main_sets_rebuild_default_false(
     monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
     monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
 
+    # Seed a row so the index is non-empty: the CLI default-skip (#38) applies
+    # to a populated index. (An empty index would intentionally rebuild once to
+    # backfill a fresh spoke — covered by test_empty_index_rebuilds_despite_default_false.)
+    seed = LocalIndex.connect()
+    seed.upsert(_mk_obs('seed', project='rebuild-policy'))
+    seed.close()
+
     rc = cli_main(['save', 'cli-rebuild-skip-test', '-p', 'rebuild-policy'])
     assert rc == 0
-    assert not rebuild_calls, 'CLI default must skip rebuild_from_zenoh on first init'
+    assert not rebuild_calls, 'CLI default must skip rebuild_from_zenoh on a populated index'
 
 
 def test_cli_main_with_rebuild_flag_runs_rebuild(

@@ -1165,16 +1165,24 @@ def _cmd_init(args: argparse.Namespace) -> int:
             sys.stdout.write(unit_body)
         return 0
 
-    if config_path.exists() and not args.force:
+    # Installing the systemd unit against a config that already exists is a
+    # pure add-on: keep the user's existing config untouched (don't demand
+    # --force, don't rewrite it) and only generate the unit. --force still
+    # overwrites the config when the user explicitly asks.
+    reuse_existing_config = config_path.exists() and not args.force and args.install_systemd
+    if config_path.exists() and not args.force and not reuse_existing_config:
         print(f'error: {config_path} already exists. Use --force to overwrite.', file=sys.stderr)
         return 1
     if unit_path is not None and unit_path.exists() and not args.force:
         print(f'error: {unit_path} already exists. Use --force to overwrite.', file=sys.stderr)
         return 1
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(body, encoding='utf-8')
-    print(f'wrote {config_path}')
+    if reuse_existing_config:
+        print(f'using existing config {config_path} (unchanged)')
+    else:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(body, encoding='utf-8')
+        print(f'wrote {config_path}')
     if unit_body is not None and unit_path is not None:
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         unit_path.write_text(unit_body, encoding='utf-8')
@@ -1202,6 +1210,11 @@ def _print_mode_followup(mode: str, listen_endpoints: list[str]) -> None:
             f'--listen <spoke-lan-ip> --connect {hint_ip}:7447'
         )
     elif mode == 'spoke':
+        print('then (once zenohd is running and synced with the hub): kioku-mesh --rebuild status')
+        print(
+            '  populates the local search index from memories already on the hub; '
+            'until you run it once, status/search show 0 even though replication succeeded.'
+        )
         print("on the hub: confirm --listen includes this spoke's reachable IP, then restart zenohd.")
 
 
