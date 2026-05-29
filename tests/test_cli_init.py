@@ -280,6 +280,8 @@ def test_init_spoke_prints_hub_side_reminder(tmp_path: Path, capsys: pytest.Capt
     out = capsys.readouterr().out
     assert 'on the hub:' in out
     assert '--listen' in out
+    # Fresh spoke must be told to backfill the local index, else status/search show 0 (#38).
+    assert '--rebuild status' in out
 
 
 def test_init_non_interactive_hub_requires_listen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -586,6 +588,29 @@ def test_init_install_systemd_force_overwrites(
     assert 'tcp/127.0.0.1:7448' in xdg_config.read_text()
     # Unit body should reference the (unchanged) config path; --force makes the rewrite legal.
     assert systemd_unit_under.is_file()
+
+
+def test_init_install_systemd_reuses_existing_config_without_force(
+    force_systemd_supported: None,
+    systemd_unit_under: Path,
+    xdg_config: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--install-systemd against an existing config reuses it (no --force, no rewrite) and only adds the unit."""
+    # A config the user already provisioned (custom port proves no rewrite).
+    assert cli_main(['init', '--mode', 'localhost', '--listen', '127.0.0.1:7459']) == 0
+    before = xdg_config.read_text()
+    assert '7459' in before
+    capsys.readouterr()
+
+    rc = cli_main(['init', '--install-systemd'])
+    assert rc == 0
+    # Config left byte-for-byte unchanged (not regenerated to the default port).
+    assert xdg_config.read_text() == before
+    assert systemd_unit_under.is_file()
+    out = capsys.readouterr().out
+    assert 'using existing config' in out
+    assert 'systemctl --user enable --now kioku-mesh-zenohd' in out
 
 
 def test_init_install_systemd_print_emits_both_bodies(
