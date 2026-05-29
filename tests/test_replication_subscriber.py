@@ -92,9 +92,9 @@ def test_subscriber_mirrors_remote_obs_delete_into_index(single_zenohd: Any) -> 
     finally:
         remote.close()
 
-    assert idx.search(project='sub-obs-delete') == [], (
-        'subscriber must physical-delete the index row when a remote peer deletes the obs key'
-    )
+    assert (
+        idx.search(project='sub-obs-delete') == []
+    ), 'subscriber must physical-delete the index row when a remote peer deletes the obs key'
 
 
 def test_subscriber_mirrors_remote_tomb_delete_into_index(single_zenohd: Any) -> None:
@@ -115,9 +115,9 @@ def test_subscriber_mirrors_remote_tomb_delete_into_index(single_zenohd: Any) ->
     finally:
         remote.close()
 
-    assert idx.search(project='sub-tomb-delete', include_deleted=True) == [], (
-        'subscriber must physical-delete the index row when a remote peer deletes the tomb key'
-    )
+    assert (
+        idx.search(project='sub-tomb-delete', include_deleted=True) == []
+    ), 'subscriber must physical-delete the index row when a remote peer deletes the tomb key'
 
 
 def test_subscriber_ignores_delete_with_invalid_obs_id(
@@ -152,9 +152,9 @@ def test_subscriber_ignores_delete_with_invalid_obs_id(
     finally:
         remote.close()
 
-    assert physical_delete_calls == [], (
-        f'malformed DELETE keys must not trigger physical_delete; got {physical_delete_calls}'
-    )
+    assert (
+        physical_delete_calls == []
+    ), f'malformed DELETE keys must not trigger physical_delete; got {physical_delete_calls}'
     # Real row untouched.
     assert obs.observation_id in {r.observation_id for r in idx.search(project='sub-bad-key')}
 
@@ -217,9 +217,9 @@ def test_subscriber_demotes_non_json_payload_to_debug(
     finally:
         remote.close()
 
-    assert any('non-JSON payload' in m for m in debug_msgs), (
-        'expected DEBUG log for non-JSON payload (one of on_obs/on_tomb)'
-    )
+    assert any(
+        'non-JSON payload' in m for m in debug_msgs
+    ), 'expected DEBUG log for non-JSON payload (one of on_obs/on_tomb)'
     assert not warning_msgs, f'non-JSON payloads must NOT log WARNING; got {warning_msgs}'
 
 
