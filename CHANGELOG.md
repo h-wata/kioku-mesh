@@ -10,12 +10,23 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-29
+
 ### Changed
 
 - **On-disk paths renamed `mesh-mem` → `kioku-mesh` (#128).** `kioku-mesh init` now writes `~/.config/kioku-mesh/`, the state dir defaults to `~/.local/share/kioku-mesh/`, and `init --install-systemd` generates `kioku-mesh-zenohd.service`. **No automatic data migration:** when only a legacy `mesh-mem` directory exists, kioku-mesh reads it as before and prints a one-time warning nudging a manual `mv` (see `docs/migration.md`). The env-var prefix (`MESH_MEM_*`) and Python import name (`mesh_mem`) are intentionally left unchanged. This completes the brand consistency the v0.3.0 rename deferred.
 - **"Tier 1" removed as a first-class architecture tier; rebranded as the demo path for `mesh start` / `mesh join`.** The README architecture table is now `Local` (SQLite, default) vs `Mesh` (zenohd + RocksDB, persistent multi-host); the in-process zenoh router (`mesh start` / `mesh join`) is documented as a "try mesh without zenohd" demo path, with the ephemeral cross-host replication caveat called out explicitly. Rationale: the Tier 0 → 1 → 2 progression broke monotonicity (Tier 1 loses cross-host persistence relative to Tier 0's local persistence), and Tier 1's only real use case is "evaluate mesh before installing zenohd" — first-class tier status overstated its value and increased onboarding cognitive load. CLI help for `mesh` / `mesh start` / `mesh join` updated accordingly. No code or runtime behavior change. See ADR-0013 for the full rationale.
 
+### Added
 
+- **`kioku-mesh init` now guides the path from single-host to multi-host mesh** (#96, PR #127): mode-specific follow-up hints after `init` (localhost → both scale-up paths; hub → a ready-to-run `--mode spoke` command pre-filled with the detected LAN IP; spoke → a hub-side `--listen` reminder), plus a full per-mode `--mode` description block (`RawDescriptionHelpFormatter`) and a "Picking a `--mode`" table in the README.
+
+### Documentation
+
+- README restructured (#125, #126): hero + table of contents + Roadmap section, a single end-to-end Quickstart, Operations folded under Power users, Contributing split out. Install guidance now leads with PyPI (#123).
+- Added a migration guide for the on-disk path rename, including how to identify an environment-specific `zenohd` systemd unit before stopping it (#128, #131).
+
+## [0.3.0] - 2026-05-25
 
 ### Renamed
 
