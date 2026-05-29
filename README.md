@@ -33,10 +33,10 @@ to re-read everything from scratch just to give a quick second opinion?
 kioku-mesh keeps that memory in one shared pool so any agent, on any of your
 machines, can recall it.
 
-Unlike hosted memory services, the shared pool is a peer-to-peer mesh you run
-yourself across your own machines (LAN / VPN / Tailscale) — no SaaS, no central
-account. The same memory is readable by Claude Code, Codex CLI, Gemini CLI, and
-any other MCP client.
+Unlike long-term memory tools that store everything in one place, the shared
+pool is a peer-to-peer mesh you run yourself across your own machines
+(LAN / VPN / Tailscale) — no SaaS, no central account. The same memory is
+readable by Claude Code, Codex CLI, Gemini CLI, and any other MCP client.
 
 ## Quickstart
 
