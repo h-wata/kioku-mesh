@@ -209,6 +209,24 @@ def _should_rebuild_on_init() -> bool:
     return _rebuild_on_init_default
 
 
+def _empty_index_rebuild_allowed() -> bool:
+    """Whether a fresh (zero-row) index may force a one-time rebuild.
+
+    Even when :func:`_should_rebuild_on_init` resolved to ``False``, this
+    backfills a newly provisioned spoke whose zenoh-rocksdb already holds
+    replicated rows but whose SQLite index is still empty, so ``status`` /
+    ``search`` do not report 0 until the next write. It overrides only the
+    *implicit* CLI default-skip (#38); an explicit opt-out
+    (``set_rebuild_on_init_explicit(False)`` or ``MESH_MEM_SKIP_REBUILD=1``)
+    is honored and suppresses the auto-rebuild.
+    """
+    if _rebuild_explicit_override is False:
+        return False
+    if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() == '1':
+        return False
+    return True
+
+
 def get_index() -> LocalIndex:
     """Return the cached LocalIndex sidecar, opening it on first use.
 
@@ -226,6 +244,13 @@ def get_index() -> LocalIndex:
     ``MESH_MEM_FORCE_REBUILD=1`` to opt back in for a CLI run, or pass
     ``--rebuild`` to ``kioku-mesh``. Zenoh errors are logged and swallowed
     so a missing router cannot block reads/writes.
+
+    Exception to the skip policy: an *empty* index always rebuilds, even when
+    the policy says skip. A fresh spoke/install has nothing in SQLite yet while
+    zenoh-rocksdb already holds replicated memories, so ``status``/``search``
+    would otherwise report 0 until the next write. The #38 skip exists only to
+    dodge the scan cost on a *populated* index — an empty one has nothing to
+    lose — and this self-heals once: the next call sees rows and skips.
     """
     global _index, _subscribers
     if _index is None:
@@ -233,7 +258,12 @@ def get_index() -> LocalIndex:
         if not _index.disabled:
             try:
                 session = get_session()
-                if _should_rebuild_on_init():
+                rebuild = _should_rebuild_on_init()
+                if not rebuild and _empty_index_rebuild_allowed():
+                    counts = _index.visibility_counts()
+                    if counts.live + counts.tombstoned + counts.shadowed == 0:
+                        rebuild = True
+                if rebuild:
                     try:
                         stats = _index.rebuild_from_zenoh(session)
                         log.info('LocalIndex rebuild: %s', stats)
