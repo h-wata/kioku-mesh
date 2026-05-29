@@ -1,18 +1,29 @@
-# kioku-mesh
+<p align="center">
+  <img src="docs/assets/kioku-mesh-logo.png" alt="kioku-mesh" width="420">
+</p>
 
-[![PyPI](https://img.shields.io/pypi/v/kioku-mesh.svg)](https://pypi.org/project/kioku-mesh/)
-[![Python](https://img.shields.io/pypi/pyversions/kioku-mesh.svg)](https://pypi.org/project/kioku-mesh/)
-[![License](https://img.shields.io/github/license/h-wata/kioku-mesh.svg)](LICENSE)
+<p align="center">
+  <a href="https://pypi.org/project/kioku-mesh/"><img src="https://img.shields.io/pypi/v/kioku-mesh.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/kioku-mesh/"><img src="https://img.shields.io/pypi/pyversions/kioku-mesh.svg" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/h-wata/kioku-mesh.svg" alt="License"></a>
+</p>
 
-Persistent, mesh-synced memory for your AI coding agent. Start on one machine in
-30 seconds, then share the same memory across machines when you need it.
+<p align="center">
+  <strong>Shared memory for your AI coding agents — across machines, across tools.</strong>
+</p>
+
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="One agent saves a decision; an agent on another host recalls it — live over the mesh" width="760">
+</p>
 
 > **kioku** (記憶) is Japanese for "memory".
 
-kioku-mesh gives your AI coding agents (Claude Code, Codex CLI, Gemini CLI, …) a
-shared long-term memory that survives session resets and syncs across hosts over a
-LAN, VPN, or mesh-VPN. A decision saved on your desktop is instantly searchable on
-your laptop — or by a different agent on the same machine.
+Most agent memory is locked to one process on one box. kioku-mesh is a single
+memory pool that every agent (Claude Code, Codex CLI, Gemini CLI, …) on every host
+reads and writes — synced in real time over a mesh. A decision saved by Claude Code
+on your desktop is instantly recalled by Codex CLI on your laptop, or by a different
+agent on the same machine. Start on one machine in 30 seconds; add hosts when you
+need them.
 
 ## Contents
 
