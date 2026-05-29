@@ -104,8 +104,49 @@ SessionStart hooks, and multi-agent identity recipes, see
 
 ## Multi-Host Mesh
 
+Each host serves its agents from a fast local SQLite read index, backed by a
+Zenoh router + RocksDB store, and hosts replicate to each other over the mesh:
+
+```mermaid
+flowchart LR
+  subgraph HostA["🖥️ Host A"]
+    direction TB
+    A1["Claude Code"]
+    A2["Codex CLI"]
+    AS[("SQLite index<br/>local read path")]
+    AZ["zenohd<br/>Zenoh router + RocksDB<br/>(source of truth)"]
+    A1 & A2 -->|"save / search"| AZ
+    AZ -->|"subscriber · rebuild"| AS
+    A1 & A2 -.->|"fast reads"| AS
+  end
+  subgraph HostB["🖥️ Host B"]
+    direction TB
+    B1["Codex CLI"]
+    B2["Gemini CLI"]
+    BS[("SQLite index<br/>local read path")]
+    BZ["zenohd<br/>Zenoh router + RocksDB<br/>(source of truth)"]
+    B1 & B2 -->|"save / search"| BZ
+    BZ -->|"subscriber · rebuild"| BS
+    B1 & B2 -.->|"fast reads"| BS
+  end
+  AZ <==>|"Zenoh mesh replication<br/>LAN / VPN / Tailscale · TCP 7447"| BZ
+```
+
 The recommended topology is one hub and any number of spokes. The hub listens on
 addresses reachable from the spokes; every spoke dials only the hub.
+
+```mermaid
+flowchart TB
+  HUB["⭐ Hub<br/>always-on peer<br/>listens on LAN / Tailscale / VPN"]
+  S1["Spoke · laptop"]
+  S2["Spoke · desktop"]
+  S3["Spoke · CI / server"]
+  S1 -->|"dials hub (TCP 7447)"| HUB
+  S2 -->|"dials hub"| HUB
+  S3 -->|"dials hub"| HUB
+  S1 -.->|"router transit<br/>(no direct link)"| S3
+  S2 -.->|"router transit"| S3
+```
 
 ```bash
 # hub
