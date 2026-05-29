@@ -230,6 +230,37 @@ def test_init_hub_prints_spoke_invocation_with_detected_ip(tmp_path: Path, capsy
     assert '--connect 192.168.7.42:7447' in out
 
 
+def test_init_hub_export_hint_follows_legacy_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # On a host where only the legacy ~/.local/share/mesh-mem exists, the
+    # ROCKSDB_ROOT hint must point there too, not at an empty kioku-mesh dir,
+    # so zenohd does not orphan the existing RocksDB store (#128).
+    fake_home = tmp_path / 'home'
+    (fake_home / '.local' / 'share' / 'mesh-mem').mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
+    import mesh_mem.paths as paths_mod
+
+    paths_mod._warned.clear()
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(tmp_path / 'hub.json5')])
+    assert rc == 0
+    assert 'ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"' in capsys.readouterr().out
+
+
+def test_init_hub_export_hint_uses_new_path_when_fresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_home = tmp_path / 'home'
+    (fake_home / '.local' / 'share').mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
+    import mesh_mem.paths as paths_mod
+
+    paths_mod._warned.clear()
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(tmp_path / 'hub.json5')])
+    assert rc == 0
+    assert 'ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/kioku-mesh"' in capsys.readouterr().out
+
+
 def test_init_spoke_prints_hub_side_reminder(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     target = tmp_path / 'spoke.json5'
     rc = cli_main(
@@ -481,14 +512,24 @@ def test_default_systemd_unit_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_render_systemd_unit_bakes_absolute_paths() -> None:
-    body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd')
+    body = _render_systemd_unit(Path('/x/y/zenohd.json5'), '/opt/zenoh/bin/zenohd', '%h/.local/share/kioku-mesh')
     assert '[Unit]' in body
     assert 'Description=kioku-mesh zenohd router' in body
     # Paths are double-quoted so systemd's unquoted-whitespace splitter doesn't
     # break ExecStart when the path contains spaces (Codex review on #95).
     assert 'ExecStart="/opt/zenoh/bin/zenohd" -c "/x/y/zenohd.json5"' in body
     assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/kioku-mesh' in body
+    assert 'ExecStartPre=/usr/bin/install -d %h/.local/share/kioku-mesh' in body
     assert 'WantedBy=default.target' in body
+
+
+def test_render_systemd_unit_uses_given_rocksdb_root() -> None:
+    # The legacy fallback resolves to mesh-mem on a partially-migrated host;
+    # the unit must follow so an existing RocksDB store is not orphaned (#128).
+    body = _render_systemd_unit(Path('/x/zenohd.json5'), '/usr/bin/zenohd', '%h/.local/share/mesh-mem')
+    assert 'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem' in body
+    assert 'ExecStartPre=/usr/bin/install -d %h/.local/share/mesh-mem' in body
+    assert 'kioku-mesh' not in body.split('ROCKSDB_ROOT=', 1)[1].splitlines()[0]
 
 
 def test_render_systemd_unit_quotes_paths_with_whitespace() -> None:
@@ -496,12 +537,13 @@ def test_render_systemd_unit_quotes_paths_with_whitespace() -> None:
     body = _render_systemd_unit(
         Path('/home/u/My Configs/zenohd.json5'),
         '/opt/zen oh/bin/zenohd',
+        '%h/.local/share/kioku-mesh',
     )
     assert 'ExecStart="/opt/zen oh/bin/zenohd" -c "/home/u/My Configs/zenohd.json5"' in body
 
 
 def test_render_systemd_unit_escapes_backslashes_and_quotes() -> None:
-    body = _render_systemd_unit(Path('/p/has"quote/zenohd.json5'), '/p/has\\back/zenohd')
+    body = _render_systemd_unit(Path('/p/has"quote/zenohd.json5'), '/p/has\\back/zenohd', '%h/.local/share/kioku-mesh')
     # Backslashes and double-quotes inside the value are backslash-escaped
     # per systemd's POSIX-shell-like quoting rules.
     assert 'ExecStart="/p/has\\\\back/zenohd" -c "/p/has\\"quote/zenohd.json5"' in body

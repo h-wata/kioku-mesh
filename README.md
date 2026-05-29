@@ -268,6 +268,12 @@ peer alignment completes (typically 5–10 s, up to ~3 min for cold-era data). U
    zenohd -c ~/.config/kioku-mesh/zenohd.json5
    ```
 
+   Upgrading from a pre-`kioku-mesh` install whose data lives under
+   `~/.local/share/mesh-mem`? Point `ZENOH_BACKEND_ROCKSDB_ROOT` at that
+   existing directory (or migrate it first — see
+   [docs/migration.md](docs/migration.md)) so zenohd reuses your RocksDB
+   store instead of starting an empty one.
+
    Hub first is convenient but not required; spokes retry their
    `connect` until the hub answers.
 5. **Verify connectivity.**

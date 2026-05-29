@@ -49,6 +49,18 @@ def resolve_app_dir(base: Path) -> Path:
     return new
 
 
+def data_share_leaf() -> str:
+    """Return the ``~/.local/share`` subdir name to use for app data.
+
+    ``kioku-mesh`` normally, or the legacy ``mesh-mem`` when only that exists.
+    Used to keep zenohd's ``ZENOH_BACKEND_ROCKSDB_ROOT`` (baked into the
+    generated systemd unit / printed hints) pointed at the same directory the
+    Python state dir resolves to, so an existing RocksDB store is not orphaned
+    on a partially-migrated host (#128).
+    """
+    return resolve_app_dir(Path.home() / '.local/share').name
+
+
 def _warn_once(key: str, message: str) -> None:
     if key in _warned:
         return
