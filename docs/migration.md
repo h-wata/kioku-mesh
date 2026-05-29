@@ -22,18 +22,35 @@ kioku-mesh --version
 
 **自動移行はしません。** 新パスが無く旧パスだけがある場合、kioku-mesh は旧パスをそのまま読みつつ警告を出します。データは保持されるので、好きなタイミングで手動移行してください。
 
+> **zenohd の停止方法は環境依存です。** `kioku-mesh init --install-systemd` で作った unit は `kioku-mesh-zenohd.service`（旧名 `mesh-mem-zenohd.service`）ですが、手で書いた unit は単に `zenohd.service` の場合もあります。まず実際の起動元を確認してください:
+>
+> ```bash
+> ps -o pid,cmd -C zenohd                 # 動いている zenohd を特定
+> cat /proc/<PID>/cgroup                   # .../<unit名>.service なら systemd 管理
+> systemctl --user list-units '*zenoh*'    # user unit の実名を確認
+> crontab -l | grep -i zenoh               # cron 起動でないことも一応確認
+> ```
+>
+> systemd 管理なら `pkill` ではなく `systemctl --user stop <実際のunit名>` で止めること（`Restart=on-failure` だと pkill では respawn する）。
+
 ```bash
-# zenohd と MCP サーバを止めてから（開いた SQLite/RocksDB を動かしたまま mv しない）
-systemctl --user stop kioku-mesh-zenohd 2>/dev/null || true   # 旧 unit 名なら mesh-mem-zenohd
+# 0. zenohd と MCP サーバを止めてから（開いた SQLite/RocksDB を動かしたまま mv しない）
+systemctl --user stop <実際のunit名>          # 例: zenohd / kioku-mesh-zenohd / mesh-mem-zenohd
 pkill -f kioku-mesh-mcp; pkill -f mesh-mem-mcp
 
-# config / state を移行
+# 1. config / state を移行
 mv ~/.config/mesh-mem      ~/.config/kioku-mesh
 mv ~/.local/share/mesh-mem ~/.local/share/kioku-mesh
 mv ~/.local/state/mesh-mem ~/.local/state/kioku-mesh 2>/dev/null || true
 
-# systemd unit を使っている場合は ExecStart / ROCKSDB_ROOT のパスも書き換え、daemon-reload
-# その後 zenohd / MCP を再起動し、`kioku-mesh doctor` で確認
+# 2. unit 内の mesh-mem パス（ExecStart の config / ROCKSDB_ROOT / ExecStartPre）を書き換え
+#    手書き unit の例:
+sed -i 's|/mesh-mem|/kioku-mesh|g' ~/.config/systemd/user/<実際のunit名>.service
+
+# 3. 反映して再起動 → 確認
+systemctl --user daemon-reload
+systemctl --user start <実際のunit名>
+kioku-mesh doctor
 ```
 
 ## `mesh-mem` → `kioku-mesh` (v0.3.0)
