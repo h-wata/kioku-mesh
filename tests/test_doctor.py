@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`mesh_mem.doctor` and the ``mesh-mem doctor`` CLI wiring.
+"""Unit tests for :mod:`mesh_mem.doctor` and the ``kioku-mesh doctor`` CLI wiring.
 
 Each check function is driven with monkeypatched probes / filesystem so the
 suite stays deterministic on hosts that may or may not have zenohd installed.
@@ -176,9 +176,9 @@ def test_check_config_file_missing(tmp_path: Path) -> None:
 
 
 def test_default_config_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """`mesh-mem init` writes here; doctor must look in the same place."""
+    """`kioku-mesh init` writes here; doctor must look in the same place."""
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    assert _default_config_path() == tmp_path / 'xdg' / 'mesh-mem' / 'zenohd.json5'
+    assert _default_config_path() == tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5'
 
 
 # -- check_state_dir_hardlinks -------------------------------------------------

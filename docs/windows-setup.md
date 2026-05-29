@@ -14,7 +14,7 @@ kioku-mesh development is Linux-first. Windows 10 / 11 hosts *can* join the
 Zenoh mesh as peers natively; the steps below cover the differences from
 the Linux quick start. Identity env vars, CLI commands, and MCP
 registration all work the same — only the **path style** differs:
-wherever the Linux examples reference `~/.venv/mesh-mem/bin/<binary>`,
+wherever the Linux examples reference `~/.venv/kioku-mesh/bin/<binary>`,
 the Windows equivalent is `C:\Users\<user>\.venv\kioku-mesh\Scripts\<binary>.exe`.
 
 ## 1. Install Python and kioku-mesh
@@ -140,7 +140,7 @@ From v0.2.1 onward, kioku-mesh resolves its state directory per OS:
 
 - **Windows**: `%LOCALAPPDATA%\kioku-mesh` (e.g. `C:\Users\<user>\AppData\Local\kioku-mesh`) — via `platformdirs`
 - **macOS**: `~/Library/Application Support/kioku-mesh` — via `platformdirs`
-- **Linux**: `~/.local/share/mesh-mem` (fixed, unchanged from v0.2.0;
+- **Linux**: `~/.local/share/kioku-mesh` (fixed, unchanged from v0.2.0;
   `XDG_DATA_HOME` is intentionally NOT honored to preserve the
   pre-v0.2.1 path and avoid silently migrating users who had set it)
 

@@ -1,4 +1,4 @@
-"""Read and write ~/.config/mesh-mem/config.yaml.
+"""Read and write ~/.config/kioku-mesh/config.yaml.
 
 This config is separate from the zenohd JSON5 config and stores
 kioku-mesh-specific runtime settings such as which backend to use.
@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .paths import resolve_app_dir
+
 try:
     import yaml
 except ImportError:
@@ -17,7 +19,7 @@ except ImportError:
 
 def _config_dir() -> Path:
     base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-    return Path(base) / 'mesh-mem'
+    return resolve_app_dir(Path(base))
 
 
 def _config_path() -> Path:
@@ -51,7 +53,7 @@ def get_backend_mode() -> str:
 
     Priority (highest to lowest):
       1. ``MESH_MEM_BACKEND`` env var
-      2. ``backend:`` field in ``~/.config/mesh-mem/config.yaml``
+      2. ``backend:`` field in ``~/.config/kioku-mesh/config.yaml``
       3. Default: ``'zenoh'``
     """
     env = os.environ.get('MESH_MEM_BACKEND', '').strip()

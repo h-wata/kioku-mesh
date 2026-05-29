@@ -190,7 +190,7 @@ Both `zenohd` and `zenoh-backend-rocksdb` must be version-matched (mixing 1.9 wi
 zenohd --version
 # expected: zenohd v1.9.0 ...
 
-zenohd -c ~/.config/mesh-mem/zenohd.json5
+zenohd -c ~/.config/kioku-mesh/zenohd.json5
 # look for: Successfully loaded backend "rocksdb" ...
 ```
 
@@ -200,8 +200,8 @@ path — re-check your install.
 ### Step 2 — Configure and start zenohd
 
 ```bash
-kioku-mesh init          # writes ~/.config/mesh-mem/zenohd.json5 (--mode localhost: loopback, single host)
-zenohd -c ~/.config/mesh-mem/zenohd.json5   # leave running in another terminal
+kioku-mesh init          # writes ~/.config/kioku-mesh/zenohd.json5 (--mode localhost: loopback, single host)
+zenohd -c ~/.config/kioku-mesh/zenohd.json5   # leave running in another terminal
 ```
 
 The CLI default (`--mode localhost`) writes a single-host config: loopback listen,
@@ -248,7 +248,7 @@ peer alignment completes (typically 5–10 s, up to ~3 min for cold-era data). U
        --connect 192.168.3.10
    ```
 
-   Both modes write to `~/.config/mesh-mem/zenohd.json5` by default and
+   Both modes write to `~/.config/kioku-mesh/zenohd.json5` by default and
    emit a rocksdb + replication block whose digest parameters match
    byte-for-byte across peers. `kioku-mesh init` without `--listen` opens
    an interactive picker that lists detected interface IPs.
@@ -263,9 +263,9 @@ peer alignment completes (typically 5–10 s, up to ~3 min for cold-era data). U
 4. **Start zenohd on each peer.**
 
    ```bash
-   export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"
+   export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/kioku-mesh"
    mkdir -p "$ZENOH_BACKEND_ROCKSDB_ROOT"
-   zenohd -c ~/.config/mesh-mem/zenohd.json5
+   zenohd -c ~/.config/kioku-mesh/zenohd.json5
    ```
 
    Hub first is convenient but not required; spokes retry their
@@ -306,10 +306,10 @@ PYTHONPATH=src python3 scripts/smoke_5peer_mesh.py
 #### systemd unit (zenohd)
 
 Use `kioku-mesh init --install-systemd` (#86): it writes both
-`~/.config/mesh-mem/zenohd.json5` AND
-`~/.config/systemd/user/mesh-mem-zenohd.service` in one step, with the
+`~/.config/kioku-mesh/zenohd.json5` AND
+`~/.config/systemd/user/kioku-mesh-zenohd.service` in one step, with the
 absolute `zenohd` path baked in. Enable with `systemctl --user daemon-reload &&
-systemctl --user enable --now mesh-mem-zenohd`.
+systemctl --user enable --now kioku-mesh-zenohd`.
 
 For system-scope auto-start with the apt-installed `zenohd`, see the drop-in override below. For arbitrary custom paths, hand-write the unit yourself — operators who need that path can read a systemd unit reference.
 
@@ -441,7 +441,7 @@ a reliable inter-host alignment signal — use `chronyc tracking` instead.
 # Daily retention sweep via user cron (run on ONE host; replication carries the deletes).
 # Appends to the existing crontab rather than replacing it. Re-running is idempotent only
 # if the exact same line is not already present, so check `crontab -l` afterwards.
-( crontab -l 2>/dev/null; echo '15 3 * * * ~/.venv/mesh-mem/bin/kioku-mesh gc --retention-days 30' ) | crontab -
+( crontab -l 2>/dev/null; echo '15 3 * * * ~/.venv/kioku-mesh/bin/kioku-mesh gc --retention-days 30' ) | crontab -
 ```
 
 #### Emergency purge
@@ -471,10 +471,10 @@ kioku-mesh gc --force-id <32-char observation_id>
 | `--mode spoke` | rocksdb + replication; dials the hub (requires `--connect`) |
 | `--listen ENDPOINT` | repeatable. Accepts `ip`, `ip:port`, or `tcp/ip:port`. If omitted on hub/spoke, an interactive picker lists detected IFs. |
 | `--connect ENDPOINT` | repeatable. Required for `--mode spoke`. |
-| `--out PATH` | override output path (default: `~/.config/mesh-mem/config.yaml`, honors `XDG_CONFIG_HOME`) |
+| `--out PATH` | override output path (default: `~/.config/kioku-mesh/config.yaml`, honors `XDG_CONFIG_HOME`) |
 | `--force` | overwrite an existing file |
 | `--print` | emit to stdout instead of writing a file |
-| `--install-systemd` | also write a user-scope systemd unit at `~/.config/systemd/user/mesh-mem-zenohd.service` so `zenohd` starts on login. Linux only — macOS / Windows / non-systemd hosts get a clear error. |
+| `--install-systemd` | also write a user-scope systemd unit at `~/.config/systemd/user/kioku-mesh-zenohd.service` so `zenohd` starts on login. Linux only — macOS / Windows / non-systemd hosts get a clear error. |
 
 ### CLI startup: `--rebuild` and `MESH_MEM_FORCE_REBUILD`
 
@@ -583,7 +583,7 @@ Near-term work items (no committed dates; tracked here informally):
 - For Local mode: no extra dependencies beyond kioku-mesh itself.
 - For Mesh mode (multi-host): Zenoh 1.9.0 (`eclipse-zenoh` Python binding and `zenohd` + `zenoh-backend-rocksdb` router). See [Install zenohd](#install-zenohd) for apt / prebuilt / cargo recipes.
 - For the demo-only ephemeral mesh path (`mesh start` / `mesh join`): just `zenoh-python` — already a dependency of kioku-mesh. No `zenohd` binary required.
-- `MESH_MEM_STATE_DIR` (default `~/.local/share/mesh-mem`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
+- `MESH_MEM_STATE_DIR` (default `~/.local/share/kioku-mesh`) must be on a filesystem that supports POSIX hard links — ext4 / btrfs / xfs / tmpfs / NFSv3+ all qualify. FAT / exFAT and certain older SMB mounts do NOT, and `get_pc_id()` will fail on first run in that case.
 - NTP/chrony clock sync (see [Time sync](#time-sync)). Replication uses HLC timestamps; clock skew > a few seconds breaks digest comparison.
 
 ### Development

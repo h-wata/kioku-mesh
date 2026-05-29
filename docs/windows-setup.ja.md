@@ -13,7 +13,7 @@
 kioku-mesh の開発は Linux first です。Windows 10 / 11 ホストも *peer として*
 ネイティブで Zenoh mesh に参加できます。下記は Linux quick start からの差分です。
 identity 環境変数、CLI コマンド、MCP 登録の作法は同じで、違うのは **パス形式**
-だけです。Linux 例の `~/.venv/mesh-mem/bin/<binary>` は Windows では
+だけです。Linux 例の `~/.venv/kioku-mesh/bin/<binary>` は Windows では
 `C:\Users\<user>\.venv\kioku-mesh\Scripts\<binary>.exe` に読み替えてください。
 
 ## 1. Python と kioku-mesh のインストール
@@ -137,7 +137,7 @@ v0.2.1 以降、kioku-mesh は OS ごとに state ディレクトリを解決し
 
 - **Windows**: `%LOCALAPPDATA%\kioku-mesh`（例: `C:\Users\<user>\AppData\Local\kioku-mesh`）— `platformdirs` 経由
 - **macOS**: `~/Library/Application Support/kioku-mesh` — `platformdirs` 経由
-- **Linux**: `~/.local/share/mesh-mem`（固定、v0.2.0 から不変。
+- **Linux**: `~/.local/share/kioku-mesh`（固定、v0.2.0 から不変。
   `XDG_DATA_HOME` は **意図的に honor しない**。v0.2.1 以前のパスを保ち、
   XDG を設定済みのユーザを silent migration しないため）
 

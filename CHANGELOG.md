@@ -12,6 +12,7 @@ versions without a migration path until `1.0.0`.
 
 ### Changed
 
+- **On-disk paths renamed `mesh-mem` → `kioku-mesh` (#128).** `kioku-mesh init` now writes `~/.config/kioku-mesh/`, the state dir defaults to `~/.local/share/kioku-mesh/`, and `init --install-systemd` generates `kioku-mesh-zenohd.service`. **No automatic data migration:** when only a legacy `mesh-mem` directory exists, kioku-mesh reads it as before and prints a one-time warning nudging a manual `mv` (see `docs/migration.md`). The env-var prefix (`MESH_MEM_*`) and Python import name (`mesh_mem`) are intentionally left unchanged. This completes the brand consistency the v0.3.0 rename deferred.
 - **"Tier 1" removed as a first-class architecture tier; rebranded as the demo path for `mesh start` / `mesh join`.** The README architecture table is now `Local` (SQLite, default) vs `Mesh` (zenohd + RocksDB, persistent multi-host); the in-process zenoh router (`mesh start` / `mesh join`) is documented as a "try mesh without zenohd" demo path, with the ephemeral cross-host replication caveat called out explicitly. Rationale: the Tier 0 → 1 → 2 progression broke monotonicity (Tier 1 loses cross-host persistence relative to Tier 0's local persistence), and Tier 1's only real use case is "evaluate mesh before installing zenohd" — first-class tier status overstated its value and increased onboarding cognitive load. CLI help for `mesh` / `mesh start` / `mesh join` updated accordingly. No code or runtime behavior change. See ADR-0013 for the full rationale.
 
 
@@ -24,6 +25,8 @@ versions without a migration path until `1.0.0`.
   existing users only swap the binary: on-disk paths (`~/.config/mesh-mem/`,
   `~/.local/share/mesh-mem/`), env-var prefix `MESH_MEM_*`, systemd unit name
   `mesh-mem-zenohd.service`, and Python import name `mesh_mem` are unchanged.
+  (The on-disk paths and systemd unit name are renamed in a later Changed
+  entry above — see #128; env-var prefix and import name remain `mesh_mem`.)
   See `docs/migration.md` for the `uv tool uninstall mesh-mem &&
   uv tool install kioku-mesh && kioku-mesh mcp install --force` upgrade.
 

@@ -39,6 +39,7 @@ from .local_index import LocalIndex
 from .mcp_install import MCPClient
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
+from .paths import resolve_app_dir
 from .store import _reset_session
 from .store import execute_bulk_purge
 from .store import get_index
@@ -582,7 +583,7 @@ _DEFAULT_ZENOH_PORT = 7447
 def _default_init_path() -> Path:
     """Return the XDG-aware default output path for ``kioku-mesh init``."""
     base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-    return Path(base) / 'mesh-mem' / 'zenohd.json5'
+    return resolve_app_dir(Path(base)) / 'zenohd.json5'
 
 
 # zenohd is invoked from systemd, which does not necessarily inherit a shell's
@@ -591,10 +592,13 @@ def _default_init_path() -> Path:
 _SYSTEMD_ZENOHD_FALLBACK = '/usr/bin/zenohd'
 
 
+_SYSTEMD_UNIT_NAME = 'kioku-mesh-zenohd.service'
+
+
 def _default_systemd_user_unit_path() -> Path:
     """Return the XDG-aware path for the user-scope systemd unit."""
     base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-    return Path(base) / 'systemd' / 'user' / 'mesh-mem-zenohd.service'
+    return Path(base) / 'systemd' / 'user' / _SYSTEMD_UNIT_NAME
 
 
 def _detect_systemd_user(
@@ -678,8 +682,8 @@ def _render_systemd_unit(config_path: Path, zenohd_binary: str) -> str:
         '\n'
         '[Service]\n'
         'Type=simple\n'
-        'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/mesh-mem\n'
-        'ExecStartPre=/usr/bin/install -d %h/.local/share/mesh-mem\n'
+        'Environment=ZENOH_BACKEND_ROCKSDB_ROOT=%h/.local/share/kioku-mesh\n'
+        'ExecStartPre=/usr/bin/install -d %h/.local/share/kioku-mesh\n'
         f'ExecStart={_quote_systemd_value(zenohd_binary)} -c {_quote_systemd_value(str(config_path))}\n'
         'Restart=on-failure\n'
         'RestartSec=5s\n'
@@ -1166,11 +1170,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         unit_path.write_text(unit_body, encoding='utf-8')
         print(f'wrote {unit_path}')
-        print('enable: systemctl --user daemon-reload && systemctl --user enable --now mesh-mem-zenohd')
+        print('enable: systemctl --user daemon-reload && systemctl --user enable --now kioku-mesh-zenohd')
     else:
         print(f'next: zenohd -c {config_path}')
     if args.mode in ('hub', 'spoke'):
-        print('also: export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"')
+        print('also: export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/kioku-mesh"')
     _print_mode_followup(args.mode, listen)
     return 0
 
@@ -1369,7 +1373,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser(
         'init',
-        help='Generate a starter zenohd config under ~/.config/mesh-mem/',
+        help='Generate a starter zenohd config under ~/.config/kioku-mesh/',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=(
             'Generate a starter config. Pick --mode by the deployment shape you want:\n'

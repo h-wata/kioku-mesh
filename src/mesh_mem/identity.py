@@ -14,7 +14,7 @@ Filesystem requirement:
     hard links (ext4 / btrfs / xfs / tmpfs / NFSv3+). FAT / exFAT / certain
     older SMB mounts do NOT and will cause ``get_pc_id()`` to raise
     ``OSError`` on first run. kioku-mesh targets Linux dev hosts where the
-    default location (``~/.local/share/mesh-mem``) sits on such a
+    default location (``~/.local/share/kioku-mesh``) sits on such a
     filesystem out of the box; point the env var at a non-hardlink mount
     at your own risk.
 """
@@ -102,30 +102,36 @@ def state_dir() -> pathlib.Path:
            the current working directory. Set the variable to ``.`` when
            the cwd-relative behavior is required.
         2. Per-OS default:
-           - Linux:   ``~/.local/share/mesh-mem`` (fixed; ``XDG_DATA_HOME``
+           - Linux:   ``~/.local/share/kioku-mesh`` (fixed base; ``XDG_DATA_HOME``
              is intentionally NOT honored to preserve pre-v0.2.1 behavior
-             and avoid a silent migration for users who set it)
+             and avoid a silent migration for users who set it). Falls back to
+             the legacy ``~/.local/share/mesh-mem`` when only that exists (#128).
            - macOS:   ``~/Library/Application Support/kioku-mesh``
            - Windows: ``%LOCALAPPDATA%\kioku-mesh``
 
     On macOS / Windows the default is resolved through ``platformdirs``;
     those platforms had no pre-v0.2.1 hardcoded path to preserve.
     """
+    from .paths import APP_DIR
+    from .paths import resolve_app_dir
+
     override = os.environ.get('MESH_MEM_STATE_DIR')
     if override:
         d = pathlib.Path(override)
     elif sys.platform == 'linux':
-        # v0.2.0 compatibility: keep the fixed path even when
+        # v0.2.0 compatibility: keep the fixed base even when
         # XDG_DATA_HOME is set, so upgrading users do not silently lose
         # access to their existing pc_id / SQLite index / session state.
-        d = pathlib.Path.home() / '.local/share/mesh-mem'
+        # resolve_app_dir prefers ~/.local/share/kioku-mesh and falls back to
+        # the legacy ~/.local/share/mesh-mem when only that exists (#128).
+        d = resolve_app_dir(pathlib.Path.home() / '.local/share')
     else:
         # macOS / Windows: delegate to platformdirs.
         # Imported lazily so tests that monkeypatch the env var do not
         # require platformdirs at collection time.
         import platformdirs
 
-        d = pathlib.Path(platformdirs.user_data_dir('mesh-mem', appauthor=False))
+        d = pathlib.Path(platformdirs.user_data_dir(APP_DIR, appauthor=False))
     d.mkdir(parents=True, exist_ok=True)
     return d
 

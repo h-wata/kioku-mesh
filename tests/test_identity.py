@@ -94,7 +94,7 @@ def test_state_dir_empty_env_falls_through_to_default(
 
     result = identity.state_dir()
 
-    expected = fake_home / '.local/share/mesh-mem'
+    expected = fake_home / '.local/share/kioku-mesh'
     assert result == expected
     assert expected.exists()
 
@@ -103,7 +103,7 @@ def test_state_dir_linux_ignores_xdg_data_home(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Linux state_dir() must return ~/.local/share/mesh-mem even with XDG set.
+    """Linux state_dir() must return ~/.local/share/kioku-mesh even with XDG set.
 
     This preserves pre-v0.2.1 behavior so users who set XDG_DATA_HOME do
     not silently lose access to their existing pc_id / SQLite index
@@ -118,11 +118,11 @@ def test_state_dir_linux_ignores_xdg_data_home(
 
     result = identity.state_dir()
 
-    expected = fake_home / '.local/share/mesh-mem'
+    expected = fake_home / '.local/share/kioku-mesh'
     assert result == expected
     assert expected.exists()
     # Confirm XDG_DATA_HOME location was NOT used.
-    assert not (tmp_path / 'xdg' / 'mesh-mem').exists()
+    assert not (tmp_path / 'xdg' / 'kioku-mesh').exists()
 
 
 def test_state_dir_macos_uses_platformdirs(
@@ -148,7 +148,7 @@ def test_state_dir_macos_uses_platformdirs(
 
     assert result == fake_dir
     assert fake_dir.exists()
-    assert captured == {'appname': 'mesh-mem', 'appauthor': False}
+    assert captured == {'appname': 'kioku-mesh', 'appauthor': False}
 
 
 def test_state_dir_windows_uses_platformdirs(
@@ -174,7 +174,7 @@ def test_state_dir_windows_uses_platformdirs(
 
     assert result == fake_dir
     assert fake_dir.exists()
-    assert captured == {'appname': 'mesh-mem', 'appauthor': False}
+    assert captured == {'appname': 'kioku-mesh', 'appauthor': False}
 
 
 # -- agent_family / client_id defaults & provenance (#82) -----------------------

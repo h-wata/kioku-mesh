@@ -3,7 +3,7 @@
 Covers:
   - LocalBackend contract (save / search / get / delete / gc)
   - contract parity with ZenohBackend via parametrize (zenoh skipped when unavailable)
-  - ``mesh-mem init --mode local`` writes config.yaml with backend: local
+  - ``kioku-mesh init --mode local`` writes config.yaml with backend: local
   - MESH_MEM_BACKEND=local env var selects LocalBackend without config.yaml
   - zenohd absent from PATH does not error in local mode
 """
@@ -43,7 +43,7 @@ def test_get_backend_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_get_backend_mode_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    config_dir = tmp_path / 'xdg' / 'mesh-mem'
+    config_dir = tmp_path / 'xdg' / 'kioku-mesh'
     config_dir.mkdir(parents=True)
     (config_dir / 'config.yaml').write_text('backend: local\n')
     monkeypatch.delenv('MESH_MEM_BACKEND', raising=False)
@@ -152,7 +152,7 @@ def test_local_search_project_filter(local_backend: LocalBackend) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI integration: mesh-mem init --mode local
+# CLI integration: kioku-mesh init --mode local
 # ---------------------------------------------------------------------------
 
 
@@ -163,7 +163,7 @@ def test_cli_init_local_writes_config(tmp_path: Path, monkeypatch: pytest.Monkey
     rc = cli_main(['init', '--mode', 'local'])
     assert rc == 0
 
-    config_path = tmp_path / 'xdg' / 'mesh-mem' / 'config.yaml'
+    config_path = tmp_path / 'xdg' / 'kioku-mesh' / 'config.yaml'
     assert config_path.exists()
     content = config_path.read_text()
     assert 'backend: local' in content

@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .identity import state_dir
+from .paths import resolve_app_dir
 
 ZENOH_DEFAULT_ENDPOINT = 'tcp/localhost:7447'
 ZENOH_CONNECT_TIMEOUT_SEC = 1.0
@@ -147,7 +148,7 @@ def check_zenohd_reachable(
             status=CheckStatus.FAIL,
             summary=f'tcp/{host}:{port} is not reachable',
             hint=(
-                'Start zenohd in another terminal: `zenohd -c ~/.config/mesh-mem/zenohd.json5`. '
+                'Start zenohd in another terminal: `zenohd -c ~/.config/kioku-mesh/zenohd.json5`. '
                 'Run `kioku-mesh init` first if the config file is missing.'
             ),
             details={'endpoint': raw, 'host': host, 'port': port, 'error': type(e).__name__, 'errno': e.errno},
@@ -217,7 +218,7 @@ def check_config_file(path: Path | None = None) -> CheckResult:
 def _default_config_path() -> Path:
     """Mirror the path `kioku-mesh init` writes (XDG_CONFIG_HOME-aware)."""
     base = os.environ.get('XDG_CONFIG_HOME') or str(Path.home() / '.config')
-    return Path(base) / 'mesh-mem' / 'zenohd.json5'
+    return resolve_app_dir(Path(base)) / 'zenohd.json5'
 
 
 def check_state_dir_hardlinks(state_dir_path: Path | None = None) -> CheckResult:
