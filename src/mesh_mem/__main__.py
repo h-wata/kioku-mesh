@@ -816,16 +816,32 @@ def _format_endpoint_list(endpoints: list[str], indent: str = '      ') -> str:
     return (',\n' + indent).join(f'"{ep}"' for ep in endpoints)
 
 
-def _to_tls_endpoints(endpoints: list[str]) -> list[str]:
-    """Swap the ``tcp/`` scheme for ``tls/`` so the link is encrypted + mutually authenticated.
+def _endpoint_host(ep: str) -> str:
+    """Extract the host from a ``scheme/HOST:PORT`` endpoint (IPv6-bracket aware)."""
+    return ep.split('/', 1)[-1].rsplit(':', 1)[0]
 
-    UDP endpoints are left untouched (TLS rides on TCP); they simply remain
-    plaintext, which is surfaced to the user by ``init --tls`` declining to
-    convert them rather than silently downgrading.
+
+def _is_loopback_endpoint(ep: str) -> bool:
+    """True when an endpoint targets loopback (never leaves the host)."""
+    host = _endpoint_host(ep).strip('[]')
+    return host == 'localhost' or host == '::1' or host.startswith('127.')
+
+
+def _to_tls_endpoints(endpoints: list[str]) -> list[str]:
+    """Swap ``tcp/`` for ``tls/`` on cross-host endpoints, leaving loopback plaintext.
+
+    mTLS protects links that traverse the network. The loopback hop from a local
+    CLI / MCP client to the local zenohd never goes on the wire, so it stays
+    plaintext ``tcp/`` — otherwise those local clients (which connect over
+    ``tcp/127.0.0.1`` without a cert) could not reach their own router. UDP
+    endpoints are left untouched (TLS rides on TCP).
     """
     out: list[str] = []
     for ep in endpoints:
-        out.append('tls/' + ep[len('tcp/') :] if ep.startswith('tcp/') else ep)
+        if ep.startswith('tcp/') and not _is_loopback_endpoint(ep):
+            out.append('tls/' + ep[len('tcp/') :])
+        else:
+            out.append(ep)
     return out
 
 
@@ -1202,6 +1218,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+        # Under --tls the local client hop matters more than usual: local
+        # save/search/MCP connect over plaintext tcp/127.0.0.1 with no cert, so a
+        # TLS-only router (e.g. listen 0.0.0.0 or LAN-IP only) locks them out.
+        if not any(_is_loopback_endpoint(ep) for ep in listen):
+            print(
+                'warning: --tls with no loopback listen endpoint. Local save / search / MCP '
+                'clients connect over plaintext tcp/127.0.0.1:7447 and cannot reach a TLS-only '
+                'router. Add `--listen 127.0.0.1` so the local hop stays reachable; only '
+                'cross-host links are encrypted.',
+                file=sys.stderr,
+            )
 
     if args.mode == 'localhost':
         body = _render_localhost_config(listen)

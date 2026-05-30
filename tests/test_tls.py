@@ -136,11 +136,29 @@ def test_install_rejects_mismatched_ca(xdg: Path, tmp_path: Path) -> None:
 # -- endpoint scheme + config rendering ---------------------------------------
 
 
-def test_to_tls_endpoints_swaps_scheme() -> None:
-    assert _to_tls_endpoints(['tcp/1.2.3.4:7447', 'udp/5.6.7.8:7447']) == [
+def test_to_tls_endpoints_swaps_only_cross_host() -> None:
+    assert _to_tls_endpoints(
+        [
+            'tcp/1.2.3.4:7447',
+            'tcp/127.0.0.1:7447',  # loopback stays plaintext
+            'tcp/[::1]:7447',  # IPv6 loopback stays plaintext
+            'tcp/localhost:7447',  # named loopback stays plaintext
+            'udp/5.6.7.8:7447',  # UDP left untouched
+        ]
+    ) == [
         'tls/1.2.3.4:7447',
-        'udp/5.6.7.8:7447',  # UDP left untouched
+        'tcp/127.0.0.1:7447',
+        'tcp/[::1]:7447',
+        'tcp/localhost:7447',
+        'udp/5.6.7.8:7447',
     ]
+
+
+def test_render_mesh_config_keeps_loopback_plaintext(xdg: Path) -> None:
+    body = _render_mesh_config('hub', ['tcp/127.0.0.1:7447', 'tcp/192.168.3.10:7447'], [], tls=True)
+    assert 'tcp/127.0.0.1:7447' in body  # local clients still reach the router
+    assert 'tls/192.168.3.10:7447' in body  # cross-host link encrypted
+    assert 'enable_mtls: true' in body
 
 
 def test_render_mesh_config_tls_block(xdg: Path) -> None:
