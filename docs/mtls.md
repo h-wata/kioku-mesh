@@ -130,5 +130,8 @@ compromised.
   against `tls/` endpoints (it completes the TCP handshake, not the TLS one).
   Because TLS cannot wrap UDP, `init --tls` refuses a cross-host `udp/` listen
   or connect endpoint rather than emit an unauthenticated link.
+* `tls install` checks the signed cert against the local `peer.key`, so a cert
+  minted for a different peer (validly CA-signed but the wrong key) is rejected
+  here instead of failing later at the zenohd handshake.
 * The replication block must still match byte-for-byte across peers — `--tls`
   only changes the transport/listen/connect sections, not replication.
