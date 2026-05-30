@@ -14,6 +14,17 @@ versions without a migration path until `1.0.0`.
 
 - **Mutual TLS for the mesh via a CSR-based private CA (`kioku-mesh tls`).** Optional transport-level peer authentication for deployments where network admission (Tailscale / WireGuard / trusted LAN) is not enough on its own. A new `tls` command group provisions a small private PKI — `tls init-ca` creates the CA, `tls request --san <addr>` generates a peer key (which never leaves the host) plus a CSR, `tls sign` issues the certificate on the CA host, and `tls install` places the signed cert + CA cert into `~/.config/kioku-mesh/tls/`. `tls info` reports subjects, SANs, and expiry. Only non-secret material (CSRs, signed certs, the CA cert) is ever exchanged between hosts. `kioku-mesh init --mode <hub|spoke> --tls` then emits a `tls/`-scheme config with a `transport.link.tls` block (`enable_mtls`, `verify_name_on_connect`), refusing to run until the certs exist. `kioku-mesh doctor` gains a `tls_certs` check (WARN under 30 days to expiry, FAIL if expired or missing while the config enables mTLS). Keys are EC P-256; peer certs carry both serverAuth and clientAuth. Adds a `cryptography` runtime dependency. See [docs/mtls.md](docs/mtls.md).
 
+## [0.3.3] - 2026-05-30
+
+### Changed
+
+- **README overhaul for the OSS launch (PR #136, #137).** Documentation only — no code or on-disk storage-schema changes.
+  - Lead with the differentiator — "Shared memory for AI coding agents, across tools and machines" — instead of generic persistence, and add a "Why kioku-mesh" section framing the cross-machine, multi-agent problem.
+  - Add the project logo as the title and a 20s demo GIF (one agent saves a decision; an agent on another host recalls it live over the mesh).
+  - Add Mermaid architecture and hub-and-spoke topology diagrams to the Multi-Host Mesh section.
+  - Describe mesh mode as "Zenoh/RocksDB is the source of truth, each host's SQLite is a rebuilt local read cache", restate the trusted-network model, and note mTLS peer authentication is under consideration.
+  - Tighten prose throughout.
+
 ## [0.3.2] - 2026-05-29
 
 ### Fixed

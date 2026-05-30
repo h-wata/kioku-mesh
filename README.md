@@ -25,6 +25,19 @@ one machine or from several machines on a trusted LAN/VPN mesh.
 The default setup is local and needs no daemon. Mesh mode is available when you
 want the same memory pool replicated between hosts.
 
+## Why kioku-mesh
+
+Coding-agent context gets fragmented across machines: which laptop did that work,
+what did the agent on the other host decide, and why does a secondary agent have
+to re-read everything from scratch just to give a quick second opinion?
+kioku-mesh keeps that memory in one shared pool so any agent, on any of your
+machines, can recall it.
+
+Unlike long-term memory tools that store everything in one place, the shared
+pool is a peer-to-peer mesh you run yourself across your own machines
+(LAN / VPN / Tailscale) — no SaaS, no central account. The same memory is
+readable by Claude Code, Codex CLI, Gemini CLI, and any other MCP client.
+
 ## Quickstart
 
 ```bash
@@ -59,8 +72,11 @@ The package installs two commands:
 `local` is the easiest starting point. Re-run `kioku-mesh init --mode <mode>
 --force` when you want to switch.
 
-Local mode and mesh mode use separate stores. A save made in local SQLite does
-not automatically appear in the Zenoh/RocksDB mesh store.
+In mesh mode the Zenoh/RocksDB store is the source of truth, and each host's
+SQLite is a fast local read cache rebuilt from it — not a separate copy you have
+to reconcile. `local` mode is a standalone, SQLite-only setup for a single
+machine, so its saves live only in that local store and are not replicated to a
+mesh.
 
 ## CLI
 
@@ -167,8 +183,9 @@ target is Zenoh 1.9.0.
 zenohd -c ~/.config/kioku-mesh/zenohd.json5
 ```
 
-Keep port `7447/tcp` reachable only between trusted peers. Do not expose it to
-the internet or an untrusted LAN. By default kioku-mesh relies on network
+kioku-mesh is designed to run inside a closed, trusted network. Keep port
+`7447/tcp` reachable only between trusted peers. Do not expose it to the
+internet or an untrusted LAN. By default kioku-mesh relies on network
 admission (Tailscale, WireGuard, firewall rules, or a trusted LAN) rather than
 transport-level authentication.
 
