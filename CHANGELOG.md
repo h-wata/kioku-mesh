@@ -10,6 +10,17 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-05-30
+
+### Changed
+
+- **README overhaul for the OSS launch (PR #136, #137).** Documentation only — no code or on-disk storage-schema changes.
+  - Lead with the differentiator — "Shared memory for AI coding agents, across tools and machines" — instead of generic persistence, and add a "Why kioku-mesh" section framing the cross-machine, multi-agent problem.
+  - Add the project logo as the title and a 20s demo GIF (one agent saves a decision; an agent on another host recalls it live over the mesh).
+  - Add Mermaid architecture and hub-and-spoke topology diagrams to the Multi-Host Mesh section.
+  - Describe mesh mode as "Zenoh/RocksDB is the source of truth, each host's SQLite is a rebuilt local read cache", restate the trusted-network model, and note mTLS peer authentication is under consideration.
+  - Tighten prose throughout.
+
 ## [0.3.2] - 2026-05-29
 
 ### Fixed
