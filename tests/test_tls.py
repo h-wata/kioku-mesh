@@ -296,9 +296,7 @@ def test_cli_full_cycle_copy_paste(
     assert tls.inspect_cert(tls.peer_cert_path().read_bytes()).sans == ['192.168.3.10']
 
 
-def test_cli_install_still_accepts_separate_cert_and_ca_files(
-    xdg: Path, tmp_path: Path
-) -> None:
+def test_cli_install_still_accepts_separate_cert_and_ca_files(xdg: Path, tmp_path: Path) -> None:
     # Back-compat: the original two-file --cert/--ca install path still works.
     assert cli_main(['tls', 'init-ca']) == 0
     assert cli_main(['tls', 'request', '--san', '10.0.0.5']) == 0
@@ -326,9 +324,7 @@ def test_cli_install_mismatched_cert_ca_flags(xdg: Path, tmp_path: Path, capsys:
     assert 'must be given together' in capsys.readouterr().err
 
 
-def test_cli_enroll_over_ssh(
-    xdg: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_enroll_over_ssh(xdg: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     # Stand up a CA in the same store, then stub `ssh ... tls sign` to sign the
     # CSR locally and return a bundle on stdout — exercising request -> remote
     # sign -> install end to end without a real SSH hop.

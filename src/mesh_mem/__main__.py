@@ -1512,8 +1512,7 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
         )
     except FileNotFoundError:
         print(
-            'error: `ssh` not found. Use the copy-paste flow instead: '
-            '`tls request` -> `tls sign` -> `tls install`.',
+            'error: `ssh` not found. Use the copy-paste flow instead: `tls request` -> `tls sign` -> `tls install`.',
             file=sys.stderr,
         )
         return 2
@@ -1973,9 +1972,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help='address peers dial this host on (IP or hostname). Repeatable; include every reachable address.',
     )
     p_tls_request.add_argument('--cn', default='', help='certificate common name (default: first --san)')
-    p_tls_request.add_argument(
-        '-o', '--out', default='', help='write the CSR blob to a file instead of stdout'
-    )
+    p_tls_request.add_argument('-o', '--out', default='', help='write the CSR blob to a file instead of stdout')
     p_tls_request.set_defaults(func=_cmd_tls_request)
 
     p_tls_sign = p_tls_sub.add_parser('sign', help='Sign a peer CSR with the local CA (run on the CA host)')
@@ -1984,9 +1981,7 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs='?',
         help='path to a .csr file or saved CSR blob; omit to paste/pipe one on stdin',
     )
-    p_tls_sign.add_argument(
-        '-o', '--out', default='', help='write the signed cert bundle to a file instead of stdout'
-    )
+    p_tls_sign.add_argument('-o', '--out', default='', help='write the signed cert bundle to a file instead of stdout')
     p_tls_sign.add_argument(
         '--days',
         type=int,
