@@ -822,7 +822,7 @@ def _endpoint_host(ep: str) -> str:
 
 
 def _is_loopback_endpoint(ep: str) -> bool:
-    """True when an endpoint targets loopback (never leaves the host)."""
+    """Return True when an endpoint targets loopback (never leaves the host)."""
     host = _endpoint_host(ep).strip('[]')
     return host == 'localhost' or host == '::1' or host.startswith('127.')
 

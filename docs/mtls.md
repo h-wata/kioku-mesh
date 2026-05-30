@@ -84,15 +84,26 @@ kioku-mesh tls install --cert /tmp/spoke1.crt --ca /tmp/ca.crt
 
 ```bash
 # hub
-kioku-mesh init --mode hub  --tls --listen 192.168.3.10 --force
+kioku-mesh init --mode hub  --tls --listen 127.0.0.1 --listen 192.168.3.10 --force
 # spoke
 kioku-mesh init --mode spoke --tls --listen 127.0.0.1 --connect 192.168.3.10 --force
 ```
 
-`--tls` switches the endpoints to the `tls/` scheme and emits a
+`--tls` switches **cross-host** endpoints to the `tls/` scheme and emits a
 `transport.link.tls` block (`enable_mtls: true`, `verify_name_on_connect: true`)
 pointing at the cert store. It refuses to run until the certs exist, so you
 cannot generate a config that zenohd would reject at startup.
+
+### Trust boundary: loopback stays plaintext
+
+mTLS protects links that cross the network. The hop from a local CLI / MCP
+client to *its own* zenohd goes over `tcp/127.0.0.1` and never touches the wire,
+so `--tls` deliberately **leaves loopback endpoints plaintext** and encrypts only
+cross-host (`tls/`) links. The trust boundary is therefore the host: anyone with
+local access to the machine can talk to its router; remote peers must present a
+cert your CA signed. Keep `--listen 127.0.0.1` in the command above so local
+`save` / `search` / MCP clients can still reach the router — `init --tls` warns
+if you omit it.
 
 Start zenohd as usual; the mesh now only admits peers holding a cert your CA
 signed.
