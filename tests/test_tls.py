@@ -133,6 +133,25 @@ def test_install_rejects_mismatched_ca(xdg: Path, tmp_path: Path) -> None:
         tls.install(cert_pem, rogue_pem)
 
 
+def test_install_rejects_cert_for_a_different_peer_key(xdg: Path) -> None:
+    # A cert that is validly CA-signed but minted from *another* peer's CSR must
+    # not be installed next to this host's private key — the halves wouldn't match
+    # and zenohd would only fail at handshake.
+    tls.create_ca()
+    # This host's own key + CSR.
+    tls.generate_key_and_csr(['10.0.0.5'])
+    ca_pem = tls.ca_cert_path().read_bytes()
+    # A different peer requests + gets a cert from the same CA.
+    _other_key, other_csr = tls.generate_key_and_csr(['10.0.0.6'])
+    other_cert = tls.sign_csr(other_csr)
+    # generate_key_and_csr overwrote peer.key with the second peer's key, so put
+    # the first host's identity back: re-request to restore a key that does NOT
+    # match other_cert.
+    tls.generate_key_and_csr(['10.0.0.5'])
+    with pytest.raises(ValueError, match='does not match the local private key'):
+        tls.install(other_cert, ca_pem)
+
+
 # -- endpoint scheme + config rendering ---------------------------------------
 
 
@@ -230,3 +249,14 @@ def test_cli_init_tls_rejects_localhost(xdg: Path, capsys: pytest.CaptureFixture
     rc = cli_main(['init', '--mode', 'localhost', '--tls', '--print'])
     assert rc == 2
     assert 'hub / spoke' in capsys.readouterr().err
+
+
+def test_cli_init_tls_rejects_cross_host_udp(xdg: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # Provision certs so the cert-missing guard doesn't fire first.
+    cli_main(['tls', 'init-ca'])
+    cli_main(['tls', 'request', '--san', '192.168.3.10'])
+    cli_main(['tls', 'sign', str(tls.peer_csr_path()), '-o', str(tls.peer_cert_path())])
+    cli_main(['tls', 'install', '--cert', str(tls.peer_cert_path()), '--ca', str(tls.ca_cert_path())])
+    rc = cli_main(['init', '--mode', 'hub', '--tls', '--listen', 'udp/0.0.0.0:7447', '--print'])
+    assert rc == 2
+    assert 'UDP' in capsys.readouterr().err

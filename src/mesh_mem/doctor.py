@@ -385,7 +385,10 @@ def check_tls_certs(config_path: Path | None = None) -> CheckResult:
     cert = tls_module.peer_cert_path()
     key = tls_module.peer_key_path()
 
-    if not tls_in_use and not cert.is_file():
+    # Only the active config decides whether certs matter. A plaintext config
+    # left behind stale/expired cert files (e.g. after reverting from --tls)
+    # must not FAIL/WARN — those files are simply unused here.
+    if not tls_in_use:
         return CheckResult(
             name='tls_certs',
             status=CheckStatus.PASS,

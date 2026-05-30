@@ -1207,6 +1207,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
         if args.mode not in ('hub', 'spoke'):
             print('error: --tls applies only to --mode hub / spoke.', file=sys.stderr)
             return 2
+        # mTLS rides on TCP; cross-host udp/ endpoints can't be wrapped in TLS, so
+        # they'd stay plaintext + unauthenticated while the config advertises mTLS.
+        # Refuse rather than silently emit an unprotected cross-host link.
+        bad_udp = [ep for ep in (*listen, *connect) if ep.startswith('udp/') and not _is_loopback_endpoint(ep)]
+        if bad_udp:
+            print(
+                'error: --tls cannot secure cross-host UDP endpoints (mTLS rides on TCP). '
+                'Use tcp/ for these, or drop --tls:\n  ' + '\n  '.join(bad_udp),
+                file=sys.stderr,
+            )
+            return 2
         cert_paths = (tls_module.ca_cert_path(), tls_module.peer_cert_path(), tls_module.peer_key_path())
         missing = [p for p in cert_paths if not p.is_file()]
         if missing:

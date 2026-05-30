@@ -254,6 +254,27 @@ def test_check_tls_certs_not_configured_passes(tmp_path: Path, monkeypatch: pyte
     assert result.details['tls_in_use'] is False
 
 
+def test_check_tls_certs_plaintext_config_ignores_stale_certs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Reverted to a plaintext config but old cert files still linger: the active
+    # config doesn't use TLS, so they're simply unused -> PASS, no FAIL/WARN.
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    from datetime import timedelta
+
+    from mesh_mem import tls
+
+    tls.create_ca()
+    _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])
+    tls.install(tls.sign_csr(csr_pem), tls.ca_cert_path().read_bytes())
+    cfg = tmp_path / 'zenohd.json5'
+    cfg.write_text('{ mode: "router" }', encoding='utf-8')  # no enable_mtls
+    # Even an expired cert must not matter when the config is plaintext.
+    real_now = tls._utcnow()
+    monkeypatch.setattr(tls, '_utcnow', lambda: real_now + timedelta(days=10000))
+    result = check_tls_certs(config_path=cfg)
+    assert result.status is CheckStatus.PASS
+    assert result.details['tls_in_use'] is False
+
+
 def test_check_tls_certs_configured_but_missing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     cfg = tmp_path / 'zenohd.json5'

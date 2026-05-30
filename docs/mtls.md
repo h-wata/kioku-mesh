@@ -128,5 +128,7 @@ compromised.
   router both accepts and dials links over the same identity.
 * mTLS rides on TCP; `kioku-mesh doctor`'s reachability probe still works
   against `tls/` endpoints (it completes the TCP handshake, not the TLS one).
+  Because TLS cannot wrap UDP, `init --tls` refuses a cross-host `udp/` listen
+  or connect endpoint rather than emit an unauthenticated link.
 * The replication block must still match byte-for-byte across peers — `--tls`
   only changes the transport/listen/connect sections, not replication.

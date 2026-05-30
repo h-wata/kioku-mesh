@@ -293,6 +293,22 @@ def install(cert_pem: bytes, ca_pem: bytes) -> None:
         )
     except Exception as e:  # noqa: BLE001 - any verify failure means the pair does not match
         raise ValueError('peer certificate was not issued by the supplied CA certificate') from e
+    # The cert must also match the private key that stays on this host. A cert
+    # minted from another peer's CSR is still validly CA-signed, so the check
+    # above would pass it — but zenohd would then load a cert/key pair whose
+    # halves don't correspond and fail at handshake. Compare public keys so that
+    # "wrong peer's cert" fails loudly here instead.
+    key_path = peer_key_path()
+    if key_path.is_file():
+        local_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        spki = serialization.PublicFormat.SubjectPublicKeyInfo
+        cert_pub = cert.public_key().public_bytes(serialization.Encoding.PEM, spki)
+        key_pub = local_key.public_key().public_bytes(serialization.Encoding.PEM, spki)
+        if cert_pub != key_pub:
+            raise ValueError(
+                f'signed certificate does not match the local private key at {key_path}; '
+                'it appears to have been issued for a different peer'
+            )
     _write_public(peer_cert_path(), cert_pem)
     _write_public(ca_cert_path(), ca_pem)
 
