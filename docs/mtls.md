@@ -108,6 +108,11 @@ if you omit it.
 Start zenohd as usual; the mesh now only admits peers holding a cert your CA
 signed.
 
+> **Running under systemd?** After `init --tls --force` rewrites `zenohd.json5`,
+> apply it with `systemctl --user restart <unit>` (e.g. `kioku-mesh-zenohd`).
+> Don't also launch `zenohd -c ...` by hand — the second process would try to
+> bind `7447` again and fail with an address-in-use error.
+
 ## Checking and rotating
 
 ```bash
