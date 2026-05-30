@@ -95,4 +95,5 @@ spoke:  tls install --cert ... --ca ...     # 取り込み
 - 後方互換性影響なし。既存の `tls request` / `sign`(ファイル引数・`-o`)はそのまま動く。
   stdout / stdin モードは**追加**であって置換ではない。
 - 既存の scp 手順を覚えたユーザーは引き続きそれを使える。コピペは新しいデフォルト導線。
-- 実装は本 ADR と同じ PR(`claude/tls-enroll-copypaste` ブランチ)で着地する。
+- 本 ADR は決定の記録のみ。CLI 実装(`tls request` の stdout モード、`tls sign -` の
+  stdin モード、`tls enroll`、`-o` 整備)は別 PR で着地する。
