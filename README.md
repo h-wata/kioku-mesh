@@ -195,11 +195,14 @@ unverified link. Each peer's private key is generated locally and never leaves
 the host — only CSRs and signed certs (all non-secret) are exchanged.
 
 ```bash
-kioku-mesh tls init-ca                       # once, on the CA host
-kioku-mesh tls request --san <this-host-ip>  # on each peer -> sign on the CA host
-kioku-mesh tls install --cert peer.crt --ca ca.crt
+kioku-mesh tls init-ca                            # once, on the CA host
+kioku-mesh tls enroll <ca-host> --san <this-ip>   # on each peer (needs SSH to the CA host)
 kioku-mesh init --mode <hub|spoke> --tls --listen ... --force
 ```
+
+No SSH? The copy-paste flow works over any channel: `tls request` prints a CSR
+block, paste it into `tls sign` on the CA host, paste the bundle it returns into
+`tls install`. The peer key never leaves the host; only non-secret blocks move.
 
 See [docs/mtls.md](docs/mtls.md) for the full walkthrough, the trust model, and
 certificate rotation.

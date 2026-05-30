@@ -21,13 +21,17 @@ back). That is the same trust shape as ``ssh-copy-id`` pushing a public key.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import ipaddress
+import json
 import os
 from pathlib import Path
+import re
+import textwrap
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -361,3 +365,101 @@ def inspect_cert(cert_pem: bytes) -> CertInfo:
         not_valid_after=not_after,
         is_ca=is_ca,
     )
+
+
+# -- copy-paste enrollment blobs ----------------------------------------------
+#
+# scp'ing files between hosts (request -> scp -> sign -> scp -> install) is the
+# part of enrollment that proved fiddly in practice: paths to track, an SSH path
+# that has to exist. These helpers replace it with a single armored, copy-paste
+# blob per hop — the same UX as pasting an auth code between terminals, working
+# over any channel (Slack, a chat, a sticky note) with no added dependency.
+#
+# Only ever *non-secret* material is wrapped: a CSR (public) on the way to the
+# CA, and the signed cert + CA cert (both public) on the way back. The two
+# secrets — ``ca.key`` and each ``peer.key`` — are never encoded into a blob.
+
+# Armor labels. The PEM-style ``-----BEGIN <label>-----`` framing gives the user
+# one obviously-delimited block to select, and a label the decoder can demand so
+# a CSR pasted where a bundle was expected fails with a clear message.
+CSR_LABEL = 'KIOKU-MESH CSR'
+BUNDLE_LABEL = 'KIOKU-MESH CERT BUNDLE'
+
+
+def _armor(label: str, payload: bytes) -> str:
+    """Wrap bytes in a base64, ``-----BEGIN <label>-----`` framed block.
+
+    base64 (not the raw PEM) is what goes inside so the envelope's own
+    ``-----BEGIN-----`` markers are the only ones present — a nested cert PEM
+    can't be mistaken for the frame — and the whole thing is a clean, 64-column
+    block that survives copy-paste and email/chat reflow.
+    """
+    b64 = base64.b64encode(payload).decode('ascii')
+    body = '\n'.join(textwrap.wrap(b64, 64))
+    return f'-----BEGIN {label}-----\n{body}\n-----END {label}-----'
+
+
+def _dearmor(text: str, label: str) -> bytes:
+    """Extract and base64-decode the payload of a ``-----BEGIN <label>-----`` block.
+
+    Tolerant of surrounding noise (a shell prompt, a "paste this:" line, leading
+    whitespace) so a sloppy copy still decodes. Raises ``ValueError`` with an
+    actionable message when the block is missing or corrupt.
+    """
+    pattern = re.compile(
+        r'-----BEGIN ' + re.escape(label) + r'-----(.*?)-----END ' + re.escape(label) + r'-----',
+        re.DOTALL,
+    )
+    match = pattern.search(text)
+    if match is None:
+        raise ValueError(
+            f'no "{label}" block found in the pasted text — copy the whole block, '
+            'including the -----BEGIN and -----END lines'
+        )
+    b64 = ''.join(match.group(1).split())
+    try:
+        return base64.b64decode(b64, validate=True)
+    except Exception as e:  # noqa: BLE001 - any decode failure means a mangled paste
+        raise ValueError(f'the "{label}" block is corrupt (a truncated or mangled paste)') from e
+
+
+def encode_csr_blob(csr_pem: bytes) -> str:
+    """Encode a CSR PEM as a copy-pasteable blob to hand to the CA host."""
+    return _armor(CSR_LABEL, csr_pem)
+
+
+def decode_csr_blob(text: str) -> bytes:
+    """Return CSR PEM bytes from either an armored blob or a raw CSR PEM.
+
+    ``tls sign`` feeds whatever it was given (a pasted blob, or a ``.csr`` file
+    from the older scp flow) through here so both reach one signing path.
+    """
+    if CSR_LABEL in text:
+        return _dearmor(text, CSR_LABEL)
+    if 'BEGIN CERTIFICATE REQUEST' in text:
+        return text.encode()
+    raise ValueError(
+        'input is neither a KIOKU-MESH CSR block nor a PEM certificate request; '
+        'paste the block printed by `kioku-mesh tls request`, or pass a .csr file'
+    )
+
+
+def encode_cert_bundle(cert_pem: bytes, ca_pem: bytes) -> str:
+    """Encode the signed peer cert + the CA cert as one copy-pasteable blob.
+
+    Both are public. Bundling them means the peer pastes a single block and
+    gets everything ``tls install`` needs — its own cert *and* the CA cert to
+    trust — instead of shuttling two files back.
+    """
+    payload = json.dumps({'v': 1, 'cert': cert_pem.decode(), 'ca': ca_pem.decode()}).encode()
+    return _armor(BUNDLE_LABEL, payload)
+
+
+def decode_cert_bundle(text: str) -> tuple[bytes, bytes]:
+    """Return ``(cert_pem, ca_pem)`` from an armored cert-bundle blob."""
+    payload = _dearmor(text, BUNDLE_LABEL)
+    try:
+        obj = json.loads(payload)
+        return obj['cert'].encode(), obj['ca'].encode()
+    except (ValueError, KeyError, AttributeError, TypeError) as e:
+        raise ValueError('the cert bundle decoded but is not the expected cert+ca structure') from e
