@@ -100,9 +100,15 @@ def _parse_zenoh_endpoint(raw: str) -> tuple[str, int] | None:
     unprobeable rather than guessed.
     """
     spec = raw.strip()
-    if not spec.startswith('tcp/'):
+    # Accept both tcp/ and tls/: a TLS endpoint still rides on TCP, so a plain
+    # TCP connect is a valid liveness probe for "is the router up" even though
+    # we don't complete the TLS handshake.
+    if spec.startswith('tcp/'):
+        host_port = spec[len('tcp/') :]
+    elif spec.startswith('tls/'):
+        host_port = spec[len('tls/') :]
+    else:
         return None
-    host_port = spec[len('tcp/') :]
     if ':' not in host_port:
         return None
     host, _, port_str = host_port.rpartition(':')
@@ -352,6 +358,98 @@ def check_embedded_router(
     )
 
 
+# mTLS peer certs renewed with this much runway left are still PASS; below it we
+# WARN so a rotation happens before a silent mesh-wide handshake failure.
+TLS_CERT_WARN_DAYS = 30
+
+
+def check_tls_certs(config_path: Path | None = None) -> CheckResult:
+    """Validate the mTLS cert store when (and only when) the mesh config uses TLS.
+
+    Non-TLS deployments (network-admission trust) PASS with a note rather than
+    nagging about absent certs. When the generated config references
+    ``enable_mtls``, the three cert-store files must exist and the peer cert
+    must not be expired (or near expiry).
+    """
+    cfg = config_path if config_path is not None else _default_config_path()
+    tls_in_use = False
+    if cfg.is_file():
+        try:
+            tls_in_use = 'enable_mtls' in cfg.read_text(encoding='utf-8')
+        except OSError:
+            tls_in_use = False
+
+    from . import tls as tls_module
+
+    ca = tls_module.ca_cert_path()
+    cert = tls_module.peer_cert_path()
+    key = tls_module.peer_key_path()
+
+    # Only the active config decides whether certs matter. A plaintext config
+    # left behind stale/expired cert files (e.g. after reverting from --tls)
+    # must not FAIL/WARN — those files are simply unused here.
+    if not tls_in_use:
+        return CheckResult(
+            name='tls_certs',
+            status=CheckStatus.PASS,
+            summary='mTLS not configured (using network-admission trust)',
+            details={'tls_in_use': False},
+        )
+
+    missing = [str(p) for p in (ca, cert, key) if not p.is_file()]
+    if missing:
+        return CheckResult(
+            name='tls_certs',
+            status=CheckStatus.FAIL,
+            summary='mTLS config references certs that are missing from the TLS store',
+            hint=(
+                'Provision them: `kioku-mesh tls init-ca` (CA host), `kioku-mesh tls request --san <addr>` '
+                '(this host) -> sign on the CA host -> `kioku-mesh tls install`.'
+            ),
+            details={'tls_in_use': tls_in_use, 'missing': missing},
+        )
+
+    try:
+        info = tls_module.inspect_cert(cert.read_bytes())
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            name='tls_certs',
+            status=CheckStatus.FAIL,
+            summary=f'peer certificate at {cert} is unreadable',
+            hint='Re-run `kioku-mesh tls request` / `tls install` to regenerate it.',
+            details={'tls_in_use': tls_in_use, 'error': type(e).__name__},
+        )
+
+    details = {
+        'tls_in_use': tls_in_use,
+        'not_valid_after': info.not_valid_after.isoformat(),
+        'days_remaining': info.days_remaining,
+        'sans': info.sans,
+    }
+    if info.expired:
+        return CheckResult(
+            name='tls_certs',
+            status=CheckStatus.FAIL,
+            summary=f'peer certificate expired on {info.not_valid_after:%Y-%m-%d}',
+            hint='Rotate it: `kioku-mesh tls request` -> sign on the CA host -> `kioku-mesh tls install`.',
+            details=details,
+        )
+    if info.days_remaining < TLS_CERT_WARN_DAYS:
+        return CheckResult(
+            name='tls_certs',
+            status=CheckStatus.WARN,
+            summary=f'peer certificate expires in {info.days_remaining} days',
+            hint='Rotate soon: `kioku-mesh tls request` -> sign on the CA host -> `kioku-mesh tls install`.',
+            details=details,
+        )
+    return CheckResult(
+        name='tls_certs',
+        status=CheckStatus.PASS,
+        summary=f'mTLS peer certificate valid for {info.days_remaining} more days',
+        details=details,
+    )
+
+
 # -- Orchestration & rendering -------------------------------------------------
 
 
@@ -368,6 +466,7 @@ def run_all_checks() -> list[CheckResult]:
         check_zenohd_reachable(),
         check_state_dir_hardlinks(),
         check_embedded_router(),
+        check_tls_certs(),
     ]
 
 

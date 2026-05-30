@@ -17,6 +17,7 @@ from mesh_mem.doctor import _default_config_path
 from mesh_mem.doctor import _parse_zenoh_endpoint
 from mesh_mem.doctor import check_config_file
 from mesh_mem.doctor import check_state_dir_hardlinks
+from mesh_mem.doctor import check_tls_certs
 from mesh_mem.doctor import check_zenohd_binary
 from mesh_mem.doctor import check_zenohd_reachable
 from mesh_mem.doctor import CheckResult
@@ -239,6 +240,80 @@ def _sample_results() -> list[CheckResult]:
             details={'path': '/x/y/zenohd.json5'},
         ),
     ]
+
+
+def test_parse_zenoh_endpoint_accepts_tls() -> None:
+    assert _parse_zenoh_endpoint('tls/192.168.3.10:7447') == ('192.168.3.10', 7447)
+
+
+def test_check_tls_certs_not_configured_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No TLS in config, no peer cert -> PASS with a note (don't nag plaintext users).
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    result = check_tls_certs(config_path=tmp_path / 'absent.json5')
+    assert result.status is CheckStatus.PASS
+    assert result.details['tls_in_use'] is False
+
+
+def test_check_tls_certs_plaintext_config_ignores_stale_certs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Reverted to a plaintext config but old cert files still linger: the active
+    # config doesn't use TLS, so they're simply unused -> PASS, no FAIL/WARN.
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    from datetime import timedelta
+
+    from mesh_mem import tls
+
+    tls.create_ca()
+    _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])
+    tls.install(tls.sign_csr(csr_pem), tls.ca_cert_path().read_bytes())
+    cfg = tmp_path / 'zenohd.json5'
+    cfg.write_text('{ mode: "router" }', encoding='utf-8')  # no enable_mtls
+    # Even an expired cert must not matter when the config is plaintext.
+    real_now = tls._utcnow()
+    monkeypatch.setattr(tls, '_utcnow', lambda: real_now + timedelta(days=10000))
+    result = check_tls_certs(config_path=cfg)
+    assert result.status is CheckStatus.PASS
+    assert result.details['tls_in_use'] is False
+
+
+def test_check_tls_certs_configured_but_missing_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    cfg = tmp_path / 'zenohd.json5'
+    cfg.write_text('{ transport: { link: { tls: { enable_mtls: true } } } }', encoding='utf-8')
+    result = check_tls_certs(config_path=cfg)
+    assert result.status is CheckStatus.FAIL
+    assert result.details['missing']
+
+
+def test_check_tls_certs_valid_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    from mesh_mem import tls
+
+    tls.create_ca()
+    _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])
+    tls.install(tls.sign_csr(csr_pem), tls.ca_cert_path().read_bytes())
+    cfg = tmp_path / 'zenohd.json5'
+    cfg.write_text('enable_mtls: true', encoding='utf-8')
+    result = check_tls_certs(config_path=cfg)
+    assert result.status is CheckStatus.PASS
+    assert result.details['days_remaining'] > 0
+
+
+def test_check_tls_certs_expired_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    from datetime import timedelta
+
+    from mesh_mem import tls
+
+    tls.create_ca()
+    _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])
+    tls.install(tls.sign_csr(csr_pem, days=825), tls.ca_cert_path().read_bytes())
+    cfg = tmp_path / 'zenohd.json5'
+    cfg.write_text('enable_mtls: true', encoding='utf-8')
+    # Fast-forward "now" past the cert's validity window so it reads as expired.
+    real_now = tls._utcnow()
+    monkeypatch.setattr(tls, '_utcnow', lambda: real_now + timedelta(days=10000))
+    result = check_tls_certs(config_path=cfg)
+    assert result.status is CheckStatus.FAIL
 
 
 def test_to_json_documented_shape() -> None:
