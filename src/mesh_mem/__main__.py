@@ -7,7 +7,8 @@ sides converge.
 """
 
 import argparse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
+from collections.abc import Iterator
 from datetime import datetime
 from datetime import timezone
 import json
