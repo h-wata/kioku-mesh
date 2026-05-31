@@ -10,6 +10,8 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-01
+
 ### Added
 
 - **Mutual TLS for the mesh via a CSR-based private CA (`kioku-mesh tls`).** Optional transport-level peer authentication for deployments where network admission (Tailscale / WireGuard / trusted LAN) is not enough on its own. A new `tls` command group provisions a small private PKI — `tls init-ca` creates the CA, `tls request --san <addr>` generates a peer key (which never leaves the host) plus a CSR, `tls sign` issues the certificate on the CA host, and `tls install` places the signed cert + CA cert into `~/.config/kioku-mesh/tls/`. `tls info` reports subjects, SANs, and expiry. Only non-secret material (CSRs, signed certs, the CA cert) is ever exchanged between hosts. `kioku-mesh init --mode <hub|spoke> --tls` then emits a `tls/`-scheme config with a `transport.link.tls` block (`enable_mtls`, `verify_name_on_connect`), refusing to run until the certs exist. `kioku-mesh doctor` gains a `tls_certs` check (WARN under 30 days to expiry, FAIL if expired or missing while the config enables mTLS). Keys are EC P-256; peer certs carry both serverAuth and clientAuth. Adds a `cryptography` runtime dependency. See [docs/mtls.md](docs/mtls.md).
