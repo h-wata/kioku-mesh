@@ -192,12 +192,14 @@ def create_ca(common_name: str = 'kioku-mesh-ca', days: int = DEFAULT_CA_DAYS) -
 # -- peer key + CSR ------------------------------------------------------------
 
 
-def generate_key_and_csr(sans: list[str], common_name: str | None = None) -> tuple[bytes, bytes]:
-    """Generate this peer's private key + CSR. Writes ``peer.key`` (0600) + ``peer.csr``.
+def build_key_and_csr(sans: list[str], common_name: str | None = None) -> tuple[bytes, bytes]:
+    """Build a peer private key + CSR in memory, returning their PEMs (no disk writes).
 
-    The private key stays here; only the returned CSR PEM should be sent to the
-    CA host. ``common_name`` defaults to the first SAN so the cert has a stable,
-    human-recognizable subject.
+    ``tls enroll`` builds here first and only commits the key to disk (via
+    ``write_peer_material``) once the CA has actually signed it — so a failed
+    enrollment (unreachable CA host, timeout, remote error, malformed bundle)
+    can never overwrite an already-enrolled peer's key with one that no longer
+    matches its installed cert. ``common_name`` defaults to the first SAN.
     """
     san_ext = _build_san(sans)
     cn = common_name or sans[0]
@@ -214,8 +216,24 @@ def generate_key_and_csr(sans: list[str], common_name: str | None = None) -> tup
         encryption_algorithm=serialization.NoEncryption(),
     )
     csr_pem = csr.public_bytes(serialization.Encoding.PEM)
+    return key_pem, csr_pem
+
+
+def write_peer_material(key_pem: bytes, csr_pem: bytes) -> None:
+    """Commit a peer key (0600) + CSR (0644) to the local TLS store."""
     _write_secret(peer_key_path(), key_pem)
     _write_public(peer_csr_path(), csr_pem)
+
+
+def generate_key_and_csr(sans: list[str], common_name: str | None = None) -> tuple[bytes, bytes]:
+    """Generate this peer's private key + CSR and write them to the TLS store.
+
+    The convenience wrapper used by ``tls request``: builds the material and
+    commits it immediately (``peer.key`` 0600, ``peer.csr``). The private key
+    stays here; only the returned CSR PEM should travel to the CA host.
+    """
+    key_pem, csr_pem = build_key_and_csr(sans, common_name)
+    write_peer_material(key_pem, csr_pem)
     return key_pem, csr_pem
 
 
@@ -280,6 +298,42 @@ def sign_csr(csr_pem: bytes, days: int = DEFAULT_CERT_DAYS) -> bytes:
 # -- install -------------------------------------------------------------------
 
 
+def _verify_issued_by(cert: x509.Certificate, ca_cert: x509.Certificate) -> None:
+    """Raise ValueError unless ``cert`` carries a valid signature from ``ca_cert``."""
+    try:
+        ca_cert.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            ec.ECDSA(cert.signature_hash_algorithm),  # type: ignore[arg-type]
+        )
+    except Exception as e:  # noqa: BLE001 - any verify failure means the pair does not match
+        raise ValueError('peer certificate was not issued by the supplied CA certificate') from e
+
+
+def _same_public_key(cert: x509.Certificate, key: ec.EllipticCurvePrivateKey) -> bool:
+    """Whether ``cert`` and ``key`` are two halves of the same key pair."""
+    spki = serialization.PublicFormat.SubjectPublicKeyInfo
+    cert_pub = cert.public_key().public_bytes(serialization.Encoding.PEM, spki)
+    key_pub = key.public_key().public_bytes(serialization.Encoding.PEM, spki)
+    return cert_pub == key_pub
+
+
+def validate_bundle(cert_pem: bytes, ca_pem: bytes, key_pem: bytes) -> None:
+    """Verify a signed bundle against a private key fully in memory (no disk).
+
+    Raises ValueError if the cert was not issued by the bundled CA, or does not
+    match ``key_pem``. ``tls enroll`` runs this on the freshly built key *before*
+    committing anything to disk, so a bad/failed enrollment can't clobber an
+    already-enrolled peer's key or cert.
+    """
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    ca_cert = x509.load_pem_x509_certificate(ca_pem)
+    _verify_issued_by(cert, ca_cert)
+    key = serialization.load_pem_private_key(key_pem, password=None)
+    if not _same_public_key(cert, key):  # type: ignore[arg-type]
+        raise ValueError('signed certificate does not match the generated private key')
+
+
 def install(cert_pem: bytes, ca_pem: bytes) -> None:
     """Place a signed peer cert + the CA cert into the local TLS store.
 
@@ -289,14 +343,7 @@ def install(cert_pem: bytes, ca_pem: bytes) -> None:
     """
     cert = x509.load_pem_x509_certificate(cert_pem)
     ca_cert = x509.load_pem_x509_certificate(ca_pem)
-    try:
-        ca_cert.public_key().verify(
-            cert.signature,
-            cert.tbs_certificate_bytes,
-            ec.ECDSA(cert.signature_hash_algorithm),  # type: ignore[arg-type]
-        )
-    except Exception as e:  # noqa: BLE001 - any verify failure means the pair does not match
-        raise ValueError('peer certificate was not issued by the supplied CA certificate') from e
+    _verify_issued_by(cert, ca_cert)
     # The cert must also match the private key that stays on this host. A cert
     # minted from another peer's CSR is still validly CA-signed, so the check
     # above would pass it — but zenohd would then load a cert/key pair whose
@@ -305,10 +352,7 @@ def install(cert_pem: bytes, ca_pem: bytes) -> None:
     key_path = peer_key_path()
     if key_path.is_file():
         local_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-        spki = serialization.PublicFormat.SubjectPublicKeyInfo
-        cert_pub = cert.public_key().public_bytes(serialization.Encoding.PEM, spki)
-        key_pub = local_key.public_key().public_bytes(serialization.Encoding.PEM, spki)
-        if cert_pub != key_pub:
+        if not _same_public_key(cert, local_key):  # type: ignore[arg-type]
             raise ValueError(
                 f'signed certificate does not match the local private key at {key_path}; '
                 'it appears to have been issued for a different peer'

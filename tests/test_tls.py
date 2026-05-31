@@ -382,6 +382,90 @@ def test_cli_enroll_surfaces_remote_failure(
     assert 'command not found' in err
 
 
+def test_cli_enroll_failure_leaves_existing_peer_intact(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A failed enroll on an already-enrolled peer must NOT overwrite its working
+    # key/cert with a fresh, non-matching key. Provision a peer first, then make
+    # enroll fail at the remote-sign step and assert the key + cert are untouched.
+    import subprocess as _sp
+
+    cli_main(['tls', 'init-ca'])
+    cli_main(['tls', 'request', '--san', '10.0.0.5'])
+    cert_pem = tls.sign_csr(tls.peer_csr_path().read_bytes())
+    tls.install(cert_pem, tls.ca_cert_path().read_bytes())
+    good_key = tls.peer_key_path().read_bytes()
+    good_crt = tls.peer_cert_path().read_bytes()
+    good_csr = tls.peer_csr_path().read_bytes()
+
+    def fake_run(
+        cmd: list[str],
+        input: str | None = None,  # noqa: A002
+        capture_output: bool = False,
+        text: bool = False,
+        timeout: int | None = None,
+    ) -> _sp.CompletedProcess:
+        return _sp.CompletedProcess(cmd, 255, stdout='', stderr='ssh: connect: Connection refused\n')
+
+    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    rc = cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.99'])
+    assert rc == 2
+    # Nothing committed: the still-valid key/cert/CSR are byte-for-byte unchanged.
+    assert tls.peer_key_path().read_bytes() == good_key
+    assert tls.peer_cert_path().read_bytes() == good_crt
+    assert tls.peer_csr_path().read_bytes() == good_csr
+    # And the original cert still matches the on-disk key (would raise if clobbered).
+    tls.install(good_crt, tls.ca_cert_path().read_bytes())
+
+
+def test_cli_enroll_malformed_bundle_leaves_existing_peer_intact(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same invariant when the remote "succeeds" but returns garbage on stdout.
+    import subprocess as _sp
+
+    cli_main(['tls', 'init-ca'])
+    cli_main(['tls', 'request', '--san', '10.0.0.5'])
+    cert_pem = tls.sign_csr(tls.peer_csr_path().read_bytes())
+    tls.install(cert_pem, tls.ca_cert_path().read_bytes())
+    good_key = tls.peer_key_path().read_bytes()
+
+    def fake_run(
+        cmd: list[str],
+        input: str | None = None,  # noqa: A002
+        capture_output: bool = False,
+        text: bool = False,
+        timeout: int | None = None,
+    ) -> _sp.CompletedProcess:
+        return _sp.CompletedProcess(cmd, 0, stdout='not a bundle at all', stderr='')
+
+    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    assert cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.99']) == 2
+    assert tls.peer_key_path().read_bytes() == good_key
+
+
+def test_cli_enroll_quotes_remote_mesh_with_spaces(xdg: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A --remote-mesh path with spaces must be passed as one shell-safe token.
+    import subprocess as _sp
+
+    cli_main(['tls', 'init-ca'])
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        cmd: list[str],
+        input: str | None = None,  # noqa: A002
+        capture_output: bool = False,
+        text: bool = False,
+        timeout: int | None = None,
+    ) -> _sp.CompletedProcess:
+        captured['cmd'] = cmd
+        cert_pem = tls.sign_csr(tls.decode_csr_blob(input))
+        bundle = tls.encode_cert_bundle(cert_pem, tls.ca_cert_path().read_bytes())
+        return _sp.CompletedProcess(cmd, 0, stdout=bundle, stderr='')
+
+    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    rc = cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.5', '--remote-mesh', '/opt/my tools/kioku-mesh'])
+    assert rc == 0
+    remote = captured['cmd'][-1]
+    assert remote == "'/opt/my tools/kioku-mesh' tls sign --days 825"
+
+
 def test_cli_init_ca_refuses_overwrite(xdg: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli_main(['tls', 'init-ca']) == 0
     assert cli_main(['tls', 'init-ca']) == 1

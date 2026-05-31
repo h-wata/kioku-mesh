@@ -14,6 +14,7 @@ from datetime import timezone
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import subprocess
@@ -1492,9 +1493,14 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
     request -> sign -> install into a single command. The peer key is still
     generated locally and never leaves; only the public CSR/cert cross the link
     (piped through SSH's own encrypted channel).
+
+    The freshly built key is held in memory and only committed to disk after the
+    returned bundle has been decoded and validated, so a failed enroll (bad CA
+    host, timeout, remote error, malformed bundle) never overwrites an
+    already-enrolled peer's key with one that no longer matches its cert.
     """
     try:
-        _key_pem, csr_pem = tls_module.generate_key_and_csr(args.san, common_name=args.cn or None)
+        key_pem, csr_pem = tls_module.build_key_and_csr(args.san, common_name=args.cn or None)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
@@ -1504,7 +1510,11 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
         ssh_cmd += ['-p', str(args.ssh_port)]
     for opt in args.ssh_opt:
         ssh_cmd += ['-o', opt]
-    ssh_cmd += [args.ca_host, f'{args.remote_mesh} tls sign --days {args.days}']
+    # shlex.join so a --remote-mesh path with spaces stays a single argument and
+    # any shell metacharacters are quoted rather than interpreted by the remote
+    # shell the command is handed to.
+    remote_cmd = shlex.join([args.remote_mesh, 'tls', 'sign', '--days', str(args.days)])
+    ssh_cmd += [args.ca_host, remote_cmd]
     print(f'signing on {args.ca_host} over SSH ...', file=sys.stderr)
     try:
         proc = subprocess.run(  # noqa: S603 - args are explicit, not a shell string
@@ -1528,12 +1538,18 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # Decode + validate against the in-memory key before touching disk, so a
+    # malformed bundle leaves the existing peer untouched.
     try:
         cert_pem, ca_pem = tls_module.decode_cert_bundle(proc.stdout)
-        tls_module.install(cert_pem, ca_pem)
+        tls_module.validate_bundle(cert_pem, ca_pem, key_pem)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
+    # The bundle is good: commit the key/CSR, then install (re-verifies + writes
+    # cert + ca). install's checks are guaranteed to pass after validate_bundle.
+    tls_module.write_peer_material(key_pem, csr_pem)
+    tls_module.install(cert_pem, ca_pem)
     print(f'enrolled via {args.ca_host}: installed {tls_module.peer_cert_path()} + {tls_module.ca_cert_path()}')
     print('next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
     return 0
