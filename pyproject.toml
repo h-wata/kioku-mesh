@@ -46,7 +46,6 @@ dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
     "ruff>=0.6",
-    "yapf>=0.40",
 ]
 test = [
     "fastmcp>=0.2",
@@ -71,10 +70,6 @@ include = ["src/mesh_mem", "tests", "config", "docs", "plan.md", "README.md"]
 [tool.isort]
 profile = "google"
 line_length = 119
-
-[tool.yapf]
-based_on_style = "google"
-column_limit = 119
 
 [tool.ruff]
 line-length = 119

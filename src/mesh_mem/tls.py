@@ -21,13 +21,17 @@ back). That is the same trust shape as ``ssh-copy-id`` pushing a public key.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import ipaddress
+import json
 import os
 from pathlib import Path
+import re
+import textwrap
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -188,12 +192,14 @@ def create_ca(common_name: str = 'kioku-mesh-ca', days: int = DEFAULT_CA_DAYS) -
 # -- peer key + CSR ------------------------------------------------------------
 
 
-def generate_key_and_csr(sans: list[str], common_name: str | None = None) -> tuple[bytes, bytes]:
-    """Generate this peer's private key + CSR. Writes ``peer.key`` (0600) + ``peer.csr``.
+def build_key_and_csr(sans: list[str], common_name: str | None = None) -> tuple[bytes, bytes]:
+    """Build a peer private key + CSR in memory, returning their PEMs (no disk writes).
 
-    The private key stays here; only the returned CSR PEM should be sent to the
-    CA host. ``common_name`` defaults to the first SAN so the cert has a stable,
-    human-recognizable subject.
+    ``tls enroll`` builds here first and only commits the key to disk (via
+    ``write_peer_material``) once the CA has actually signed it — so a failed
+    enrollment (unreachable CA host, timeout, remote error, malformed bundle)
+    can never overwrite an already-enrolled peer's key with one that no longer
+    matches its installed cert. ``common_name`` defaults to the first SAN.
     """
     san_ext = _build_san(sans)
     cn = common_name or sans[0]
@@ -210,8 +216,24 @@ def generate_key_and_csr(sans: list[str], common_name: str | None = None) -> tup
         encryption_algorithm=serialization.NoEncryption(),
     )
     csr_pem = csr.public_bytes(serialization.Encoding.PEM)
+    return key_pem, csr_pem
+
+
+def write_peer_material(key_pem: bytes, csr_pem: bytes) -> None:
+    """Commit a peer key (0600) + CSR (0644) to the local TLS store."""
     _write_secret(peer_key_path(), key_pem)
     _write_public(peer_csr_path(), csr_pem)
+
+
+def generate_key_and_csr(sans: list[str], common_name: str | None = None) -> tuple[bytes, bytes]:
+    """Generate this peer's private key + CSR and write them to the TLS store.
+
+    The convenience wrapper used by ``tls request``: builds the material and
+    commits it immediately (``peer.key`` 0600, ``peer.csr``). The private key
+    stays here; only the returned CSR PEM should travel to the CA host.
+    """
+    key_pem, csr_pem = build_key_and_csr(sans, common_name)
+    write_peer_material(key_pem, csr_pem)
     return key_pem, csr_pem
 
 
@@ -276,6 +298,42 @@ def sign_csr(csr_pem: bytes, days: int = DEFAULT_CERT_DAYS) -> bytes:
 # -- install -------------------------------------------------------------------
 
 
+def _verify_issued_by(cert: x509.Certificate, ca_cert: x509.Certificate) -> None:
+    """Raise ValueError unless ``cert`` carries a valid signature from ``ca_cert``."""
+    try:
+        ca_cert.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            ec.ECDSA(cert.signature_hash_algorithm),  # type: ignore[arg-type]
+        )
+    except Exception as e:  # noqa: BLE001 - any verify failure means the pair does not match
+        raise ValueError('peer certificate was not issued by the supplied CA certificate') from e
+
+
+def _same_public_key(cert: x509.Certificate, key: ec.EllipticCurvePrivateKey) -> bool:
+    """Whether ``cert`` and ``key`` are two halves of the same key pair."""
+    spki = serialization.PublicFormat.SubjectPublicKeyInfo
+    cert_pub = cert.public_key().public_bytes(serialization.Encoding.PEM, spki)
+    key_pub = key.public_key().public_bytes(serialization.Encoding.PEM, spki)
+    return cert_pub == key_pub
+
+
+def validate_bundle(cert_pem: bytes, ca_pem: bytes, key_pem: bytes) -> None:
+    """Verify a signed bundle against a private key fully in memory (no disk).
+
+    Raises ValueError if the cert was not issued by the bundled CA, or does not
+    match ``key_pem``. ``tls enroll`` runs this on the freshly built key *before*
+    committing anything to disk, so a bad/failed enrollment can't clobber an
+    already-enrolled peer's key or cert.
+    """
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    ca_cert = x509.load_pem_x509_certificate(ca_pem)
+    _verify_issued_by(cert, ca_cert)
+    key = serialization.load_pem_private_key(key_pem, password=None)
+    if not _same_public_key(cert, key):  # type: ignore[arg-type]
+        raise ValueError('signed certificate does not match the generated private key')
+
+
 def install(cert_pem: bytes, ca_pem: bytes) -> None:
     """Place a signed peer cert + the CA cert into the local TLS store.
 
@@ -285,14 +343,7 @@ def install(cert_pem: bytes, ca_pem: bytes) -> None:
     """
     cert = x509.load_pem_x509_certificate(cert_pem)
     ca_cert = x509.load_pem_x509_certificate(ca_pem)
-    try:
-        ca_cert.public_key().verify(
-            cert.signature,
-            cert.tbs_certificate_bytes,
-            ec.ECDSA(cert.signature_hash_algorithm),  # type: ignore[arg-type]
-        )
-    except Exception as e:  # noqa: BLE001 - any verify failure means the pair does not match
-        raise ValueError('peer certificate was not issued by the supplied CA certificate') from e
+    _verify_issued_by(cert, ca_cert)
     # The cert must also match the private key that stays on this host. A cert
     # minted from another peer's CSR is still validly CA-signed, so the check
     # above would pass it — but zenohd would then load a cert/key pair whose
@@ -301,10 +352,7 @@ def install(cert_pem: bytes, ca_pem: bytes) -> None:
     key_path = peer_key_path()
     if key_path.is_file():
         local_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
-        spki = serialization.PublicFormat.SubjectPublicKeyInfo
-        cert_pub = cert.public_key().public_bytes(serialization.Encoding.PEM, spki)
-        key_pub = local_key.public_key().public_bytes(serialization.Encoding.PEM, spki)
-        if cert_pub != key_pub:
+        if not _same_public_key(cert, local_key):  # type: ignore[arg-type]
             raise ValueError(
                 f'signed certificate does not match the local private key at {key_path}; '
                 'it appears to have been issued for a different peer'
@@ -361,3 +409,101 @@ def inspect_cert(cert_pem: bytes) -> CertInfo:
         not_valid_after=not_after,
         is_ca=is_ca,
     )
+
+
+# -- copy-paste enrollment blobs ----------------------------------------------
+#
+# scp'ing files between hosts (request -> scp -> sign -> scp -> install) is the
+# part of enrollment that proved fiddly in practice: paths to track, an SSH path
+# that has to exist. These helpers replace it with a single armored, copy-paste
+# blob per hop — the same UX as pasting an auth code between terminals, working
+# over any channel (Slack, a chat, a sticky note) with no added dependency.
+#
+# Only ever *non-secret* material is wrapped: a CSR (public) on the way to the
+# CA, and the signed cert + CA cert (both public) on the way back. The two
+# secrets — ``ca.key`` and each ``peer.key`` — are never encoded into a blob.
+
+# Armor labels. The PEM-style ``-----BEGIN <label>-----`` framing gives the user
+# one obviously-delimited block to select, and a label the decoder can demand so
+# a CSR pasted where a bundle was expected fails with a clear message.
+CSR_LABEL = 'KIOKU-MESH CSR'
+BUNDLE_LABEL = 'KIOKU-MESH CERT BUNDLE'
+
+
+def _armor(label: str, payload: bytes) -> str:
+    """Wrap bytes in a base64, ``-----BEGIN <label>-----`` framed block.
+
+    base64 (not the raw PEM) is what goes inside so the envelope's own
+    ``-----BEGIN-----`` markers are the only ones present — a nested cert PEM
+    can't be mistaken for the frame — and the whole thing is a clean, 64-column
+    block that survives copy-paste and email/chat reflow.
+    """
+    b64 = base64.b64encode(payload).decode('ascii')
+    body = '\n'.join(textwrap.wrap(b64, 64))
+    return f'-----BEGIN {label}-----\n{body}\n-----END {label}-----'
+
+
+def _dearmor(text: str, label: str) -> bytes:
+    """Extract and base64-decode the payload of a ``-----BEGIN <label>-----`` block.
+
+    Tolerant of surrounding noise (a shell prompt, a "paste this:" line, leading
+    whitespace) so a sloppy copy still decodes. Raises ``ValueError`` with an
+    actionable message when the block is missing or corrupt.
+    """
+    pattern = re.compile(
+        r'-----BEGIN ' + re.escape(label) + r'-----(.*?)-----END ' + re.escape(label) + r'-----',
+        re.DOTALL,
+    )
+    match = pattern.search(text)
+    if match is None:
+        raise ValueError(
+            f'no "{label}" block found in the pasted text — copy the whole block, '
+            'including the -----BEGIN and -----END lines'
+        )
+    b64 = ''.join(match.group(1).split())
+    try:
+        return base64.b64decode(b64, validate=True)
+    except Exception as e:  # noqa: BLE001 - any decode failure means a mangled paste
+        raise ValueError(f'the "{label}" block is corrupt (a truncated or mangled paste)') from e
+
+
+def encode_csr_blob(csr_pem: bytes) -> str:
+    """Encode a CSR PEM as a copy-pasteable blob to hand to the CA host."""
+    return _armor(CSR_LABEL, csr_pem)
+
+
+def decode_csr_blob(text: str) -> bytes:
+    """Return CSR PEM bytes from either an armored blob or a raw CSR PEM.
+
+    ``tls sign`` feeds whatever it was given (a pasted blob, or a ``.csr`` file
+    from the older scp flow) through here so both reach one signing path.
+    """
+    if CSR_LABEL in text:
+        return _dearmor(text, CSR_LABEL)
+    if 'BEGIN CERTIFICATE REQUEST' in text:
+        return text.encode()
+    raise ValueError(
+        'input is neither a KIOKU-MESH CSR block nor a PEM certificate request; '
+        'paste the block printed by `kioku-mesh tls request`, or pass a .csr file'
+    )
+
+
+def encode_cert_bundle(cert_pem: bytes, ca_pem: bytes) -> str:
+    """Encode the signed peer cert + the CA cert as one copy-pasteable blob.
+
+    Both are public. Bundling them means the peer pastes a single block and
+    gets everything ``tls install`` needs — its own cert *and* the CA cert to
+    trust — instead of shuttling two files back.
+    """
+    payload = json.dumps({'v': 1, 'cert': cert_pem.decode(), 'ca': ca_pem.decode()}).encode()
+    return _armor(BUNDLE_LABEL, payload)
+
+
+def decode_cert_bundle(text: str) -> tuple[bytes, bytes]:
+    """Return ``(cert_pem, ca_pem)`` from an armored cert-bundle blob."""
+    payload = _dearmor(text, BUNDLE_LABEL)
+    try:
+        obj = json.loads(payload)
+        return obj['cert'].encode(), obj['ca'].encode()
+    except (ValueError, KeyError, AttributeError, TypeError) as e:
+        raise ValueError('the cert bundle decoded but is not the expected cert+ca structure') from e

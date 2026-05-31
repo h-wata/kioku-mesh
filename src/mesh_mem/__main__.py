@@ -14,6 +14,7 @@ from datetime import timezone
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import subprocess
@@ -1226,7 +1227,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 'error: --tls needs certificates that are not present yet:\n  '
                 + '\n  '.join(str(p) for p in missing)
                 + '\nProvision them first: `kioku-mesh tls init-ca` (CA host), then on each peer '
-                '`kioku-mesh tls request --san <addr>` -> sign on the CA host -> `kioku-mesh tls install`.',
+                '`kioku-mesh tls enroll <ca-host> --san <addr>` (with SSH), or the copy-paste flow '
+                '`tls request` -> `tls sign` -> `tls install`.',
                 file=sys.stderr,
             )
             return 2
@@ -1348,54 +1350,120 @@ def _cmd_tls_init_ca(args: argparse.Namespace) -> int:
     tls_module.create_ca(common_name=args.name, days=args.days)
     print(f'wrote {tls_module.ca_key_path()} (keep this secret — never copy it to another host)')
     print(f'wrote {tls_module.ca_cert_path()} (public — distribute to every peer)')
-    print('next on each peer: kioku-mesh tls request --san <address-peers-dial>')
+    print('next on each peer: kioku-mesh tls enroll <this-host> --san <address-peers-dial> (with SSH),')
+    print('             or copy-paste: kioku-mesh tls request --san <address-peers-dial>')
     return 0
+
+
+def _read_pasted_blob() -> str:
+    """Read an armored blob from stdin, stopping at its ``-----END`` line.
+
+    Stopping at the end marker means an interactive paste doesn't need a
+    trailing Ctrl-D; piped input (no marker, or extra data) still reads through
+    to EOF. Either way the text is handed to a tolerant ``_dearmor``.
+    """
+    lines: list[str] = []
+    for line in sys.stdin:
+        lines.append(line)
+        if line.startswith('-----END KIOKU-MESH'):
+            break
+    return ''.join(lines)
 
 
 def _cmd_tls_request(args: argparse.Namespace) -> int:
-    """Generate this peer's key (stays local) + a CSR to send to the CA host."""
+    """Generate this peer's key (stays local) + a CSR blob to hand to the CA host."""
     try:
-        tls_module.generate_key_and_csr(args.san, common_name=args.cn or None)
+        _key_pem, csr_pem = tls_module.generate_key_and_csr(args.san, common_name=args.cn or None)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
-    print(f'wrote {tls_module.peer_key_path()} (private — stays on this host)')
-    print(f'wrote {tls_module.peer_csr_path()} (public — send this to the CA host)')
-    print('on the CA host: kioku-mesh tls sign <this-file> -o peer.crt')
-    print('then bring back peer.crt + ca.crt and run: kioku-mesh tls install --cert peer.crt --ca ca.crt')
+    blob = tls_module.encode_csr_blob(csr_pem)
+    # Guidance goes to stderr so stdout is a clean blob you can pipe or copy
+    # without slicing prose out of it.
+    print(f'wrote {tls_module.peer_key_path()} (private — stays on this host)', file=sys.stderr)
+    if args.out:
+        Path(args.out).write_text(blob + '\n')
+        print(f'wrote CSR request to {args.out} — send it to the CA host', file=sys.stderr)
+    else:
+        print('copy the block below to the CA host and run `kioku-mesh tls sign`:', file=sys.stderr)
+        print(blob)
+    print(
+        'then paste the bundle it returns into `kioku-mesh tls install` here.\n'
+        '(have SSH to the CA host? `kioku-mesh tls enroll <ca-host> --san ...` does all three steps.)',
+        file=sys.stderr,
+    )
     return 0
 
 
+def _resolve_csr_input(args: argparse.Namespace) -> str | None:
+    """Return the raw CSR text from the file arg or a pasted/piped blob, or None on error."""
+    if args.csr:
+        src = Path(args.csr)
+        if not src.is_file():
+            print(f'error: CSR not found: {src}', file=sys.stderr)
+            return None
+        return src.read_text()
+    if sys.stdin.isatty():
+        print('paste the CSR block from `kioku-mesh tls request` (reads to its -----END line):', file=sys.stderr)
+    return _read_pasted_blob()
+
+
 def _cmd_tls_sign(args: argparse.Namespace) -> int:
-    """Sign a peer's CSR with the local CA (run on the CA host)."""
+    """Sign a peer's CSR with the local CA (run on the CA host); emit a cert bundle."""
     ca_key = tls_module.ca_key_path()
     if not ca_key.is_file():
         print(f'error: no CA at {ca_key}. Run `kioku-mesh tls init-ca` on this host first.', file=sys.stderr)
         return 2
-    csr_path = Path(args.csr)
-    if not csr_path.is_file():
-        print(f'error: CSR not found: {csr_path}', file=sys.stderr)
+    raw = _resolve_csr_input(args)
+    if raw is None:
         return 2
     try:
-        cert_pem = tls_module.sign_csr(csr_path.read_bytes(), days=args.days)
+        csr_pem = tls_module.decode_csr_blob(raw)
+        cert_pem = tls_module.sign_csr(csr_pem, days=args.days)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
-    out = Path(args.out) if args.out else csr_path.with_suffix('.crt')
-    out.write_bytes(cert_pem)
-    print(f'wrote {out}')
-    print(f'send back to the requesting peer: {out} and {tls_module.ca_cert_path()}')
+    bundle = tls_module.encode_cert_bundle(cert_pem, tls_module.ca_cert_path().read_bytes())
+    if args.out:
+        Path(args.out).write_text(bundle + '\n')
+        print(f'wrote signed bundle to {args.out} — send it back to the requesting peer', file=sys.stderr)
+    else:
+        print('copy the block below back to the requesting peer for `kioku-mesh tls install`:', file=sys.stderr)
+        print(bundle)
     return 0
 
 
+def _resolve_install_material(args: argparse.Namespace) -> tuple[bytes, bytes] | None:
+    """Return ``(cert_pem, ca_pem)`` from --cert/--ca files or a pasted bundle blob, or None on error."""
+    if args.cert or args.ca:
+        if not (args.cert and args.ca):
+            print('error: --cert and --ca must be given together (or omit both to paste a bundle).', file=sys.stderr)
+            return None
+        cert_path, ca_path = Path(args.cert), Path(args.ca)
+        for label, p in (('--cert', cert_path), ('--ca', ca_path)):
+            if not p.is_file():
+                print(f'error: {label} file not found: {p}', file=sys.stderr)
+                return None
+        return cert_path.read_bytes(), ca_path.read_bytes()
+    if args.bundle:
+        src = Path(args.bundle)
+        if not src.is_file():
+            print(f'error: bundle file not found: {src}', file=sys.stderr)
+            return None
+        raw = src.read_text()
+    else:
+        if sys.stdin.isatty():
+            print('paste the bundle block from `kioku-mesh tls sign` (reads to its -----END line):', file=sys.stderr)
+        raw = _read_pasted_blob()
+    try:
+        return tls_module.decode_cert_bundle(raw)
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return None
+
+
 def _cmd_tls_install(args: argparse.Namespace) -> int:
-    """Place a signed cert + CA cert into this host's TLS store."""
-    cert_path = Path(args.cert)
-    ca_path = Path(args.ca)
-    for label, p in (('--cert', cert_path), ('--ca', ca_path)):
-        if not p.is_file():
-            print(f'error: {label} file not found: {p}', file=sys.stderr)
-            return 2
+    """Place a signed cert + CA cert into this host's TLS store (from a bundle blob or files)."""
     if not tls_module.peer_key_path().is_file():
         print(
             f'error: no private key at {tls_module.peer_key_path()}. Run `kioku-mesh tls request` on this '
@@ -1403,13 +1471,86 @@ def _cmd_tls_install(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    material = _resolve_install_material(args)
+    if material is None:
+        return 2
+    cert_pem, ca_pem = material
     try:
-        tls_module.install(cert_path.read_bytes(), ca_path.read_bytes())
+        tls_module.install(cert_pem, ca_pem)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
     print(f'installed {tls_module.peer_cert_path()}')
     print(f'installed {tls_module.ca_cert_path()}')
+    print('next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
+    return 0
+
+
+def _cmd_tls_enroll(args: argparse.Namespace) -> int:
+    """One-shot SSH enrollment: request locally, sign on the CA host over SSH, install.
+
+    The opt-in upgrade for anyone who already has SSH to the CA host: it folds
+    request -> sign -> install into a single command. The peer key is still
+    generated locally and never leaves; only the public CSR/cert cross the link
+    (piped through SSH's own encrypted channel).
+
+    The freshly built key is held in memory and only committed to disk after the
+    returned bundle has been decoded and validated, so a failed enroll (bad CA
+    host, timeout, remote error, malformed bundle) never overwrites an
+    already-enrolled peer's key with one that no longer matches its cert.
+    """
+    try:
+        key_pem, csr_pem = tls_module.build_key_and_csr(args.san, common_name=args.cn or None)
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    csr_blob = tls_module.encode_csr_blob(csr_pem)
+    ssh_cmd = ['ssh']
+    if args.ssh_port:
+        ssh_cmd += ['-p', str(args.ssh_port)]
+    for opt in args.ssh_opt:
+        ssh_cmd += ['-o', opt]
+    # shlex.join so a --remote-mesh path with spaces stays a single argument and
+    # any shell metacharacters are quoted rather than interpreted by the remote
+    # shell the command is handed to.
+    remote_cmd = shlex.join([args.remote_mesh, 'tls', 'sign', '--days', str(args.days)])
+    ssh_cmd += [args.ca_host, remote_cmd]
+    print(f'signing on {args.ca_host} over SSH ...', file=sys.stderr)
+    try:
+        proc = subprocess.run(  # noqa: S603 - args are explicit, not a shell string
+            ssh_cmd, input=csr_blob, capture_output=True, text=True, timeout=args.timeout
+        )
+    except FileNotFoundError:
+        print(
+            'error: `ssh` not found. Use the copy-paste flow instead: `tls request` -> `tls sign` -> `tls install`.',
+            file=sys.stderr,
+        )
+        return 2
+    except subprocess.TimeoutExpired:
+        print(f'error: SSH to {args.ca_host} timed out after {args.timeout}s.', file=sys.stderr)
+        return 2
+    if proc.returncode != 0:
+        if proc.stderr.strip():
+            sys.stderr.write(proc.stderr if proc.stderr.endswith('\n') else proc.stderr + '\n')
+        print(
+            f'error: remote `tls sign` failed on {args.ca_host} (exit {proc.returncode}). '
+            f'Is `{args.remote_mesh}` on its PATH and the CA initialized there?',
+            file=sys.stderr,
+        )
+        return 2
+    # Decode + validate against the in-memory key before touching disk, so a
+    # malformed bundle leaves the existing peer untouched.
+    try:
+        cert_pem, ca_pem = tls_module.decode_cert_bundle(proc.stdout)
+        tls_module.validate_bundle(cert_pem, ca_pem, key_pem)
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    # The bundle is good: commit the key/CSR, then install (re-verifies + writes
+    # cert + ca). install's checks are guaranteed to pass after validate_bundle.
+    tls_module.write_peer_material(key_pem, csr_pem)
+    tls_module.install(cert_pem, ca_pem)
+    print(f'enrolled via {args.ca_host}: installed {tls_module.peer_cert_path()} + {tls_module.ca_cert_path()}')
     print('next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
     return 0
 
@@ -1804,17 +1945,19 @@ def _build_parser() -> argparse.ArgumentParser:
             'Provision mutual-TLS certificates so only peers holding a cert signed\n'
             'by your CA can join the mesh. Trust model: one private CA, one key per\n'
             'peer that never leaves the peer (only the CSR travels).\n\n'
-            'Typical flow:\n'
+            'Copy-paste flow (no SSH, no file shuffling):\n'
             '  CA host:   kioku-mesh tls init-ca\n'
             '  each peer: kioku-mesh tls request --san <addr-peers-dial>\n'
-            '             (send the .csr to the CA host)\n'
-            '  CA host:   kioku-mesh tls sign peer.csr -o peer.crt\n'
-            '             (send peer.crt + ca.crt back to the peer)\n'
-            '  each peer: kioku-mesh tls install --cert peer.crt --ca ca.crt\n'
+            '             (copy the printed CSR block to the CA host)\n'
+            '  CA host:   kioku-mesh tls sign        (paste the CSR block)\n'
+            '             (copy the printed bundle block back to the peer)\n'
+            '  each peer: kioku-mesh tls install     (paste the bundle block)\n'
             '             kioku-mesh init --mode <hub|spoke> --tls --listen ... --force\n\n'
-            'The .csr / .crt / ca.crt files are not secret; move them however is\n'
-            'convenient (scp over SSH, Tailscale, etc.). The CA key and each peer\n'
-            'key are secret and must never be copied between hosts.'
+            'Have SSH to the CA host? One command does all three:\n'
+            '  each peer: kioku-mesh tls enroll <ca-host> --san <addr-peers-dial>\n\n'
+            'The blocks (CSR, signed bundle) are not secret; move them however is\n'
+            'convenient — paste, chat, scp, a USB stick. The CA key and each peer\n'
+            'key are secret and never appear in a block or leave their host.'
         ),
     )
     p_tls_sub = p_tls.add_subparsers(dest='tls_command', required=True)
@@ -1832,7 +1975,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_tls_initca.set_defaults(func=_cmd_tls_init_ca)
 
-    p_tls_request = p_tls_sub.add_parser('request', help='Generate this peer key (local) + CSR for the CA to sign')
+    p_tls_request = p_tls_sub.add_parser(
+        'request',
+        help='Generate this peer key (local) + a CSR blob to copy to the CA host',
+    )
     p_tls_request.add_argument(
         '--san',
         action='append',
@@ -1842,11 +1988,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help='address peers dial this host on (IP or hostname). Repeatable; include every reachable address.',
     )
     p_tls_request.add_argument('--cn', default='', help='certificate common name (default: first --san)')
+    p_tls_request.add_argument('-o', '--out', default='', help='write the CSR blob to a file instead of stdout')
     p_tls_request.set_defaults(func=_cmd_tls_request)
 
     p_tls_sign = p_tls_sub.add_parser('sign', help='Sign a peer CSR with the local CA (run on the CA host)')
-    p_tls_sign.add_argument('csr', help='path to the .csr file produced by `tls request`')
-    p_tls_sign.add_argument('-o', '--out', default='', help='output cert path (default: <csr>.crt)')
+    p_tls_sign.add_argument(
+        'csr',
+        nargs='?',
+        help='path to a .csr file or saved CSR blob; omit to paste/pipe one on stdin',
+    )
+    p_tls_sign.add_argument('-o', '--out', default='', help='write the signed cert bundle to a file instead of stdout')
     p_tls_sign.add_argument(
         '--days',
         type=int,
@@ -1855,10 +2006,56 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_tls_sign.set_defaults(func=_cmd_tls_sign)
 
-    p_tls_install = p_tls_sub.add_parser('install', help='Install a signed cert + CA cert into this host')
-    p_tls_install.add_argument('--cert', required=True, help='path to this peer signed certificate')
-    p_tls_install.add_argument('--ca', required=True, help='path to the CA certificate')
+    p_tls_install = p_tls_sub.add_parser(
+        'install',
+        help='Install a signed cert + CA cert into this host (from a bundle blob or files)',
+    )
+    p_tls_install.add_argument(
+        'bundle',
+        nargs='?',
+        help='path to a saved cert-bundle blob; omit to paste/pipe one on stdin',
+    )
+    p_tls_install.add_argument('--cert', help='(file mode) path to this peer signed certificate; use with --ca')
+    p_tls_install.add_argument('--ca', help='(file mode) path to the CA certificate; use with --cert')
     p_tls_install.set_defaults(func=_cmd_tls_install)
+
+    p_tls_enroll = p_tls_sub.add_parser(
+        'enroll',
+        help='One command: request + sign over SSH + install (needs SSH to the CA host)',
+    )
+    p_tls_enroll.add_argument('ca_host', metavar='CA-HOST', help='SSH destination of the CA host (e.g. user@hub)')
+    p_tls_enroll.add_argument(
+        '--san',
+        action='append',
+        default=[],
+        metavar='ADDR',
+        required=True,
+        help='address peers dial this host on (IP or hostname). Repeatable.',
+    )
+    p_tls_enroll.add_argument('--cn', default='', help='certificate common name (default: first --san)')
+    p_tls_enroll.add_argument(
+        '--days',
+        type=int,
+        default=tls_module.DEFAULT_CERT_DAYS,
+        help=f'certificate validity in days (default: {tls_module.DEFAULT_CERT_DAYS})',
+    )
+    p_tls_enroll.add_argument(
+        '--remote-mesh',
+        default='kioku-mesh',
+        help='kioku-mesh command name on the CA host (default: kioku-mesh)',
+    )
+    p_tls_enroll.add_argument(
+        '--ssh-port', type=int, default=0, help='SSH port for the CA host (default: ssh default)'
+    )
+    p_tls_enroll.add_argument(
+        '--ssh-opt',
+        action='append',
+        default=[],
+        metavar='OPT',
+        help="pass an -o option to ssh (repeatable), e.g. --ssh-opt 'StrictHostKeyChecking=accept-new'",
+    )
+    p_tls_enroll.add_argument('--timeout', type=int, default=60, help='SSH timeout in seconds (default: 60)')
+    p_tls_enroll.set_defaults(func=_cmd_tls_enroll)
 
     p_tls_info = p_tls_sub.add_parser('info', help='Show local CA / peer certificate details and expiry')
     p_tls_info.set_defaults(func=_cmd_tls_info)
