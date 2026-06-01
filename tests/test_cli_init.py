@@ -27,9 +27,16 @@ from mesh_mem.__main__ import main as cli_main
 
 @pytest.fixture
 def xdg_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect XDG_CONFIG_HOME so init writes into the test sandbox."""
+    """Redirect XDG_CONFIG_HOME so init writes into the test sandbox (zenohd.json5)."""
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     return tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5'
+
+
+@pytest.fixture
+def xdg_local_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect XDG_CONFIG_HOME so `init --mode local` writes config.yaml in the sandbox."""
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
+    return tmp_path / 'xdg' / 'kioku-mesh' / 'config.yaml'
 
 
 def test_default_init_path_honors_xdg(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -65,47 +72,59 @@ def test_normalize_endpoint_rejects_empty() -> None:
         _normalize_endpoint('   ')
 
 
-def test_init_localhost_default_writes_xdg_path(xdg_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_default_writes_local_config(xdg_local_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rc = cli_main(['init'])
     assert rc == 0
-    assert xdg_config.is_file()
-    body = xdg_config.read_text()
-    assert 'tcp/127.0.0.1:7447' in body
-    assert 'memory: {}' in body
-    assert 'replication' not in body
-    captured = capsys.readouterr()
-    assert str(xdg_config) in captured.out
-    assert 'zenohd -c' in captured.out
+    assert xdg_local_config.is_file()
+    assert 'backend: local' in xdg_local_config.read_text()
+    out = capsys.readouterr().out
+    assert str(xdg_local_config) in out
+    assert 'local backend ready' in out
 
 
-def test_init_refuses_overwrite_without_force(xdg_config: Path) -> None:
+def test_init_local_refuses_overwrite_without_force(xdg_local_config: Path) -> None:
     assert cli_main(['init']) == 0
     rc = cli_main(['init'])
     assert rc == 1
 
 
-def test_init_force_overwrites(xdg_config: Path) -> None:
-    assert cli_main(['init']) == 0
-    rc = cli_main(['init', '--force', '--listen', '127.0.0.1:7448'])
+def test_init_local_print_emits_to_stdout_and_skips_file(
+    xdg_local_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc = cli_main(['init', '--print'])
+    assert rc == 0
+    assert not xdg_local_config.exists()
+    assert 'backend: local' in capsys.readouterr().out
+
+
+def test_init_hub_refuses_overwrite_without_force(xdg_config: Path) -> None:
+    assert cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1']) == 0
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1'])
+    assert rc == 1
+
+
+def test_init_hub_force_overwrites(xdg_config: Path) -> None:
+    assert cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1']) == 0
+    rc = cli_main(['init', '--mode', 'hub', '--force', '--listen', '127.0.0.1:7448'])
     assert rc == 0
     assert 'tcp/127.0.0.1:7448' in xdg_config.read_text()
 
 
-def test_init_print_emits_to_stdout_and_skips_file(xdg_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc = cli_main(['init', '--print'])
+def test_init_hub_print_emits_to_stdout_and_skips_file(xdg_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--print'])
     assert rc == 0
     assert not xdg_config.exists()
     out = capsys.readouterr().out
     assert 'mode: "router"' in out
-    assert 'memory: {}' in out
+    assert 'rocksdb: {}' in out
 
 
-def test_init_out_override(tmp_path: Path) -> None:
+def test_init_hub_out_override(tmp_path: Path) -> None:
     target = tmp_path / 'sub' / 'custom.json5'
-    rc = cli_main(['init', '--out', str(target)])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(target)])
     assert rc == 0
     assert target.is_file()
-    assert 'memory: {}' in target.read_text()
+    assert 'rocksdb: {}' in target.read_text()
 
 
 def test_init_hub_mode_uses_rocksdb_and_replication(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -183,12 +202,14 @@ def test_init_spoke_with_connect(tmp_path: Path) -> None:
     assert 'rocksdb: {}' in body
 
 
-def test_init_localhost_rejects_connect(tmp_path: Path) -> None:
+def test_init_hub_rejects_connect(tmp_path: Path) -> None:
     rc = cli_main(
         [
             'init',
             '--mode',
-            'localhost',
+            'hub',
+            '--listen',
+            '127.0.0.1',
             '--connect',
             '1.2.3.4',
             '--out',
@@ -199,12 +220,11 @@ def test_init_localhost_rejects_connect(tmp_path: Path) -> None:
     assert not (tmp_path / 'should_not_exist.json5').exists()
 
 
-def test_init_localhost_prints_scale_up_hints(xdg_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_init_local_prints_scale_up_hint(xdg_local_config: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rc = cli_main(['init'])
     assert rc == 0
     out = capsys.readouterr().out
-    assert 'scale up:' in out
-    assert '--mode local --force' in out
+    assert 'scale up' in out
     assert '--mode hub --force' in out
 
 
@@ -297,10 +317,12 @@ def test_dedupe_endpoints_preserves_order_and_drops_repeats() -> None:
 
 
 def test_init_listen_duplicates_collapsed_in_output(tmp_path: Path) -> None:
-    target = tmp_path / 'localhost.json5'
+    target = tmp_path / 'hub.json5'
     rc = cli_main(
         [
             'init',
+            '--mode',
+            'hub',
             '--listen',
             '127.0.0.1',
             '--listen',
@@ -557,7 +579,7 @@ def test_init_install_systemd_writes_unit(
     xdg_config: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 0
     assert xdg_config.is_file()
     assert systemd_unit_under.is_file()
@@ -572,8 +594,8 @@ def test_init_install_systemd_refuses_overwrite_without_force(
     systemd_unit_under: Path,
     xdg_config: Path,
 ) -> None:
-    assert cli_main(['init', '--install-systemd']) == 0
-    rc = cli_main(['init', '--install-systemd'])
+    assert cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd']) == 0
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 1
 
 
@@ -582,8 +604,8 @@ def test_init_install_systemd_force_overwrites(
     systemd_unit_under: Path,
     xdg_config: Path,
 ) -> None:
-    assert cli_main(['init', '--install-systemd']) == 0
-    rc = cli_main(['init', '--install-systemd', '--force', '--listen', '127.0.0.1:7448'])
+    assert cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd']) == 0
+    rc = cli_main(['init', '--mode', 'hub', '--install-systemd', '--force', '--listen', '127.0.0.1:7448'])
     assert rc == 0
     assert 'tcp/127.0.0.1:7448' in xdg_config.read_text()
     # Unit body should reference the (unchanged) config path; --force makes the rewrite legal.
@@ -598,12 +620,12 @@ def test_init_install_systemd_reuses_existing_config_without_force(
 ) -> None:
     """--install-systemd against an existing config reuses it (no --force, no rewrite) and only adds the unit."""
     # A config the user already provisioned (custom port proves no rewrite).
-    assert cli_main(['init', '--mode', 'localhost', '--listen', '127.0.0.1:7459']) == 0
+    assert cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1:7459']) == 0
     before = xdg_config.read_text()
     assert '7459' in before
     capsys.readouterr()
 
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 0
     # Config left byte-for-byte unchanged (not regenerated to the default port).
     assert xdg_config.read_text() == before
@@ -620,7 +642,7 @@ def test_init_install_systemd_print_emits_both_bodies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    rc = cli_main(['init', '--install-systemd', '--print'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd', '--print'])
     assert rc == 0
     out = capsys.readouterr().out
     assert 'mode: "router"' in out  # zenohd config
@@ -649,7 +671,7 @@ def test_init_install_systemd_falls_back_when_zenohd_missing(
         'mesh_mem.__main__._default_systemctl_probe',
         lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
     )
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 0
     assert 'ExecStart="/usr/bin/zenohd"' in systemd_unit_under.read_text()
     err = capsys.readouterr().err
@@ -659,7 +681,7 @@ def test_init_install_systemd_falls_back_when_zenohd_missing(
 def test_init_install_systemd_rejects_macos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr('sys.platform', 'darwin')
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 2
     # Neither file should be written when the platform check trips.
     assert not (tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5').exists()
@@ -670,7 +692,7 @@ def test_init_install_systemd_rejects_missing_systemctl(monkeypatch: pytest.Monk
     monkeypatch.setattr('sys.platform', 'linux')
     monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda _name: None)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 2
     assert not (tmp_path / 'xdg' / 'kioku-mesh' / 'zenohd.json5').exists()
 
@@ -686,7 +708,7 @@ def test_init_install_systemd_rejects_unreachable_user_manager(
         lambda _argv: subprocess.CompletedProcess([], 1, stdout='', stderr='Failed to connect to user bus'),
     )
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 2
     err = capsys.readouterr().err
     assert 'systemctl --user show-environment failed' in err
@@ -707,7 +729,7 @@ def test_init_install_systemd_rejects_probe_timeout(
 
     monkeypatch.setattr('mesh_mem.__main__._default_systemctl_probe', _timeout)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    rc = cli_main(['init', '--install-systemd'])
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 2
     err = capsys.readouterr().err
     assert 'systemctl --user probe failed' in err
@@ -726,6 +748,10 @@ def test_init_install_systemd_unit_survives_whitespace_config_path(
     rc = cli_main(
         [
             'init',
+            '--mode',
+            'hub',
+            '--listen',
+            '127.0.0.1',
             '--install-systemd',
             '--out',
             str(config_path),

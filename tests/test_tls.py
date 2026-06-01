@@ -501,8 +501,8 @@ def test_cli_init_tls_without_certs_errors(xdg: Path, capsys: pytest.CaptureFixt
     assert 'certificates that are not present' in capsys.readouterr().err
 
 
-def test_cli_init_tls_rejects_localhost(xdg: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    rc = cli_main(['init', '--mode', 'localhost', '--tls', '--print'])
+def test_cli_init_tls_rejects_local(xdg: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = cli_main(['init', '--mode', 'local', '--tls', '--print'])
     assert rc == 2
     assert 'hub / spoke' in capsys.readouterr().err
 
