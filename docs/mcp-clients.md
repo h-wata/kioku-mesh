@@ -7,20 +7,45 @@
 >   client (Claude Code, Codex CLI, Claude Desktop…); you do not type this command directly.
 >   Running it from a terminal will print a usage message and exit.
 
-Register the installed `kioku-mesh-mcp` console script. Use the **absolute path** to the installed binary — typically `~/.local/bin/kioku-mesh-mcp` when installed via `uv tool install`, or `~/.venv/mesh-mem/bin/kioku-mesh-mcp` for a manual venv. The PATH-dependent form breaks when agents are launched from a desktop shortcut with a different environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only `MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
+For supported clients, prefer the wrapper:
+
+```bash
+kioku-mesh mcp install --client claude-code
+kioku-mesh mcp install --client codex-cli
+```
+
+It resolves the installed `kioku-mesh-mcp` binary, writes the client-specific
+registration, and sets the default identity env for that client. Use
+`--env KEY=VALUE` for overrides, `--force` to replace an existing registration,
+and `--dry-run` to inspect the generated command/config first.
+
+For unsupported clients or hand-written config, register the installed
+`kioku-mesh-mcp` console script with an **absolute path**. Typical paths are
+`~/.local/bin/kioku-mesh-mcp` for `uv tool install` or
+`~/.venv/kioku-mesh/bin/kioku-mesh-mcp` for a manual venv. PATH-dependent forms
+break when agents are launched from a desktop shortcut with a different
+environment. Each agent carries its own `MESH_MEM_CLIENT_ID`; only
+`MESH_MEM_AGENT_FAMILY` is shared across siblings of the same family.
 
 ## Claude Code
 
-Use `claude mcp add` — it writes to `~/.claude.json`, which is the only location the CLI actually reads. Entries placed under `mcpServers` in `~/.claude/settings.json` are silently ignored by `claude mcp list`, so do not hand-edit that file for MCP registration.
+Use the wrapper first:
 
 ```bash
-claude mcp add mesh_mem -s user \
+kioku-mesh mcp install --client claude-code
+claude mcp list   # expect: kioku_mesh: ... - ✓ Connected
+```
+
+Manual equivalent, when you need to inspect or customize the raw command:
+
+```bash
+claude mcp add kioku_mesh -s user \
   -e ZENOH_CONNECT=tcp/127.0.0.1:7447 \
   -e MESH_MEM_AGENT_FAMILY=claude \
   -e MESH_MEM_CLIENT_ID=claude-code \
-  -- /home/USER/.local/bin/kioku-mesh-mcp     # uv tool install path (or /home/USER/.venv/mesh-mem/bin/kioku-mesh-mcp for a manual venv)
+  -- /home/USER/.local/bin/kioku-mesh-mcp     # uv tool install path (or /home/USER/.venv/kioku-mesh/bin/kioku-mesh-mcp for a manual venv)
 
-claude mcp list   # expect: mesh_mem: ... - ✓ Connected
+claude mcp list   # expect: kioku_mesh: ... - ✓ Connected
 ```
 
 ### Non-interactive smoke from `claude -p`
@@ -66,7 +91,16 @@ Claude Desktop does read `mcpServers` from its own config file:
 
 ## Codex CLI / ChatGPT Desktop
 
-Follow the same pattern with `codex` / `chatgpt` family and the matching `*-cli` / `*-desktop` client id. The `observation_id` space is shared; mis-tagging the client id just makes `search_memory --client-id` filters useless — it does not corrupt storage.
+For Codex CLI, prefer:
+
+```bash
+kioku-mesh mcp install --client codex-cli
+```
+
+For ChatGPT Desktop or other clients, follow the same manual config pattern with
+`chatgpt` or another family and the matching `*-desktop` / `*-cli` client id. The
+`observation_id` space is shared; mis-tagging the client id just makes
+`search_memory --client-id` filters useless — it does not corrupt storage.
 
 ## Optional: session id pinning
 
@@ -84,7 +118,7 @@ under `~/.claude/hooks/`:
 
 ```bash
 install -d ~/.claude/hooks
-cp /ABSOLUTE/PATH/TO/mesh-mem/scripts/hooks/session-start.sh \
+cp /ABSOLUTE/PATH/TO/kioku-mesh/scripts/hooks/session-start.sh \
   ~/.claude/hooks/session-start-kioku-mesh.sh
 chmod +x ~/.claude/hooks/session-start-kioku-mesh.sh
 ```

@@ -41,69 +41,71 @@ office peer via a home hub without any direct link between them.
 
 ## Per-peer config
 
+Prefer the `kioku-mesh init` wrapper. It renders the matching Zenoh/RocksDB
+replication block, keeps the local loopback endpoint for same-host CLI/MCP
+clients, and can install a user-scope systemd unit for the generated config.
+
 ### Hub (peer1)
 
-The hub listens on all spoke-reachable IPs and does not dial anyone.
-Reuse `config/zenohd_home.json5` as the starting point (it is the 2-peer
-case of this same pattern):
+The hub listens on every address a spoke may dial and does not connect outward:
 
 ```bash
-cp config/zenohd_home.json5 config/zenohd_peer1.json5
-sed -i \
-  -e 's|tcp/192.168.3.x:7447|tcp/192.168.1.10:7447|' \
-  config/zenohd_peer1.json5
-# Add additional listen lines for any other interface the spokes use
-# (e.g. Tailscale 100.x.x.x, VPN gateway, etc.). Empty connect.endpoints:
-sed -i 's|"tcp/192.168.3.y:7447"||' config/zenohd_peer1.json5
+kioku-mesh init --mode hub \
+  --listen 127.0.0.1 \
+  --listen 192.168.1.10 \
+  --out ~/.config/kioku-mesh/zenohd_peer1_local.json5 \
+  --force
 ```
 
-Or write the hub config directly with `connect.endpoints: []` and a
-`listen.endpoints` array that aggregates every IP a spoke might dial.
+Add more `--listen` values for Tailscale, VPN, or other reachable addresses.
+`init --mode hub` keeps `connect.endpoints: []`.
 
 ### Spokes (peer2..peer5)
 
-Each spoke uses the template and substitutes only its own `{SELF_IP}` and
-the hub's `{HUB_IP}`. Spokes never list each other.
+Each spoke listens locally and dials only the hub. Spokes never list each other.
 
 ```bash
 # peer2 (laptop)
-cp config/zenohd_peer.json5.template config/zenohd_peer2.json5
-sed -i \
-  -e 's/{SELF_IP}/192.168.1.11/' \
-  -e 's/{HUB_IP}/192.168.1.10/' \
-  config/zenohd_peer2.json5
+kioku-mesh init --mode spoke \
+  --listen 127.0.0.1 \
+  --listen 192.168.1.11 \
+  --connect 192.168.1.10 \
+  --out ~/.config/kioku-mesh/zenohd_peer2_local.json5 \
+  --force
 
 # peer3 (agent server)
-cp config/zenohd_peer.json5.template config/zenohd_peer3.json5
-sed -i \
-  -e 's/{SELF_IP}/192.168.1.12/' \
-  -e 's/{HUB_IP}/192.168.1.10/' \
-  config/zenohd_peer3.json5
+kioku-mesh init --mode spoke \
+  --listen 127.0.0.1 \
+  --listen 192.168.1.12 \
+  --connect 192.168.1.10 \
+  --out ~/.config/kioku-mesh/zenohd_peer3_local.json5 \
+  --force
 
 # repeat for peer4 (192.168.1.13) and peer5 (10.0.0.14)
 ```
 
 > Place the resolved per-host config in an untracked path (e.g.
-> `~/.config/mesh-mem/zenohd_peerN_local.json5`) so real IPs never end up
-> in git. The committed `config/zenohd_*.json5` files are placeholder
-> templates by convention.
+> `~/.config/kioku-mesh/zenohd_peerN_local.json5`) so real IPs never end up in
+> git. The committed `config/zenohd_*.json5` files are placeholder templates by
+> convention and still work as low-level examples when you need to hand-edit.
 
 ## Boot order
 
 Order does not matter, but starting the hub first speeds up convergence.
 Each spoke retries its `connect` to peer1 until it answers, so spokes can
 come up independently. Cold-start convergence on a 5-peer mesh typically
-completes within 30–60 s once every peer is up; large `mem/**` deltas
+completes within 30-60 s once every peer is up; large `mem/**` deltas
 extend it (each peer pulls only the observations it is missing).
 
 ```bash
-export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"
-mkdir -p "$ZENOH_BACKEND_ROCKSDB_ROOT"
-zenohd -c ~/.config/mesh-mem/zenohd_peerN_local.json5
+zenohd -c ~/.config/kioku-mesh/zenohd_peerN_local.json5
 ```
 
-Wrap this in a systemd user unit (see README §systemd unit) on hosts that
-should auto-start on login.
+For hosts that should auto-start on login, generate the default config with
+`kioku-mesh init --mode <hub|spoke> ... --install-systemd`, or copy the generated
+unit pattern and point `ExecStart` at the per-peer config path above. The wrapper
+also keeps `ZENOH_BACKEND_ROCKSDB_ROOT` aligned with the current state directory
+name (`kioku-mesh`, or legacy `mesh-mem` only on partially migrated hosts).
 
 ## Firewall
 
