@@ -31,6 +31,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import json
+import math
 import sys
 
 # Opportunity ``kind`` -> the ``memory_type`` a faithful save would carry. Used
@@ -250,11 +251,18 @@ def _read_lines(path: str) -> list[str]:
 
 
 def _positive_seconds(value: str) -> float:
-    """Argparse type: float strictly greater than 0."""
+    """Argparse type: finite float strictly greater than 0.
+
+    Reject inf / NaN explicitly so a caller passing ``--window-seconds inf``
+    fails with a clean argparse error instead of an OverflowError much later
+    when the value is fed into ``timedelta``.
+    """
     try:
         seconds = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f'must be a number, got {value!r}') from exc
+    if not math.isfinite(seconds):
+        raise argparse.ArgumentTypeError(f'must be finite, got {seconds}')
     if not seconds > 0:
         raise argparse.ArgumentTypeError(f'must be > 0, got {seconds}')
     return seconds

@@ -137,7 +137,7 @@ def test_main_min_coverage_gate(capsys: pytest.CaptureFixture[str]) -> None:
     assert save_coverage.main([str(_EXAMPLE), '--min-coverage', '0.5']) == 0
 
 
-@pytest.mark.parametrize('bad', ['0', '-1', '-0.5', 'abc'])
+@pytest.mark.parametrize('bad', ['0', '-1', '-0.5', 'abc', 'inf', '-inf', 'nan', '1e309'])
 def test_main_rejects_invalid_window_seconds(bad: str, capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:
         save_coverage.main([str(_EXAMPLE), '--window-seconds', bad])
