@@ -4,8 +4,8 @@
 
 ## Issue #33 — Office host CLI upgrade v0.1.0 → v0.2.3 (2026-05-09)
 
-- 対象: Office host (192.168.128.12) `/home/gisen/.venv/mesh-mem`
-- 手順: `pip install -e /home/gisen/work/mesh-mem`（main = v0.2.3）
+- 対象: Office host (`203.0.113.12`, redacted) `/home/USER/.venv/mesh-mem`
+- 手順: `pip install -e /home/USER/work/mesh-mem`（main = v0.2.3）
 - 検証:
   - `mesh-mem --version` → `mesh-mem 0.2.3`（v0.2.1+ 充足）
   - `mesh-mem get-memory <id>` → 既存共有 obs (`e4a3204c…`) を完全取得 OK
