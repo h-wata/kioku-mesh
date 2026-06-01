@@ -41,7 +41,8 @@ readable by Claude Code, Codex CLI, Gemini CLI, and any other MCP client.
 ## Quickstart
 
 ```bash
-pip install kioku-mesh
+uv tool install kioku-mesh
+# or: pip install kioku-mesh
 
 kioku-mesh init --mode local
 kioku-mesh save "Chose Postgres over SQLite for analytics"
