@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/h-wata/kioku-mesh/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories — NOT in public issues.
+  - name: Quick-start and docs
+    url: https://github.com/h-wata/kioku-mesh#quick-start
+    about: For "how do I..." questions, check the README first. It covers `init`, `mcp install`, and the hub/spoke walkthrough.
