@@ -20,7 +20,13 @@ identity 環境変数、CLI コマンド、MCP 登録の作法は同じで、違
 
 - python.org から Python 3.10+ をインストール。**Add to PATH** にチェックを
   入れること。per-user インストーラなら管理者権限は不要。
-- kioku-mesh は **まだ PyPI 公開していません**。checkout からインストールします。
+- PyPI から通常インストール:
+
+  ```powershell
+  python -m pip install kioku-mesh
+  ```
+
+  チェックアウトから開発インストールしたい場合:
 
   ```powershell
   git clone https://github.com/h-wata/kioku-mesh.git
@@ -28,9 +34,6 @@ identity 環境変数、CLI コマンド、MCP 登録の作法は同じで、違
   python -m venv $env:USERPROFILE\.venv\kioku-mesh
   & "$env:USERPROFILE\.venv\kioku-mesh\Scripts\python.exe" -m pip install -e .
   ```
-
-  （`pip install kioku-mesh` は現状ヒットしません。v1.0 リリース時に PyPI に
-  載せる予定です。）
 
 ## 2. zenohd のインストール
 
