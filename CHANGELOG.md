@@ -10,6 +10,10 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **`scripts/save_coverage.py`: objective metric for proactive-save adherence (#105).** A standalone, transport-agnostic tool that turns a JSONL trace of `opportunity` (a moment that should have been saved — bug fix, decision, discovery) and `save` (an actual `save_observation` call) events into a single number: `coverage = saved opportunities / total opportunities`. Greedy 1:1 matching within a configurable window (`--window-seconds`, default 1800s), with `--require-type-match` to gate on `kind`/`memory_type` agreement, `--json` output, and `--min-coverage` for CI gating (exits non-zero when the trace falls below the bar). Lives under `scripts/` (not the `mesh_mem` package) because it's analysis tooling, not part of the MCP server. Trace-collection paths (hook scripts, log scrapers) are intentionally out of scope here and tracked separately. See `docs/design/issue-105-proactive-save-opportunity-coverage.md`.
+
 ## [0.4.0] - 2026-06-01
 
 ### Added
