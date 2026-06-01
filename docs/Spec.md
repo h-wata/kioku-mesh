@@ -228,7 +228,7 @@ Backend mode の解決順序:
 2. `~/.config/kioku-mesh/config.yaml` の `backend:`。legacy の `~/.config/mesh-mem/config.yaml` だけが存在する場合は互換 fallback する。
 3. 既定値 `zenoh`。
 
-`kioku-mesh init --mode local` は `config.yaml` に `backend: local` を書き、zenohd なしで即座に `save` / `search` できる状態にします。`localhost` / `hub` / `spoke` は `~/.config/kioku-mesh/zenohd.json5` を生成する Zenoh 用モードです。
+`kioku-mesh init --mode local` (default) は `config.yaml` に `backend: local` を書き、zenohd なしで即座に `save` / `search` できる状態にします。`hub` / `spoke` は `~/.config/kioku-mesh/zenohd.json5` を生成する Zenoh 用モードです。短命な Zenoh スモークテスト用途は `kioku-mesh mesh start` を使います。
 
 ## 10. CLI 仕様
 
@@ -263,7 +263,7 @@ Backend mode の解決順序:
 - `gc`
   - `--retention-days`, `--project`, `--force-id`, `--by-pc-id`, `--session-prefix`, `--execute`, `--yes`, `--no-shadow-prune`
 - `init`
-  - `--mode {localhost,hub,spoke,local}`, `--listen`, `--connect`, `--out`, `--tls`, `--force`, `--print`, `--install-systemd`
+  - `--mode {local,hub,spoke}`, `--listen`, `--connect`, `--out`, `--tls`, `--force`, `--print`, `--install-systemd`
 - `doctor`
   - `--json`
 - `mcp install`

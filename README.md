@@ -65,12 +65,13 @@ The package installs two commands:
 | Mode | Use it when | Persistence | Extra service |
 |---|---|---|---|
 | `local` | You want memory on one machine | SQLite | none |
-| `localhost` | You want to smoke-test Zenoh locally | in-memory | `zenohd` |
 | `hub` | This machine is the always-on mesh hub | RocksDB | `zenohd` |
 | `spoke` | This machine connects to a hub | RocksDB | `zenohd` |
 
-`local` is the easiest starting point. Re-run `kioku-mesh init --mode <mode>
---force` when you want to switch.
+`local` is the default and the easiest starting point. Re-run
+`kioku-mesh init --mode <mode> --force` when you want to switch. For a
+short-lived Zenoh smoke test without provisioning anything, use
+`kioku-mesh mesh start`.
 
 In mesh mode the Zenoh/RocksDB store is the source of truth, and each host's
 SQLite is a fast local read cache rebuilt from it — not a separate copy you have
