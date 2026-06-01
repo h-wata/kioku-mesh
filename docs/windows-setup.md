@@ -21,7 +21,13 @@ the Windows equivalent is `C:\Users\<user>\.venv\kioku-mesh\Scripts\<binary>.exe
 
 - Install Python 3.10+ from python.org with **Add to PATH** checked. No
   admin rights are needed for the per-user installer.
-- kioku-mesh is **not published on PyPI yet**. Install from a checkout:
+- Install from PyPI for normal use:
+
+  ```powershell
+  python -m pip install kioku-mesh
+  ```
+
+  For development from a checkout:
 
   ```powershell
   git clone https://github.com/h-wata/kioku-mesh.git
@@ -29,9 +35,6 @@ the Windows equivalent is `C:\Users\<user>\.venv\kioku-mesh\Scripts\<binary>.exe
   python -m venv $env:USERPROFILE\.venv\kioku-mesh
   & "$env:USERPROFILE\.venv\kioku-mesh\Scripts\python.exe" -m pip install -e .
   ```
-
-  (`pip install kioku-mesh` resolves to nothing today — the package will
-  appear on PyPI as part of the v1.0 release.)
 
 ## 2. Install zenohd
 
@@ -58,10 +61,11 @@ Choose an install location — admin status drives the choice:
 
 ## 3. Per-peer config
 
-- Copy `config\zenohd_peer.json5.template` and replace `{SELF_IP}` /
-  `{PEER_N_IP}` with real IPs. The walkthrough at
-  [config/peers/example_5peer.md](../config/peers/example_5peer.md) applies
-  unchanged; only the path style differs.
+- Prefer `kioku-mesh init --mode hub|spoke` to generate the Zenoh config instead
+  of editing JSON5 by hand. The walkthrough at
+  [config/peers/example_5peer.md](../config/peers/example_5peer.md) applies with
+  Windows path syntax. Use `--print` if you want to inspect the generated JSON5
+  before writing it.
 - Use forward slashes inside JSON5 string values for the rocksdb dir to
   avoid escaping headaches:
 

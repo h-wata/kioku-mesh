@@ -1,4 +1,4 @@
-// zenoh-mem: N-peer mesh router config template (hub-spoke pattern)
+// kioku-mesh: N-peer mesh router config template (hub-spoke pattern)
 //
 // Copy this file once per peer and replace the placeholders below. The
 // zenohd_home.json5 / zenohd_office.json5 configs are the 2-peer instance of
@@ -27,12 +27,12 @@
 //     host (mirrored networking), so 127.0.0.1:7447 may already be bound;
 //     drop the loopback line and pick a non-conflicting port (e.g. 7448) for
 //     the LAN listen instead. When you do this, **also point local clients
-//     at the new endpoint** — `mesh-mem` and the MCP server read
+//     at the new endpoint** — `kioku-mesh` and the MCP server read
 //     `ZENOH_CONNECT` (default `tcp/127.0.0.1:7447`), so:
 //       - For shell use, export `ZENOH_CONNECT=tcp/<SELF_IP>:7448` in the
 //         shell or your shell rc.
 //       - For Claude Code MCP, pass it on registration:
-//           `claude mcp add mesh_mem ... -e ZENOH_CONNECT=tcp/<SELF_IP>:7448 ...`
+//           `kioku-mesh mcp install --client claude-code --env ZENOH_CONNECT=tcp/<SELF_IP>:7448 --force`
 //     See `docs/poc-reports/topology-2026-05-10.md` §A for the empirical
 //     context.
 //   - When THIS peer is itself the hub, replace `connect.endpoints` with [] —
@@ -40,7 +40,7 @@
 //   - storage / replication blocks must match across all peers byte-for-byte:
 //     mismatched `interval` / `sub_intervals` / `hot` / `warm` will silently
 //     prevent digest convergence.
-//   - Set `ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/mesh-mem"` before
+//   - Set `ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/kioku-mesh"` before
 //     starting zenohd, and ensure the parent directory exists.
 //   - Open TCP/7447 (or your chosen port) from every spoke to the hub. The
 //     reverse direction is not required (Zenoh sessions are bidirectional

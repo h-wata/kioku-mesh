@@ -1,4 +1,4 @@
-// zenoh-mem: single-host (localhost-only) zenohd 設定
+// kioku-mesh: single-host (localhost-only) zenohd 設定
 //
 // Use this config when you want to exercise the MCP server and CLI on a
 // single development host, without a real LAN peer. Differences vs the

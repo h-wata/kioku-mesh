@@ -101,6 +101,7 @@ Useful environment variables:
 | `MESH_MEM_CLIENT_ID` | Client name, such as `claude-code` |
 | `MESH_MEM_SESSION_ID` | Optional stable session id |
 | `MESH_MEM_STATE_DIR` | State directory; defaults under the user data dir |
+| `MESH_MEM_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml` |
 | `MESH_MEM_FORCE_REBUILD=1` | Rebuild the local index at CLI startup |
 | `MESH_MEM_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
 
@@ -182,6 +183,10 @@ target is Zenoh 1.9.0.
 ```bash
 zenohd -c ~/.config/kioku-mesh/zenohd.json5
 ```
+
+For login auto-start on Linux systemd hosts, add `--install-systemd` to
+`kioku-mesh init --mode <hub|spoke> ...`; the wrapper writes a user unit pointing
+at the generated config.
 
 kioku-mesh is designed to run inside a closed, trusted network. Keep port
 `7447/tcp` reachable only between trusted peers. Do not expose it to the

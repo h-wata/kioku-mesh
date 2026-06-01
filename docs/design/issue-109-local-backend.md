@@ -1,5 +1,8 @@
 # Local Backend Design — Issue #109
 
+> Historical design note: command/package/path names in the original sketch may use `mesh-mem`. The implemented current behavior is documented in [docs/Spec.md](../Spec.md): `kioku-mesh init --mode local` writes `~/.config/kioku-mesh/config.yaml` (with legacy `mesh-mem` fallback) and stores local-only data under `state_dir()/local/index.db`.
+
+
 ## 背景
 
 `mesh-mem init --mode local` で zenohd 不要な single-machine mode を提供する。

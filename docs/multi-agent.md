@@ -40,7 +40,7 @@ claude
 # Autonomous agent (e.g. cron / systemd timer)
 export MESH_MEM_AGENT_FAMILY=auto-agent
 export MESH_MEM_CLIENT_ID=nightly-cleanup
-~/.venv/mesh-mem/bin/kioku-mesh gc --retention-days 30
+~/.venv/kioku-mesh/bin/kioku-mesh gc --retention-days 30
 ```
 
 ## Naming conventions (recommended)
@@ -79,8 +79,11 @@ kioku-mesh search "" --client-id nightly-cleanup --limit 100
 
 Agents started via an MCP harness (Claude Code, Claude Desktop, Codex,
 Gemini) cannot read shell exports — they inherit only what the harness
-passes. Set `MESH_MEM_CLIENT_ID` (and `MESH_MEM_AGENT_FAMILY` when it
-differs from the family default) in the MCP server entry's `env` block. See
+passes. For Claude Code and Codex CLI, `kioku-mesh mcp install --client <client>`
+writes sensible defaults; add `--env KEY=VALUE` when you need a custom
+identity. For other MCP clients, set `MESH_MEM_CLIENT_ID` (and
+`MESH_MEM_AGENT_FAMILY` when it differs from the family default) in the MCP
+server entry's `env` block. See
 [ADR-0004](adr/0004-identity-env-and-persistent-file.md) for why MCP tool
 arguments do not expose identity.
 
@@ -88,8 +91,8 @@ arguments do not expose identity.
 // ~/.claude.json or claude_desktop_config.json
 {
   "mcpServers": {
-    "mesh_mem": {
-      "command": "/home/USER/.venv/mesh-mem/bin/kioku-mesh-mcp",
+    "kioku_mesh": {
+      "command": "/home/USER/.venv/kioku-mesh/bin/kioku-mesh-mcp",
       "env": {
         "ZENOH_CONNECT": "tcp/127.0.0.1:7447",
         "MESH_MEM_AGENT_FAMILY": "claude-code",
