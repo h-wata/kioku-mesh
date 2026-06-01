@@ -141,7 +141,7 @@ Tombstone 済み Observation も、物理削除や監査用途のため単一取
 
 ## 6. ローカル SQLite インデックス
 
-Zenoh backend の SQLite index は `MESH_MEM_INDEX_DB` があればそのパス、なければ `state_dir()/index.db` に作られます。`MESH_MEM_INDEX_DB=:memory:` も指定できます。Local backend は Zenoh sidecar と物理的に分離した `state_dir()/local/index.db` を使います。
+Zenoh backend の SQLite index は `MESH_MEM_INDEX_DB` があればそのパス、なければ `state_dir()/index.db` に作られます。`MESH_MEM_INDEX_DB=:memory:` も指定できます。Local backend は Zenoh sidecar と物理的に分離した `state_dir()/local/index.db` を使い、`MESH_MEM_INDEX_DB` の影響を受けません。
 
 テーブルは `obs_index` で、主な列は以下です。
 

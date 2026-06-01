@@ -101,7 +101,7 @@ Useful environment variables:
 | `MESH_MEM_CLIENT_ID` | Client name, such as `claude-code` |
 | `MESH_MEM_SESSION_ID` | Optional stable session id |
 | `MESH_MEM_STATE_DIR` | State directory; defaults under the user data dir |
-| `MESH_MEM_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml` |
+| `MESH_MEM_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml`; set `local` or `zenoh` |
 | `MESH_MEM_FORCE_REBUILD=1` | Rebuild the local index at CLI startup |
 | `MESH_MEM_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
 
