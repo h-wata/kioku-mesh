@@ -63,7 +63,7 @@ kioku-mesh-mcp = "mesh_mem.mcp_server:main"
 packages = ["src/mesh_mem"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/mesh_mem", "tests", "config", "docs", "plan.md", "README.md"]
+include = ["src/mesh_mem", "tests", "config", "docs", "README.md"]
 
 # Style: 親の ~/work/.github/pyproject.toml をベースに、本プロジェクトで CPY (copyright) を除外。
 # 他は google style / 119 桁 / single quotes / LF で揃える。
