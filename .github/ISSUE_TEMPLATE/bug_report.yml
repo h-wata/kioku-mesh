@@ -1,0 +1,119 @@
+name: Bug report
+description: Report a reproducible problem with kioku-mesh.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug! Please fill in the boxes below — the more
+        we can reproduce it locally, the faster we can fix it.
+
+        Security-sensitive issues should NOT be filed here. Use the private channel in
+        [SECURITY.md](https://github.com/h-wata/kioku-mesh/blob/main/SECURITY.md) instead.
+
+  - type: checkboxes
+    id: prechecks
+    attributes:
+      label: Pre-checks
+      options:
+        - label: I searched [existing issues](https://github.com/h-wata/kioku-mesh/issues?q=is%3Aissue) and did not find a duplicate.
+          required: true
+        - label: I am running the latest released version (`uv tool install --upgrade kioku-mesh` or `pip install --upgrade kioku-mesh`).
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: kioku-mesh version
+      description: Output of `kioku-mesh --version`.
+      placeholder: "kioku-mesh 0.4.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Install method
+      options:
+        - uv tool install
+        - pip install (system / user)
+        - pip install -e . (editable, from source)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux (Ubuntu / Debian)
+        - Linux (Fedora / RHEL / CentOS)
+        - Linux (Arch / Manjaro)
+        - Linux (other distro)
+        - WSL2 (on Windows)
+        - macOS
+        - Windows (native, not WSL2)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode in use
+      description: From `kioku-mesh init --mode <...>`, or the equivalent.
+      options:
+        - local (SQLite only, no zenohd)
+        - hub (zenohd + RocksDB, accepts spokes)
+        - spoke (zenohd + RocksDB, dials a hub)
+        - mesh start / mesh join (ephemeral router)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: |
+        The exact commands you ran, in order. If the issue only shows up over MCP,
+        include which MCP client and how it was registered.
+      placeholder: |
+        1. kioku-mesh init --mode hub --listen 192.168.1.10
+        2. zenohd -c ~/.config/kioku-mesh/zenohd.json5
+        3. kioku-mesh save "..."
+        4. On the other host: kioku-mesh search "..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead. Include error messages verbatim.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: |
+        Any relevant stderr / log lines. Output of `kioku-mesh doctor --json`
+        is especially useful when networking or zenohd seems involved.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Topology diagrams, MCP client logs, links to related issues, etc.
