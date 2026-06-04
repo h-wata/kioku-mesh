@@ -36,7 +36,15 @@ PROACTIVE SAVE — call ``save_observation`` IMMEDIATELY after ANY of these:
 - Pattern established (naming, structure, approach; memory_type="pattern")
 - Config change with rationale (memory_type="config")
 - Feature implemented with non-obvious approach
-- User confirms a recommendation, expresses a preference, or rejects an approach
+- User performs the semantic act of approval / authorization / preference /
+  rejection — regardless of phrasing or language. The trigger is the act, not
+  specific words. Examples across languages (illustrative, NOT exhaustive):
+    EN: "ok", "sounds good", "go ahead", "ship it", "let's do that",
+        "no, do X instead", "approved"
+    JA: "OK", "お願い", "採用", "公開して", "進めて", "そうじゃなくて〜"
+    ZH: "好的", "可以", "同意", "上线吧", "不要…，改成…"
+    KO: "좋아요", "진행해주세요", "동의합니다", "그건 빼고…"
+  If the user just made a durable choice in any natural language, save it.
 - Session concludes with a clear direction chosen (memory_type="summary")
 
 SKIP saving when the entry would mostly duplicate another source of truth:
@@ -44,6 +52,18 @@ SKIP saving when the entry would mostly duplicate another source of truth:
 - Restatement of content already captured in a PR description, Issue body, ADR, CHANGELOG, or commit message
 - Per-step implementation progress inside one conversation; use plan / todo tracking instead
 - Generic status like "tests pass" or "build is green" without a non-obvious cause or decision
+
+SKIP exception — save the WHY even when the conclusion lives in a SoR:
+A PR / ADR / commit captures the *decision*, but rarely its *rationale*. When
+the discussion produced any of the following, save them as a separate entry
+(memory_type="decision" or "pattern") even though the conclusion is recorded
+elsewhere:
+- Alternatives that were considered and rejected, and why
+- Background constraints (incident history, deadline, stakeholder ask) that
+  shaped the choice
+- User's strong preference or aesthetic judgement on otherwise-equivalent
+  options
+These cannot be reconstructed from the SoR later, so they are NOT duplicates.
 
 Self-check after every task: "Did the user or I just make a decision, confirm a
 recommendation, fix a bug, learn something, or establish a convention? If yes →

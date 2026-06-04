@@ -88,6 +88,18 @@ def test_server_advertises_proactive_instructions(single_zenohd: Any) -> None:  
     assert 'SKIP saving when the entry would mostly duplicate another source of truth' in instructions
     assert 'PR / Issue lifecycle ticks' in instructions
     assert 'Prefer decision / bug / pattern / config over summary' in instructions
+    # Issue #158: approval triggers must be framed as a language-agnostic
+    # semantic act, anchored by multilingual examples so non-English users
+    # are not silently dropped.
+    assert 'semantic act of approval' in instructions
+    assert 'regardless of phrasing or language' in instructions
+    for lang_tag in ('EN:', 'JA:', 'ZH:', 'KO:'):
+        assert lang_tag in instructions, f'missing multilingual anchor: {lang_tag}'
+    # Issue #158: SoR SKIP rule must explicitly carve out the rationale
+    # (alternatives / constraints / preferences) so the why is not lost.
+    assert 'SKIP exception' in instructions
+    assert 'save the WHY' in instructions
+    assert 'Alternatives that were considered and rejected' in instructions
 
 
 def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa: ARG001
