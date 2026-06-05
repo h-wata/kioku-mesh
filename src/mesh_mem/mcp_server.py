@@ -7,7 +7,10 @@ space by guessing values. Narrow-down is allowed on ``search_memory``.
 """
 
 from contextlib import closing
+from datetime import datetime
+from datetime import timezone
 import os
+import re
 import socket
 import sys
 
@@ -22,6 +25,7 @@ from .identity import get_session_id
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import MAX_SEARCH
+from .store import search_observations
 from .store import start_pending_drain_background
 from .store import stop_pending_drain_background
 
@@ -309,17 +313,94 @@ def delete_memory(observation_id: str, reason: str = '') -> str:
     return f'deleted (tombstone): {observation_id}'
 
 
+_SESSION_ID_TS_RE = re.compile(r'^(\d{8}T\d{6}Z)')
+
+# Issue #158 Phase 2: thresholds for the "consider saving" nudge. Tuned so a
+# truly idle / read-only session does not get spammed: only nudge after the
+# session has been alive for a while and has accumulated zero saves, or after
+# a long quiet stretch since the last save.
+_NUDGE_SESSION_AGE_S_NO_SAVES = 600  # 10 min
+_NUDGE_LAST_SAVE_AGE_S = 1200  # 20 min
+
+
+def _parse_iso(ts: str) -> datetime | None:
+    """Parse an ISO8601 ``created_at`` value. Returns ``None`` if unparsable."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+
+
+def _parse_session_started_at(session_id: str) -> datetime | None:
+    """Recover the session start time from the ``YYYYMMDDTHHMMSSZ-...`` prefix.
+
+    Sessions created from a custom ``MESH_MEM_SESSION_ID`` may not carry a
+    parseable prefix; callers must tolerate ``None``.
+    """
+    m = _SESSION_ID_TS_RE.match(session_id)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), '%Y%m%dT%H%M%SZ').replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _format_age(seconds: float | None) -> str:
+    """Render a coarse "Xm Ys" / "Xs" age string. Returns ``'-'`` for ``None``."""
+    if seconds is None:
+        return '-'
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f'{seconds}s'
+    minutes, rem = divmod(seconds, 60)
+    if minutes < 60:
+        return f'{minutes}m{rem:02d}s'
+    hours, rem_m = divmod(minutes, 60)
+    return f'{hours}h{rem_m:02d}m'
+
+
+def _compute_save_nudge(
+    this_session_saves: int,
+    last_save_age_s: float | None,
+    session_age_s: float | None,
+) -> str | None:
+    """Decide whether to emit a "consider saving" nudge for the current session.
+
+    Heuristic only; never used to auto-save. See Issue #158.
+    """
+    if this_session_saves == 0:
+        if session_age_s is not None and session_age_s >= _NUDGE_SESSION_AGE_S_NO_SAVES:
+            return (
+                'No save_observation calls in this session yet — if any decision, '
+                'preference, bug root cause, or pattern has been settled, save it now. '
+                'Ignore if the session is truly read-only / idle.'
+            )
+        return None
+    if last_save_age_s is not None and last_save_age_s >= _NUDGE_LAST_SAVE_AGE_S:
+        return (
+            f'Last save was {_format_age(last_save_age_s)} ago in this session — '
+            'review whether any newer decision or finding is still unsaved.'
+        )
+    return None
+
+
 @mcp.tool()
 def get_memory_status() -> str:
     """Summarize the server's view of the mesh memory for troubleshooting.
 
-    Check ``last_save_at`` in the output — if it is absent or distant, you may
-    have skipped ``save_observation`` during a long session. Call it PROACTIVELY
+    Check ``last_save_at`` and the ``this_session_*`` block in the output —
+    if ``this_session_saves`` is 0 in a long-running session, or ``nudge`` is
+    present, you have likely skipped ``save_observation``. Call it PROACTIVELY
     now if there are unsaved decisions or discoveries.
 
     Counts are computed from up to ``MAX_SEARCH`` most-recent entries.
-    Exception messages preserve the type name so connection / query /
-    implementation failures are distinguishable.
+    Per-session counts are derived by re-querying the store with
+    ``session_id == current`` so process restarts and multi-process layouts
+    stay consistent. Exception messages preserve the type name so connection
+    / query / implementation failures are distinguishable.
     """
     try:
         backend = get_backend()
@@ -332,13 +413,30 @@ def get_memory_status() -> str:
             by_pc[obs.pc_id] = by_pc.get(obs.pc_id, 0) + 1
         truncated = len(recent) >= MAX_SEARCH
         last_save_at = recent[0].created_at if recent else '-'
+        session_id = get_session_id()
+        # Per-session save count is sourced from the store, not process-local
+        # counters, so it survives MCP server restarts (#158 Codex review).
+        try:
+            session_obs = search_observations(session_id=session_id, limit=MAX_SEARCH)
+        except Exception:  # noqa: BLE001 — diagnostics must not break get_memory_status
+            session_obs = []
+        this_session_saves = len(session_obs)
+        now = datetime.now(timezone.utc)
+        last_save_dt = _parse_iso(session_obs[0].created_at) if session_obs else None
+        last_save_age_s = (now - last_save_dt).total_seconds() if last_save_dt else None
+        session_started_at = _parse_session_started_at(session_id)
+        session_age_s = (now - session_started_at).total_seconds() if session_started_at else None
+        nudge = _compute_save_nudge(this_session_saves, last_save_age_s, session_age_s)
         lines = [
             f'last_save_at: {last_save_at}',
             f'kioku-mesh version: {__version__}',
             f'backend: {status.mode}',
             f'python: {sys.executable}',
             f'pc_id: {get_pc_id()}',
-            f'session_id: {get_session_id()}',
+            f'session_id: {session_id}',
+            f'session_age: {_format_age(session_age_s)}',
+            f'this_session_saves: {this_session_saves}',
+            f'this_session_last_save_age: {_format_age(last_save_age_s)}',
             f'zenoh_session: {status.zenoh_session}',
             f'last_put_at_iso: {status.last_put_at_iso or "-"}',
             f'last_put_status: {status.last_put_status}',
@@ -347,6 +445,8 @@ def get_memory_status() -> str:
             f'count (within limit {MAX_SEARCH}): {len(recent)}'
             + (' (limit may be reached; consider narrowing)' if truncated else ''),
         ]
+        if nudge:
+            lines.append(f'nudge: {nudge}')
         for family, count in sorted(by_family.items()):
             lines.append(f'  family {family}: {count}')
         for pc, count in sorted(by_pc.items()):

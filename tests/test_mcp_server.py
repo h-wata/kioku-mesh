@@ -579,3 +579,92 @@ def test_get_memory_status_includes_last_save_at(single_zenohd: Any) -> None:  #
 
     text = _run(_go())
     assert 'last_save_at:' in text
+
+
+# Issue #158 Phase 2: session-scoped save count + nudge.
+
+
+def test_get_memory_status_reports_session_save_block(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,
+) -> None:  # noqa: ARG001
+    """`this_session_*` + `session_age` fields appear and reflect saves for the current session."""
+    from mesh_mem import identity
+
+    identity.reset_caches()
+    monkeypatch.setenv('MESH_MEM_SESSION_ID', '20260604T000000Z-nudgetst')
+    current_sid = identity.get_session_id()
+    obs = Observation(
+        content='session-scoped entry',
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id='mcp-pc',
+        session_id=current_sid,
+        project='mcp-session-nudge',
+    )
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'this_session_saves: 1' in text
+    assert 'this_session_last_save_age:' in text
+    assert 'session_age:' in text
+    # Recent save → no nudge expected (well under the 20-minute stale threshold).
+    assert 'nudge:' not in text
+    identity.reset_caches()
+
+
+def test_get_memory_status_emits_nudge_for_stale_empty_session(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,
+) -> None:  # noqa: ARG001
+    """A long-running session with zero saves triggers the consider-saving nudge."""
+    from mesh_mem import identity
+
+    identity.reset_caches()
+    # Session id timestamp prefix maps to 2024 → session_age is enormous,
+    # well past the 10-minute no-saves threshold.
+    monkeypatch.setenv('MESH_MEM_SESSION_ID', '20240101T000000Z-emptysess')
+    identity.get_session_id()
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'this_session_saves: 0' in text
+    assert 'nudge:' in text
+    assert 'No save_observation calls in this session yet' in text
+    identity.reset_caches()
+
+
+def test_get_memory_status_session_age_dash_for_unparseable_id(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,
+) -> None:  # noqa: ARG001
+    """A custom session_id with no timestamp prefix shows session_age '-' and skips the nudge."""
+    from mesh_mem import identity
+
+    identity.reset_caches()
+    monkeypatch.setenv('MESH_MEM_SESSION_ID', 'custom-handle-no-timestamp')
+    identity.get_session_id()
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'session_age: -' in text
+    # Unparseable timestamp → cannot prove the session is "stale" → no nudge.
+    assert 'nudge:' not in text
+    identity.reset_caches()
