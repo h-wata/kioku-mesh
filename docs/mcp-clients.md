@@ -157,3 +157,64 @@ To verify it:
 2. Start a fresh Claude Code session in that project.
 3. Confirm the first prompt contains a `## Recent kioku-mesh context ...` section.
 4. Run `/hooks` in Claude Code if you want to confirm the hook is loaded from `~/.claude/settings.json`.
+
+## Claude Code "save-reminder" hook (optional, Issue #158)
+
+For long sessions, the LLM occasionally lets a durable decision slip past
+`save_observation`. The MCP server side already nudges through
+`get_memory_status` (see [PR #160](https://github.com/h-wata/kioku-mesh/pull/160)),
+but a complementary client-side reminder that fires *just before context is
+dropped* catches the rest.
+
+This repo ships `scripts/hooks/check-unsaved-decisions.sh`. It reads the
+Claude Code session transcript JSONL on stdin, counts approval-like user
+turns vs. `save_observation` tool calls, and prints a one-paragraph
+reminder when the gap is large. It never auto-saves anything.
+
+Install it once:
+
+```bash
+install -d ~/.claude/hooks
+cp /ABSOLUTE/PATH/TO/kioku-mesh/scripts/hooks/check-unsaved-decisions.sh \
+  ~/.claude/hooks/check-unsaved-decisions.sh
+chmod +x ~/.claude/hooks/check-unsaved-decisions.sh
+```
+
+Wire it into `~/.claude/settings.json` on the two events that bracket
+context loss — `PreCompact` (auto-compaction) and `UserPromptSubmit`
+matched against `^/clear`:
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/check-unsaved-decisions.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "^/clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/check-unsaved-decisions.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The default `APPROVAL_REGEX` covers English + Japanese phrasings. If you
+chat with Claude Code in another language, edit the regex at the top of
+the script — comments inside the file show ZH and KO starter patterns.
+Because this heuristic is necessarily language-local, it ships as an
+**optional client-side script**, not as a server-side feature.
