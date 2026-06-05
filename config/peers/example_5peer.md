@@ -9,19 +9,20 @@ its `connect.endpoints: []`).
 
 ## Topology
 
-| Peer | Role | LAN IP | Notes |
-|------|------|--------|-------|
-| peer1 | **hub** — always-on desktop / home server | 192.168.1.10 | Listens on every IP that any spoke can reach |
-| peer2 | spoke — laptop                            | 192.168.1.11 | Often offline; dials peer1 only |
-| peer3 | spoke — agent server                      | 192.168.1.12 | Hosts autonomous / scheduled agents |
-| peer4 | spoke — single-board PC                   | 192.168.1.13 | Always-on, also the gc cron host |
-| peer5 | spoke — remote (over VPN)                 | 10.0.0.14    | Routed via Wireguard / Tailscale |
+| Peer  | Role | LAN IP | Notes |
+|-------|------|--------|-------|
+| peer1 | **hub (primary)** — always-on desktop / home server | 192.168.1.10 | Listens on every IP any spoke can reach |
+| peer1b| **hub (secondary)** — always-on server / VPS        | 192.168.1.20 | Optional; eliminates the single point of failure |
+| peer2 | spoke — laptop                                      | 192.168.1.11 | Often offline; dials both hubs |
+| peer3 | spoke — agent server                                | 192.168.1.12 | Hosts autonomous / scheduled agents |
+| peer4 | spoke — single-board PC                             | 192.168.1.13 | Always-on, also the gc cron host |
+| peer5 | spoke — remote (over VPN)                           | 10.0.0.14    | Routed via Wireguard / Tailscale |
 
-The link layer is **not** fully meshed: only the hub accepts inbound; each
-spoke holds a single connect endpoint to the hub. Zenoh router transit
-carries spoke-to-spoke traffic (e.g. peer3 → peer5) through peer1
-automatically — verified empirically on 2026-05-10 with WSL2 reaching an
-office peer via a home hub without any direct link between them.
+Each spoke lists **both hubs** in `connect.endpoints` (ADR-0017). If a hub is
+down at startup zenohd continues normally and retries in the background
+(`exit_on_failure` defaults to false — verified with zenohd v1.9.0). Zenoh
+router transit carries spoke-to-spoke traffic (e.g. peer3 → peer5) through
+whichever hub is currently reachable.
 
 ### Why hub-spoke (vs full-mesh)
 
@@ -32,12 +33,10 @@ office peer via a home hub without any direct link between them.
 - **Only the hub needs inbound firewall rules** for TCP/7447. Spokes can
   rely on Windows Firewall / nftables default-deny-inbound and let the
   outbound TCP session carry replies on the established socket.
-- **Trade-off**: the hub is a single point of dependency for cross-spoke
-  traffic. For ≤10-peer personal meshes this is acceptable; if the hub
-  is down, each spoke still operates locally and resyncs when the hub
-  returns. For mission-critical setups, run two hubs and have each
-  spoke list both in `connect.endpoints` (Zenoh dedupes the resulting
-  graph).
+- **Trade-off**: hub loss stops cross-spoke replication until it recovers, but
+  each spoke still reads/writes locally (RocksDB is local). With two hubs
+  (ADR-0017) this risk is eliminated: spokes list both hubs in
+  `connect.endpoints` and Zenoh deduplicates the resulting graph.
 
 ## Per-peer config
 
@@ -45,15 +44,23 @@ Prefer the `kioku-mesh init` wrapper. It renders the matching Zenoh/RocksDB
 replication block, keeps the local loopback endpoint for same-host CLI/MCP
 clients, and can install a user-scope systemd unit for the generated config.
 
-### Hub (peer1)
+### Hubs (peer1, peer1b)
 
-The hub listens on every address a spoke may dial and does not connect outward:
+Each hub listens on every address a spoke may dial and does not connect outward:
 
 ```bash
+# peer1 (primary hub)
 kioku-mesh init --mode hub \
   --listen 127.0.0.1 \
   --listen 192.168.1.10 \
   --out ~/.config/kioku-mesh/zenohd_peer1_local.json5 \
+  --force
+
+# peer1b (secondary hub)
+kioku-mesh init --mode hub \
+  --listen 127.0.0.1 \
+  --listen 192.168.1.20 \
+  --out ~/.config/kioku-mesh/zenohd_peer1b_local.json5 \
   --force
 ```
 
@@ -62,7 +69,8 @@ Add more `--listen` values for Tailscale, VPN, or other reachable addresses.
 
 ### Spokes (peer2..peer5)
 
-Each spoke listens locally and dials only the hub. Spokes never list each other.
+Each spoke listens locally and dials **both hubs**. If one hub is down at
+startup, zenohd still starts and retries in the background (ADR-0017).
 
 ```bash
 # peer2 (laptop)
@@ -70,6 +78,7 @@ kioku-mesh init --mode spoke \
   --listen 127.0.0.1 \
   --listen 192.168.1.11 \
   --connect 192.168.1.10 \
+  --connect 192.168.1.20 \
   --out ~/.config/kioku-mesh/zenohd_peer2_local.json5 \
   --force
 
@@ -78,10 +87,11 @@ kioku-mesh init --mode spoke \
   --listen 127.0.0.1 \
   --listen 192.168.1.12 \
   --connect 192.168.1.10 \
+  --connect 192.168.1.20 \
   --out ~/.config/kioku-mesh/zenohd_peer3_local.json5 \
   --force
 
-# repeat for peer4 (192.168.1.13) and peer5 (10.0.0.14)
+# repeat for peer4 (192.168.1.13) and peer5 (10.0.0.14) with both --connect
 ```
 
 > Place the resolved per-host config in an untracked path (e.g.

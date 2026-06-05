@@ -17,9 +17,15 @@
 //     (see docs/poc-reports/topology-2026-05-10.md).
 //
 // Placeholders:
-//   {SELF_IP} — this peer's LAN IP (the one the hub will accept incoming on,
-//               or the IP MCP clients on the same host will dial)
-//   {HUB_IP}  — hub peer's IP that THIS peer can reach
+//   {SELF_IP}  — this peer's LAN IP (the one the hub will accept incoming on,
+//                or the IP MCP clients on the same host will dial)
+//   {HUB1_IP} — primary hub's IP that THIS peer can reach
+//   {HUB2_IP} — secondary hub's IP (optional; remove the line if you have
+//                only one hub). If HUB2 is down at startup, zenohd still
+//                starts normally — exit_on_failure defaults to false and
+//                the connection is retried in the background until HUB2
+//                comes up. Verified with zenohd v1.9.0 on 2026-06-05
+//                (see docs/adr/0017-dual-hub-spoke-topology.md).
 //
 // Operational notes:
 //   - 127.0.0.1 stays in `listen` so MCP clients on the same host connect via
@@ -37,6 +43,8 @@
 //     context.
 //   - When THIS peer is itself the hub, replace `connect.endpoints` with [] —
 //     the hub doesn't dial anyone. Spokes dial in.
+//   - List both hubs in each spoke's connect.endpoints for redundancy
+//     (ADR-0017). If only one hub exists, keep a single-entry list.
 //   - storage / replication blocks must match across all peers byte-for-byte:
 //     mismatched `interval` / `sub_intervals` / `hot` / `warm` will silently
 //     prevent digest convergence.
@@ -72,11 +80,15 @@
     ],
   },
 
-  // Spoke peer: dial the hub only. Zenoh router transit handles the rest.
+  // Spoke peer: dial both hubs for redundancy (ADR-0017). Zenoh router
+  // transit handles spoke-to-spoke traffic. If a hub is down at startup,
+  // zenohd still starts normally and retries in the background.
   // (If THIS peer is the hub, set `endpoints: []` instead.)
+  // Remove the {HUB2_IP} line if you only have one hub.
   connect: {
     endpoints: [
-      "tcp/{HUB_IP}:7447",
+      "tcp/{HUB1_IP}:7447",
+      "tcp/{HUB2_IP}:7447",
     ],
   },
 
