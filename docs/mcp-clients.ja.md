@@ -152,3 +152,63 @@ sample script の挙動：
 2. そのプロジェクトディレクトリで新規 Claude Code セッションを起動
 3. 最初の prompt に `## Recent kioku-mesh context ...` セクションが含まれていることを確認
 4. hook が `~/.claude/settings.json` から読み込まれていることを確認したい場合は、Claude Code 内で `/hooks` を実行
+
+## Claude Code 「save リマインダー」hook（任意・Issue #158）
+
+長時間セッションでは LLM が durable な決定を `save_observation` で取り逃す
+ことがあります。MCP server 側は `get_memory_status` の nudge で promote
+していますが（[PR #160](https://github.com/h-wata/kioku-mesh/pull/160)）、
+**context が落ちる直前** に発火する client 側リマインダーを足すと取りこぼし
+がさらに減ります。
+
+本リポジトリには `scripts/hooks/check-unsaved-decisions.sh` が同梱されています。
+Claude Code セッションの transcript JSONL を stdin で受け取り、承認系の user
+turn 数と `save_observation` ツール呼び出し数を比較して、差が大きいときだけ
+1 段落のリマインダーを出します。自動 save は一切しません。
+
+一度だけ install します：
+
+```bash
+install -d ~/.claude/hooks
+cp /ABSOLUTE/PATH/TO/kioku-mesh/scripts/hooks/check-unsaved-decisions.sh \
+  ~/.claude/hooks/check-unsaved-decisions.sh
+chmod +x ~/.claude/hooks/check-unsaved-decisions.sh
+```
+
+`~/.claude/settings.json` に、context loss を挟む 2 イベント — `PreCompact`
+（auto-compaction）と `UserPromptSubmit` の `^/clear` matcher — に登録します：
+
+```json
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/check-unsaved-decisions.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "^/clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/check-unsaved-decisions.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+デフォルトの `APPROVAL_REGEX` は英語 + 日本語をカバーします。別言語で
+Claude Code とやり取りする場合は、スクリプト冒頭の regex を編集してください。
+ZH / KO の starter pattern はファイル内コメントに記載しています。本
+heuristic は本質的に言語ローカルなので、server 側機能ではなく **client 側
+optional script** として配布しています。
