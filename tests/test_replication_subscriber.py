@@ -7,6 +7,7 @@ is a pure unit test and does not need a router.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -54,6 +55,80 @@ def test_subscriber_picks_up_remote_put_into_index(single_zenohd: Any) -> None:
 
     ids = {r.observation_id for r in idx.search(project='sub-obs')}
     assert obs.observation_id in ids, 'subscriber must upsert replicated obs into index'
+
+
+def test_subscriber_preserves_extras_end_to_end(single_zenohd: Any) -> None:
+    """E2E for Issue #107 / ADR-0012: unknown fields survive the replication path.
+
+    A remote peer running a NEWER schema publishes an observation whose
+    payload carries fields this build does not know. The local subscriber
+    must round-trip them: from_json (stash in ``_extras``) -> SQLite upsert
+    (``to_json`` re-merges extras into payload_json) -> search re-parse.
+    A second upsert of the restored object simulates the next replication
+    hop and must not decay the extras either.
+    """
+    idx = store.get_index()
+    assert not idx.disabled
+
+    obs = _mk_obs('forward-compat payload', project='sub-extras')
+    newer = json.loads(obs.to_json())
+    newer['visibility'] = 'pub'  # plausible future scalar (ADR-0018)
+    newer['routing_hints'] = {'hub': 'tokyo', 'prio': 3}  # nested unknown
+    extras_expected = {'visibility': 'pub', 'routing_hints': {'hub': 'tokyo', 'prio': 3}}
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(obs.key_expr, json.dumps(newer))
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    # Public search API routes through LocalIndex.search -> from_json.
+    hits = [r for r in store.search_observations(project='sub-extras') if r.observation_id == obs.observation_id]
+    assert hits, 'subscriber must upsert the newer-schema obs into the index'
+    restored = hits[0]
+    assert getattr(restored, '_extras', {}) == extras_expected
+    # Known fields are intact alongside the extras.
+    assert restored.content == 'forward-compat payload'
+    # Re-emission puts the unknown fields back into the wire payload.
+    reemitted = json.loads(restored.to_json())
+    assert reemitted['visibility'] == 'pub'
+    assert reemitted['routing_hints'] == {'hub': 'tokyo', 'prio': 3}
+
+    # Second hop: upsert the restored object again (store-and-forward) and re-search.
+    idx.upsert(restored)
+    second = [r for r in idx.search(project='sub-extras') if r.observation_id == obs.observation_id]
+    assert second and getattr(second[0], '_extras', {}) == extras_expected, '_extras must survive repeated hops'
+
+
+def test_rebuild_preserves_extras_from_zenoh_storage(single_zenohd: Any) -> None:
+    """E2E for Issue #107: the startup rebuild scan must not strip unknown fields.
+
+    Covers the cold-start path: the newer-schema payload already sits in
+    Zenoh storage, the local index is reset (fresh spoke / restart), and
+    ``rebuild_from_zenoh`` re-populates SQLite from the stored payloads.
+    """
+    obs = _mk_obs('forward-compat via rebuild', project='rebuild-extras')
+    newer = json.loads(obs.to_json())
+    newer['visibility'] = 'team'
+    newer['team_id'] = 'kioku-mesh'
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(obs.key_expr, json.dumps(newer))
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    # Simulate restart: drop the index so get_index() rebuilds from Zenoh.
+    store._reset_index()
+
+    hits = [r for r in store.search_observations(project='rebuild-extras') if r.observation_id == obs.observation_id]
+    assert hits, 'rebuild must repopulate the newer-schema obs from zenoh storage'
+    assert getattr(hits[0], '_extras', {}) == {'visibility': 'team', 'team_id': 'kioku-mesh'}
+    reemitted = json.loads(hits[0].to_json())
+    assert reemitted['visibility'] == 'team'
+    assert reemitted['team_id'] == 'kioku-mesh'
 
 
 def test_subscriber_picks_up_remote_tombstone(single_zenohd: Any) -> None:
