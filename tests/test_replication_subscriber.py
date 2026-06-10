@@ -72,7 +72,7 @@ def test_subscriber_preserves_extras_end_to_end(single_zenohd: Any) -> None:
 
     obs = _mk_obs('forward-compat payload', project='sub-extras')
     newer = json.loads(obs.to_json())
-    newer['visibility'] = 'pub'  # plausible future scalar (ADR-0018)
+    newer['visibility'] = 'pub'  # plausible future scalar (ADR-0019)
     newer['routing_hints'] = {'hub': 'tokyo', 'prio': 3}  # nested unknown
     extras_expected = {'visibility': 'pub', 'routing_hints': {'hub': 'tokyo', 'prio': 3}}
 

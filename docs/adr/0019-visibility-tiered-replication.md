@@ -1,4 +1,4 @@
-# ADR-0018: Observation visibility tier による selective replication
+# ADR-0019: Observation visibility tier による selective replication
 
 - Status: Proposed
 - Date: 2026-06-06
