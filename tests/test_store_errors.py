@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from mesh_mem import pending_queue
 from mesh_mem import store
 from mesh_mem.models import Observation
 from mesh_mem.store import QueryErrorReply
@@ -254,7 +255,7 @@ def test_pending_drain_is_capped_per_success(monkeypatch: pytest.MonkeyPatch) ->
         ticks['n'] += 1
         return f'2026-05-17T00:00:{ticks["n"]:02d}.000000Z'
 
-    monkeypatch.setattr(store, '_PENDING_DRAIN_BATCH', 2)
+    monkeypatch.setattr(pending_queue, '_PENDING_DRAIN_BATCH', 2)
     monkeypatch.setattr(store, '_now_iso_utc', _fake_now)
     dummy_index = SimpleNamespace(
         upsert=lambda obs: None,
@@ -365,7 +366,7 @@ def test_pending_puts_limit_trims_oldest(monkeypatch: pytest.MonkeyPatch) -> Non
         ticks['n'] += 1
         return f'2026-05-17T00:20:{ticks["n"]:02d}.000000Z'
 
-    monkeypatch.setattr(store, '_PENDING_PUTS_LIMIT', 3)
+    monkeypatch.setattr(pending_queue, '_PENDING_PUTS_LIMIT', 3)
     monkeypatch.setattr(store, '_now_iso_utc', _fake_now)
     store._reset_session()
     store._reset_index()
@@ -403,7 +404,7 @@ def test_start_pending_drain_background_drains_queued_rows(monkeypatch: pytest.M
         mark_deleted=lambda observation_id, deleted_at: None,
     )
     monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
-    monkeypatch.setattr(store, '_PENDING_DRAIN_BATCH', 1)
+    monkeypatch.setattr(pending_queue, '_PENDING_DRAIN_BATCH', 1)
     working = _WorkingSession()
     monkeypatch.setattr(store, '_open_session', lambda: working)
     store._reset_session()
@@ -445,8 +446,8 @@ def test_stop_pending_drain_background_uses_short_join_deadline(monkeypatch: pyt
 
     stop_event = threading.Event()
     busy = _BusyThread()
-    monkeypatch.setattr(store, '_pending_drain_thread', busy)
-    monkeypatch.setattr(store, '_pending_drain_stop_event', stop_event)
+    monkeypatch.setattr(pending_queue, '_pending_drain_thread', busy)
+    monkeypatch.setattr(pending_queue, '_pending_drain_stop_event', stop_event)
 
     assert store.stop_pending_drain_background(join_timeout=0.01) is False
     assert stop_event.is_set()
