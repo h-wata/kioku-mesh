@@ -168,3 +168,90 @@ missed opportunities (1):
 1. `kioku-mesh search` 出力 → save トレースへの変換ヘルパ（実データで回す）。
 2. `PostToolUse` hook による opportunity 候補抽出（L1）＋ SKIP フィルタ。
 3. coverage を時系列で記録し、施策（#104 の deferred-load 緩和等）の前後比較を行う。
+
+## 試してみる (Try it)
+
+依存は標準ライブラリのみ。リポジトリを clone すればそのまま動く。
+
+### 1. 同梱サンプルで実行する
+
+```console
+$ python scripts/save_coverage.py scripts/save_coverage_example.jsonl
+opportunity coverage: 75.0% (3/4)
+window: 1800s, type-match: off
+missed opportunities (1):
+  2026-05-28T11:00:00+00:00 [pattern] established the session-start reminder convention
+```
+
+サンプルトレースは「4 機会中 3 カバー（pattern 1 件 miss）= 75%」になるよう
+固定してあるので、この出力が出れば環境は正常。トレースは stdin からも渡せる
+（引数に `-` を指定）:
+
+```console
+$ cat scripts/save_coverage_example.jsonl | python scripts/save_coverage.py -
+```
+
+### 2. ユニットテストを走らせる
+
+```console
+$ uv run pytest tests/test_save_coverage.py -v
+...
+26 passed
+```
+
+パース・1:1 マッチ・window 超過・type ゲート・JSON 出力・exit code などの
+不変条件を assert している。
+
+### 3. 代表的な CLI フラグの組み合わせ
+
+**`--json` — 機械可読出力**（時系列記録や他ツールへのパイプ用）:
+
+```console
+$ python scripts/save_coverage.py --json scripts/save_coverage_example.jsonl
+{
+  "coverage": 0.75,
+  "covered": 3,
+  "total": 4,
+  ...
+  "missed": [...],
+  "orphan_saves": []
+}
+```
+
+**`--require-type-match` — kind / memory_type の一致を要求**。
+同梱サンプルは全件 kind が一致しているため結果が変わらない。差を見るには
+type がズレたトレースを stdin で流す:
+
+```console
+$ printf '%s\n' \
+    '{"ts": "2026-05-28T09:00:00Z", "type": "opportunity", "kind": "decision", "label": "chose X over Y"}' \
+    '{"ts": "2026-05-28T09:02:00Z", "type": "save", "memory_type": "note", "observation_id": "obs-1"}' \
+  | python scripts/save_coverage.py -
+opportunity coverage: 100.0% (1/1)
+
+$ # 同じトレースに --require-type-match を付けると decision を note では覆えない
+$ printf ... | python scripts/save_coverage.py --require-type-match -
+opportunity coverage: 0.0% (0/1)
+missed opportunities (1): ...
+orphan saves (1): ...
+```
+
+**`--min-coverage` — CI ゲート**。閾値を下回ると exit 1 を返す:
+
+```console
+$ python scripts/save_coverage.py --min-coverage 0.8 scripts/save_coverage_example.jsonl
+opportunity coverage: 75.0% (3/4)
+...
+$ echo $?
+1
+```
+
+ゴールデントレースに対して `--min-coverage` を CI で回せば、
+instructions 変更で coverage が下がる回帰を機械検出できる。
+
+**`--window-seconds` — 猶予 window の調整**（default 1800s）。
+サンプルの miss は「save が一度も来なかった機会」なので window を広げても
+覆われないが、save が遅れて到着するトレースでは window 拡大で coverage が変わる。
+
+> 自分のセッションからトレースを生成する手順（hook / log scraper）は
+> 「次の一手」1–2 の別 PR スコープ。現状は手動アノテーションで JSONL を作る。
