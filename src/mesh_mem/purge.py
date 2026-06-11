@@ -20,10 +20,12 @@ SQLite index:
 Collaborators that live in ``store`` (the session accessor, the index
 handle, ``find_observation_by_id``, ``_parse_iso``) are resolved at call
 time via :func:`_store` — the same lazy pattern as ``pending_queue`` /
-``replication`` — so test monkeypatches on ``store`` keep affecting gc
-behavior and no sibling module is imported at load time. ``store``
-re-exports this module's surface, so ``store.gc_expired_tombstones`` and
-friends remain valid entry points.
+``replication`` — so patching those *functions* on ``store`` keeps
+affecting gc behavior and no sibling module is imported at load time.
+Transport-owned internals (``_open_session``, ``_RETRYABLE_EXC``, the
+``with_retry`` machinery) must be patched on ``mesh_mem.transport``
+instead (#172). ``store`` re-exports this module's surface, so
+``store.gc_expired_tombstones`` and friends remain valid entry points.
 """
 
 from collections import Counter
