@@ -31,6 +31,7 @@ from fastmcp import Client  # noqa: E402 — must follow importorskip
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
 from mesh_mem import store  # noqa: E402
+from mesh_mem import transport  # noqa: E402
 import mesh_mem.__main__ as cli_module  # noqa: E402
 from mesh_mem.backend import reset_backend  # noqa: E402
 from mesh_mem.models import Observation  # noqa: E402
@@ -388,7 +389,7 @@ def test_cli_drain_pending_replays_queued_rows(
     )
     monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
     working = _WorkingSession()
-    monkeypatch.setattr(store, '_open_session', lambda: working)
+    monkeypatch.setattr(transport, '_open_session', lambda: working)
     store._reset_session()
     store._reset_index()
 

@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from mesh_mem import store
+from mesh_mem import transport
 from mesh_mem.models import Observation
 
 # Zenoh put / delete is asynchronous — ingestion by the storage plugin happens
@@ -219,14 +220,14 @@ def test_is_mesh_ready_returns_false_immediately_after_start(single_zenohd: Any)
     """is_mesh_ready returns False when the probe just completed (min_ready_sec not elapsed)."""
     # Inject a probe-success timestamp that is "just now" so the elapsed time
     # is effectively 0, well below any positive min_ready_sec.
-    store._mesh_first_probe_success = time.monotonic()
+    transport._mesh_first_probe_success = time.monotonic()
     assert store.is_mesh_ready(min_ready_sec=1000.0) is False
 
 
 def test_is_mesh_ready_returns_true_after_probe(single_zenohd: Any) -> None:  # noqa: ARG001
     """is_mesh_ready returns True once min_ready_sec has elapsed since first probe."""
     # Simulate a probe that completed 10 seconds ago.
-    store._mesh_first_probe_success = time.monotonic() - 10.0
+    transport._mesh_first_probe_success = time.monotonic() - 10.0
     assert store.is_mesh_ready(min_ready_sec=5.0) is True
 
 
@@ -237,12 +238,12 @@ def test_is_mesh_ready_true_with_empty_store(single_zenohd: Any) -> None:  # noq
     a successful probe so an empty mesh is not stuck in permanent "waiting".
     """
     # Force a fresh probe by clearing cached state.
-    store._mesh_first_probe_success = None
-    store._mesh_session_start_time = None
+    transport._mesh_first_probe_success = None
+    transport._mesh_session_start_time = None
     # Run the probe (empty store → zero replies, but no exception).
     store.is_mesh_ready(min_ready_sec=0.0)
     # Probe must have recorded a success timestamp.
-    assert store._mesh_first_probe_success is not None
+    assert transport._mesh_first_probe_success is not None
     # With min_ready_sec=0 it should immediately report ready.
     assert store.is_mesh_ready(min_ready_sec=0.0) is True
 
@@ -256,17 +257,17 @@ def test_is_mesh_ready_label_states(single_zenohd: Any) -> None:  # noqa: ARG001
     """
     # State 1: probe not yet run — after clearing state, mesh_ready_label triggers
     # a probe which succeeds (single_zenohd is live), setting _mesh_session_start_time.
-    store._mesh_first_probe_success = None
-    store._mesh_session_start_time = None
+    transport._mesh_first_probe_success = None
+    transport._mesh_session_start_time = None
     label1 = store.mesh_ready_label(min_ready_sec=1000.0)
     assert label1.startswith('waiting ('), f'expected waiting label, got {label1!r}'
 
     # State 2: session known but min_ready_sec not yet elapsed.
-    store._mesh_session_start_time = time.monotonic()
-    store._mesh_first_probe_success = time.monotonic()
+    transport._mesh_session_start_time = time.monotonic()
+    transport._mesh_first_probe_success = time.monotonic()
     label2 = store.mesh_ready_label(min_ready_sec=1000.0)
     assert label2.startswith('waiting ('), f'expected waiting label, got {label2!r}'
 
     # State 3: ready.
-    store._mesh_first_probe_success = time.monotonic() - 10.0
+    transport._mesh_first_probe_success = time.monotonic() - 10.0
     assert store.mesh_ready_label(min_ready_sec=5.0) == 'yes'

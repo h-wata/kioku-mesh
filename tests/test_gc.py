@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from mesh_mem import store
+from mesh_mem import transport
 from mesh_mem.models import Observation
 from mesh_mem.models import Tombstone
 
@@ -260,7 +261,7 @@ def test_broadcast_delete_best_effort_never_raises(monkeypatch: pytest.MonkeyPat
     instead of propagating.
     """
     fake = _RaisingDeleteSession()
-    monkeypatch.setattr(store, '_session', fake)
+    monkeypatch.setattr(transport, '_session', fake)
     ok = store._broadcast_delete_best_effort('mem/obs/*/*/*/*/abc')
     assert ok is False
     assert fake.delete_calls == ['mem/obs/*/*/*/*/abc']
@@ -274,7 +275,7 @@ def test_physical_delete_survives_wildcard_rejection(monkeypatch: pytest.MonkeyP
     emergency purge must stay callable on any backend.
     """
     fake = _RaisingDeleteSession()
-    monkeypatch.setattr(store, '_session', fake)
+    monkeypatch.setattr(transport, '_session', fake)
     obs_removed, tomb_removed = store.physical_delete_observation('0' * 32)
     assert obs_removed is False
     assert tomb_removed is False

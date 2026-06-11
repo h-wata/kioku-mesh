@@ -1,33 +1,30 @@
-"""Zenoh session wrapper for kioku-mesh.
+"""Observation store for kioku-mesh.
 
 Responsibilities:
-    - open / close / retry the underlying ``zenoh.Session``
-    - surface ``Reply.err`` as ``QueryErrorReply`` so errors do not get
-      silently turned into empty result sets
+    - write path: ``put_observation`` / ``put_tombstone`` / delete broadcast
+    - read path: ``search_observations`` / ``find_observation_by_id`` with the
+      SQLite local index first and the legacy Zenoh scan as fallback
+    - replication subscriber + index rebuild policy (ADR-0007 Phase 4)
+    - GC and bulk purge of tombstoned / shadowed observations
     - clamp ``limit`` to ``MAX_SEARCH`` (return-count cap, not scan cap)
-    - filter / sort search results with timezone-aware datetime compare
 
-``with_retry`` intentionally narrows retryable exceptions to transport-layer
-errors (``zenoh.ZError``, ``ConnectionError``, ``TimeoutError``,
-``QueryErrorReply``). Everything else propagates unchanged so implementation
-bugs are not hidden by a retry loop.
+Session lifecycle, retry policy, and transport status live in
+``transport.py``; the pending-puts queue lives in ``pending_queue.py``
+(both extracted in #167). This module re-exports their public surface so
+``store.get_session`` / ``store.drain_pending_puts`` and friends remain
+valid entry points for callers and tests.
 """
 
 from collections import Counter
-from collections import deque
 from collections.abc import Callable
-from collections.abc import Iterator
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-import functools
 import json
 import logging
 import os
-import threading
-import time
 from typing import Any
 
 import zenoh
@@ -35,35 +32,39 @@ import zenoh
 from .local_index import LocalIndex
 from .models import Observation
 from .models import Tombstone
-from .pending_queue import _count_pending_puts
 from .pending_queue import _delete_pending_put
 from .pending_queue import _enqueue_pending_put
 from .pending_queue import _open_pending_puts_db  # noqa: F401  (façade re-export, #167)
 from .pending_queue import drain_pending_puts
 from .pending_queue import start_pending_drain_background  # noqa: F401  (façade re-export, #167)
 from .pending_queue import stop_pending_drain_background  # noqa: F401  (façade re-export, #167)
+from .transport import _iter_ok_replies
+from .transport import _now_iso_utc  # noqa: F401  (façade re-export, #167)
+from .transport import _open_session  # noqa: F401  (façade re-export, #167)
+from .transport import _record_pending_drain_success  # noqa: F401  (façade re-export, #167)
+from .transport import _record_put_result  # noqa: F401  (façade re-export, #167)
+from .transport import _reset_session  # noqa: F401  (façade re-export, #167)
+from .transport import _reset_transport_status
+from .transport import _RETRYABLE_EXC
+from .transport import _set_pending_drain_in_progress  # noqa: F401  (façade re-export, #167)
+from .transport import _set_zenoh_session_state  # noqa: F401  (façade re-export, #167)
+from .transport import get_session
+from .transport import GET_TIMEOUT  # noqa: F401  (façade re-export, #167)
+from .transport import get_transport_status  # noqa: F401  (façade re-export, #167)
+from .transport import is_mesh_ready  # noqa: F401  (façade re-export, #167)
+from .transport import mesh_ready_label  # noqa: F401  (façade re-export, #167)
+from .transport import QueryErrorReply  # noqa: F401  (façade re-export, #167)
+from .transport import TransportStatus  # noqa: F401  (façade re-export, #167)
+from .transport import with_retry
 
 log = logging.getLogger(__name__)
 
 # Return-count cap for search APIs. Does NOT bound the underlying
 # ``session.get()`` scan; callers must narrow the key_expr for large spaces.
 MAX_SEARCH = 10_000
-GET_TIMEOUT = 5.0
 
-_session: zenoh.Session | None = None
 _index: LocalIndex | None = None
 _subscribers: list | None = None
-_mesh_first_probe_success: float | None = None
-_mesh_session_start_time: float | None = None
-_PUT_HISTORY_LIMIT = 20
-_transport_status_lock = threading.Lock()
-_zenoh_session_state = 'unknown'
-_last_put_at_iso = ''
-_last_put_status = 'never'
-_recent_put_results: deque[str] = deque(maxlen=_PUT_HISTORY_LIMIT)
-_pending_drain_in_progress = False
-_pending_drain_last_run_iso = ''
-_pending_drain_total_succeeded = 0
 
 # Default rebuild-on-init policy. Long-lived processes (kioku-mesh-mcp) keep
 # the default ``True`` so the local SQLite index aligns with zenoh once at
@@ -75,94 +76,6 @@ _pending_drain_total_succeeded = 0
 # ``--rebuild`` flag) outranks both env vars.
 _rebuild_on_init_default: bool = True
 _rebuild_explicit_override: bool | None = None
-
-
-@dataclass(frozen=True)
-class TransportStatus:
-    """Ephemeral transport-health snapshot for status reporting."""
-
-    zenoh_session: str
-    last_put_at_iso: str
-    last_put_status: str
-    recent_put_ok: int
-    recent_put_error: int
-    recent_put_window: int
-    pending_puts: int
-    drain_in_progress: bool
-    drain_last_run_iso: str
-    drain_total_succeeded: int
-
-
-def _now_iso_utc() -> str:
-    """Return the current UTC timestamp in the project's compact ISO form."""
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
-
-
-def _set_zenoh_session_state(state: str) -> None:
-    """Update the last-known Zenoh session connectivity label."""
-    global _zenoh_session_state
-    with _transport_status_lock:
-        _zenoh_session_state = state
-
-
-def _record_put_result(status: str) -> None:
-    """Record the final outcome of a high-level put operation."""
-    global _last_put_at_iso, _last_put_status
-    at_iso = _now_iso_utc()
-    with _transport_status_lock:
-        _last_put_at_iso = at_iso
-        _last_put_status = status
-        _recent_put_results.append(status)
-
-
-def _set_pending_drain_in_progress(in_progress: bool) -> None:
-    """Publish whether a background pending-drain worker is active."""
-    global _pending_drain_in_progress
-    with _transport_status_lock:
-        _pending_drain_in_progress = in_progress
-
-
-def _record_pending_drain_success(drained: int) -> None:
-    """Accumulate successful replay counts for status reporting."""
-    global _pending_drain_last_run_iso, _pending_drain_total_succeeded
-    if drained <= 0:
-        return
-    with _transport_status_lock:
-        _pending_drain_last_run_iso = _now_iso_utc()
-        _pending_drain_total_succeeded += drained
-
-
-def get_transport_status() -> TransportStatus:
-    """Return lightweight in-memory transport / put health for diagnostics."""
-    with _transport_status_lock:
-        ok_count = sum(1 for status in _recent_put_results if status == 'ok')
-        err_count = len(_recent_put_results) - ok_count
-        return TransportStatus(
-            zenoh_session=_zenoh_session_state,
-            last_put_at_iso=_last_put_at_iso,
-            last_put_status=_last_put_status,
-            recent_put_ok=ok_count,
-            recent_put_error=err_count,
-            recent_put_window=len(_recent_put_results),
-            pending_puts=_count_pending_puts(),
-            drain_in_progress=_pending_drain_in_progress,
-            drain_last_run_iso=_pending_drain_last_run_iso,
-            drain_total_succeeded=_pending_drain_total_succeeded,
-        )
-
-
-def _reset_transport_status() -> None:
-    """Clear in-memory transport diagnostics (test-only reset path)."""
-    global _zenoh_session_state, _last_put_at_iso, _last_put_status
-    global _pending_drain_in_progress, _pending_drain_last_run_iso, _pending_drain_total_succeeded
-    with _transport_status_lock:
-        _zenoh_session_state = 'unknown'
-        _last_put_at_iso = ''
-        _last_put_status = 'never'
-        _recent_put_results.clear()
-        _pending_drain_in_progress = False
-        _pending_drain_last_run_iso = ''
-        _pending_drain_total_succeeded = 0
 
 
 def set_rebuild_on_init_default(rebuild: bool) -> None:
@@ -315,164 +228,6 @@ def _reset_index() -> None:
     _rebuild_on_init_default = True
     _rebuild_explicit_override = None
     _reset_transport_status()
-
-
-class QueryErrorReply(Exception):
-    """Raised when ``session.get()`` yields a reply carrying ``err`` instead of ``ok``.
-
-    Treated as retryable by ``with_retry`` so a transient query failure gets
-    a single automatic re-attempt.
-    """
-
-
-# zenoh-python 1.9.0 surfaces connection / get / put failures via ``zenoh.ZError``.
-# Ref: https://zenoh-python.readthedocs.io/en/1.9.0/api_reference.html
-_RETRYABLE_EXC: tuple[type[BaseException], ...] = (
-    zenoh.ZError,
-    ConnectionError,
-    TimeoutError,
-    QueryErrorReply,
-)
-
-
-def _open_session() -> zenoh.Session:
-    """Open a new Zenoh client session using ``ZENOH_CONNECT`` env var."""
-    endpoint = os.environ.get('ZENOH_CONNECT', 'tcp/localhost:7447')
-    config = zenoh.Config()
-    config.insert_json5('mode', '"client"')
-    config.insert_json5('connect/endpoints', f'["{endpoint}"]')
-    return zenoh.open(config)
-
-
-def _reset_session() -> None:
-    """Drop the cached session so the next call reopens it."""
-    global _session, _mesh_first_probe_success, _mesh_session_start_time
-    if _session is not None:
-        try:
-            _session.close()
-        except Exception:  # noqa: BLE001
-            pass
-    _session = None
-    _mesh_first_probe_success = None
-    _mesh_session_start_time = None
-
-
-def get_session() -> zenoh.Session:
-    """Return the cached Zenoh session, opening it on first use or after reset."""
-    global _session, _mesh_session_start_time
-    if _session is None:
-        try:
-            _session = _open_session()
-        except _RETRYABLE_EXC:
-            _set_zenoh_session_state('disconnected')
-            raise
-        _mesh_session_start_time = time.monotonic()
-        _set_zenoh_session_state('connected')
-    return _session
-
-
-def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:
-    """Return True if a probe completed without error and min_ready_sec has elapsed.
-
-    A probe completing with zero replies is considered ready (e.g., empty store
-    or fresh deployment). Previously required at least one reply, which caused
-    permanent "waiting" status on empty stores.
-
-    Informational only — search_observations never blocks on readiness.
-    Probe result is cached; re-probes after _reset_session().
-    """
-    global _mesh_first_probe_success
-    if _mesh_first_probe_success is None:
-        try:
-            session = get_session()
-            list(session.get('mem/**', timeout=1.0))
-            _mesh_first_probe_success = time.monotonic()
-        except Exception:  # noqa: BLE001
-            pass
-    if _mesh_first_probe_success is None:
-        return False
-    return (time.monotonic() - _mesh_first_probe_success) >= min_ready_sec
-
-
-def mesh_ready_label(min_ready_sec: float = 5.0) -> str:
-    """Human-readable readiness string for ``kioku-mesh status``.
-
-    Returns ``'yes'`` when ready, ``'waiting (Xs)'`` showing elapsed seconds
-    since session start, or ``'waiting (no session)'`` before any session opens.
-    """
-    if is_mesh_ready(min_ready_sec):
-        return 'yes'
-    if _mesh_session_start_time is None:
-        return 'waiting (no session)'
-    elapsed = time.monotonic() - _mesh_session_start_time
-    return f'waiting ({elapsed:.1f}s)'
-
-
-def with_retry(func: Callable[..., Any]) -> Callable[..., Any]:
-    """Retry transport-level failures exactly once; propagate other exceptions verbatim.
-
-    On final failure, wraps the last retryable cause in ``RuntimeError`` with
-    ``raise ... from last_exc`` so ``__cause__`` preserves the original error.
-    """
-
-    @functools.wraps(func)
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        last_exc: BaseException | None = None
-        track_put = func.__name__ in {'put_observation', 'put_tombstone'}
-        for attempt in range(2):
-            try:
-                result = func(*args, **kwargs)
-                if track_put:
-                    _set_zenoh_session_state('connected')
-                    _record_put_result('ok')
-                return result
-            except _RETRYABLE_EXC as e:
-                last_exc = e
-                log.warning('%s retryable failure (attempt %d): %s', func.__name__, attempt + 1, e)
-                if track_put:
-                    _set_zenoh_session_state('disconnected')
-                _reset_session()
-                time.sleep(0.2 * (attempt + 1))
-            except Exception as e:
-                if track_put:
-                    _record_put_result(f'error: {type(e).__name__}')
-                raise
-            # Any exception not in _RETRYABLE_EXC propagates untouched.
-        assert last_exc is not None  # for type-checkers; loop always sets this on final failure
-        if track_put:
-            _record_put_result(f'error: {type(last_exc).__name__}')
-        raise RuntimeError(f'{func.__name__} failed after retry: {type(last_exc).__name__}: {last_exc}') from last_exc
-
-    return wrapped
-
-
-def _iter_ok_replies(
-    session: zenoh.Session,
-    key_expr: str,
-    timeout: float = GET_TIMEOUT,
-) -> Iterator[Any]:
-    """Yield only ``ok`` replies from ``session.get()``; raise on first ``err``.
-
-    Usage contract:
-        - **Local-accumulation only.** Consumers MUST collect yielded values into
-          a list/set and process them AFTER the loop exits, never cause side
-          effects inside the loop.
-        - A mid-stream ``raise`` would re-enter via ``with_retry``, so any
-          in-loop side effect would be partially applied and then duplicated.
-        - For side-effecting workflows, collect first, then drive a separate loop,
-          or restrict side effects to idempotent operations.
-    """
-    for reply in session.get(key_expr, timeout=timeout):
-        if reply.ok:
-            yield reply.ok
-            continue
-        payload = ''
-        try:
-            if reply.err is not None:
-                payload = reply.err.payload.to_string()
-        except Exception:  # noqa: BLE001
-            pass
-        raise QueryErrorReply(f'query error for {key_expr}: {payload or "unknown"}')
 
 
 def _parse_iso(s: str) -> datetime | None:
