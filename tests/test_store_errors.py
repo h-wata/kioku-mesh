@@ -142,7 +142,8 @@ def test_find_by_id_via_zenoh_uses_leaf_selector(monkeypatch: pytest.MonkeyPatch
 
     assert hit is not None
     assert hit.observation_id == obs.observation_id
-    assert fake.calls == [f'mem/obs/**/{obs.observation_id}']
+    # ADR-0019 Phase A: the leaf selector covers legacy + tiered namespaces.
+    assert fake.calls == [f'mem/**/obs/**/{obs.observation_id}']
 
 
 def test_find_by_id_via_zenoh_rejects_invalid_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:

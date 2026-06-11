@@ -575,9 +575,11 @@ class _FakeSession:
         self._tomb_replies = [_FakeReply(t.to_json()) for t in tombs]
 
     def get(self, key_expr: str, **kwargs: object) -> list[_FakeReply]:  # type: ignore[override]
-        if 'mem/obs' in key_expr:
+        # Selectors are namespace-broadened since ADR-0019 Phase A
+        # ('mem/**/obs/**'), so dispatch on the obs/tomb marker chunk.
+        if '/obs/' in key_expr:
             return self._obs_replies
-        if 'mem/tomb' in key_expr:
+        if '/tomb/' in key_expr:
             return self._tomb_replies
         return []
 

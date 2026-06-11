@@ -30,6 +30,9 @@ from datetime import datetime
 from datetime import timezone
 import logging
 
+from .keyspace import find_by_id_selector
+from .keyspace import obs_selector
+from .keyspace import tomb_selector
 from .local_index import LocalIndex
 from .models import Observation
 from .models import Tombstone
@@ -325,16 +328,9 @@ def _search_via_zenoh(
     since_dt = _parse_iso(since_iso)
     until_dt = _parse_iso(until_iso)
 
-    parts = [
-        'mem/obs',
-        agent_family or '*',
-        client_id or '*',
-        pc_id or '*',
-        session_id or '*',
-        '**',
-    ]
-    key_expr = '/'.join(parts)
-    tomb_expr = key_expr.replace('mem/obs/', 'mem/tomb/', 1)
+    # ADR-0019 Phase A: selectors cover legacy + tiered namespaces.
+    key_expr = obs_selector(agent_family, client_id, pc_id, session_id)
+    tomb_expr = tomb_selector(agent_family, client_id, pc_id, session_id)
 
     session = get_session()
 
@@ -431,7 +427,7 @@ def _find_by_id_via_zenoh(observation_id: str) -> Observation | None:
     if not _is_valid_observation_id(observation_id):
         return None
     session = get_session()
-    for ok in _iter_ok_replies(session, f'mem/obs/**/{observation_id}'):
+    for ok in _iter_ok_replies(session, find_by_id_selector(observation_id)):
         try:
             obs = Observation.from_json(ok.payload.to_string())
         except Exception:  # noqa: BLE001

@@ -62,7 +62,7 @@ def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
 
 
 def _purge_mem_keys() -> None:
-    """Delete every key under ``mem/obs/**`` and ``mem/tomb/**`` on the current store.
+    """Delete every obs / tomb key (legacy + ADR-0019 tiered) on the current store.
 
     Enumerate-then-delete rather than wildcard-delete: storage-backend support
     for wildcard delete varies by Zenoh version, per-key delete is portable.
@@ -70,7 +70,7 @@ def _purge_mem_keys() -> None:
     import time as _time
 
     sess = store.get_session()
-    for prefix in ('mem/obs/**', 'mem/tomb/**'):
+    for prefix in ('mem/**/obs/**', 'mem/**/tomb/**'):
         keys = [str(r.ok.key_expr) for r in sess.get(prefix, timeout=2.0) if r.ok]
         for k in keys:
             sess.delete(k)

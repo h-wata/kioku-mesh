@@ -39,6 +39,7 @@ import json
 import logging
 from types import ModuleType
 
+from .keyspace import OBS_READ_KEY_EXPR
 from .local_index import LocalIndex
 from .models import Observation
 from .models import Tombstone
@@ -511,7 +512,9 @@ def gc_expired_shadows(
     zenoh_obs_by_id: dict[str, Observation] = {}
     try:
         session = store.get_session()
-        for reply in session.get('mem/obs/**', timeout=30.0):  # type: ignore[attr-defined]
+        # ADR-0019 Phase A: re-verify against legacy + tiered namespaces so a
+        # row that lives under mem/{mesh,user,team}/... is not wrongly purged.
+        for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if not reply.ok:
                 continue
             try:
