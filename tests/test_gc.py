@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from mesh_mem import purge
 from mesh_mem import store
 from mesh_mem import transport
 from mesh_mem.models import Observation
@@ -389,13 +390,14 @@ def test_gc_project_filter_skips_global_tomb_scan(
     time.sleep(_INGEST_SETTLE)
 
     list_tomb_calls: list[bool] = []
-    real_list = store._list_tombstones
+    real_list = purge._list_tombstones
 
     def spy() -> Any:
         list_tomb_calls.append(True)
         return real_list()
 
-    monkeypatch.setattr(store, '_list_tombstones', spy)
+    # The sweep internals live in purge.py now (#167).
+    monkeypatch.setattr(purge, '_list_tombstones', spy)
 
     purged = store.gc_expired_tombstones(retention_days=30, project='proj-fast')
     assert purged == 1
