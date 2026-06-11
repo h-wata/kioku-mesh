@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 import zenoh
 
+from mesh_mem import replication
 from mesh_mem import store
 from mesh_mem.models import Observation
 from mesh_mem.models import Tombstone
@@ -277,8 +278,9 @@ def test_subscriber_demotes_non_json_payload_to_debug(
     def _warning(msg: str, *args: object) -> None:
         warning_msgs.append(msg % args if args else msg)
 
-    monkeypatch.setattr(store.log, 'debug', _debug)
-    monkeypatch.setattr(store.log, 'warning', _warning)
+    # The subscriber callbacks log via replication.log now (#167).
+    monkeypatch.setattr(replication.log, 'debug', _debug)
+    monkeypatch.setattr(replication.log, 'warning', _warning)
 
     # Make sure the subscriber is registered.
     store.get_index()
@@ -502,9 +504,9 @@ def test_reset_index_restores_rebuild_default() -> None:
     not leak that policy into a subsequent non-CLI test.
     """
     store.set_rebuild_on_init_default(False)
-    assert store._rebuild_on_init_default is False  # noqa: SLF001
+    assert replication._rebuild_on_init_default is False  # noqa: SLF001
     store._reset_index()
-    assert store._rebuild_on_init_default is True  # noqa: SLF001
+    assert replication._rebuild_on_init_default is True  # noqa: SLF001
 
 
 def test_cli_main_sets_rebuild_default_false(
@@ -629,6 +631,6 @@ def test_reset_index_clears_explicit_override() -> None:
     does not leak that policy into a subsequent test.
     """
     store.set_rebuild_on_init_explicit(True)
-    assert store._rebuild_explicit_override is True  # noqa: SLF001
+    assert replication._rebuild_explicit_override is True  # noqa: SLF001
     store._reset_index()
-    assert store._rebuild_explicit_override is None  # noqa: SLF001
+    assert replication._rebuild_explicit_override is None  # noqa: SLF001

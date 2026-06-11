@@ -4,15 +4,17 @@ Responsibilities:
     - write path: ``put_observation`` / ``put_tombstone`` / delete broadcast
     - read path: ``search_observations`` / ``find_observation_by_id`` with the
       SQLite local index first and the legacy Zenoh scan as fallback
-    - replication subscriber + index rebuild policy (ADR-0007 Phase 4)
+    - the local index handle lifecycle: ``get_index`` / ``_reset_index``
     - GC and bulk purge of tombstoned / shadowed observations
     - clamp ``limit`` to ``MAX_SEARCH`` (return-count cap, not scan cap)
 
-Session lifecycle, retry policy, and transport status live in
-``transport.py``; the pending-puts queue lives in ``pending_queue.py``
-(both extracted in #167). This module re-exports their public surface so
-``store.get_session`` / ``store.drain_pending_puts`` and friends remain
-valid entry points for callers and tests.
+Sibling modules extracted in #167, whose public surface this module
+re-exports so ``store.<name>`` stays a valid entry point for callers and
+tests:
+    - ``transport.py``: session lifecycle, retry policy, transport status
+    - ``pending_queue.py``: the failed-put queue and its drain worker
+    - ``replication.py``: rebuild policy, key parsing, and the index
+      subscriber that mirrors replicated PUT/DELETE into the local index
 """
 
 from collections import Counter
@@ -24,10 +26,6 @@ from datetime import timedelta
 from datetime import timezone
 import json
 import logging
-import os
-from typing import Any
-
-import zenoh
 
 from .local_index import LocalIndex
 from .models import Observation
@@ -38,6 +36,13 @@ from .pending_queue import _open_pending_puts_db  # noqa: F401  (façade re-expo
 from .pending_queue import drain_pending_puts
 from .pending_queue import start_pending_drain_background  # noqa: F401  (façade re-export, #167)
 from .pending_queue import stop_pending_drain_background  # noqa: F401  (façade re-export, #167)
+from .replication import _empty_index_rebuild_allowed
+from .replication import _obs_id_from_key  # noqa: F401  (façade re-export, #167)
+from .replication import _should_rebuild_on_init
+from .replication import reset_rebuild_policy
+from .replication import set_rebuild_on_init_default  # noqa: F401  (façade re-export, #167)
+from .replication import set_rebuild_on_init_explicit  # noqa: F401  (façade re-export, #167)
+from .replication import start_index_subscriber
 from .transport import _iter_ok_replies
 from .transport import _now_iso_utc  # noqa: F401  (façade re-export, #167)
 from .transport import _open_session  # noqa: F401  (façade re-export, #167)
@@ -65,78 +70,6 @@ MAX_SEARCH = 10_000
 
 _index: LocalIndex | None = None
 _subscribers: list | None = None
-
-# Default rebuild-on-init policy. Long-lived processes (kioku-mesh-mcp) keep
-# the default ``True`` so the local SQLite index aligns with zenoh once at
-# startup. One-shot CLI invocations call ``set_rebuild_on_init_default(False)``
-# from ``__main__.main`` so each ``kioku-mesh save/search/...`` does not pay
-# the rebuild_from_zenoh cost on a populated mesh (#38). Env vars
-# MESH_MEM_FORCE_REBUILD=1 and MESH_MEM_SKIP_REBUILD=1 override this default,
-# and an explicit ``set_rebuild_on_init_explicit(True/False)`` (the CLI's
-# ``--rebuild`` flag) outranks both env vars.
-_rebuild_on_init_default: bool = True
-_rebuild_explicit_override: bool | None = None
-
-
-def set_rebuild_on_init_default(rebuild: bool) -> None:
-    """Override the default rebuild-on-first-init policy in this process.
-
-    Lowest-priority signal: env vars and the explicit override outrank
-    this. Reset by ``_reset_index()`` (test path); production CLI calls
-    this once from ``main`` before any ``get_index()`` invocation.
-    """
-    global _rebuild_on_init_default
-    _rebuild_on_init_default = rebuild
-
-
-def set_rebuild_on_init_explicit(rebuild: bool | None) -> None:
-    """Explicit user-level override for the rebuild policy (highest priority).
-
-    Wins over both ``MESH_MEM_FORCE_REBUILD`` / ``MESH_MEM_SKIP_REBUILD``
-    env vars and the module default. Direct user intent — for example, the
-    CLI's ``--rebuild`` flag — must always take effect, even in environments
-    that export ``MESH_MEM_SKIP_REBUILD=1`` from a shell profile or wrapper
-    script. Pass ``None`` to clear the override.
-    """
-    global _rebuild_explicit_override
-    _rebuild_explicit_override = rebuild
-
-
-def _should_rebuild_on_init() -> bool:
-    """Resolve the effective rebuild policy for the current process.
-
-    Priority (highest to lowest):
-      1. ``set_rebuild_on_init_explicit(True/False)`` — direct user intent.
-      2. ``MESH_MEM_FORCE_REBUILD=1`` env var.
-      3. ``MESH_MEM_SKIP_REBUILD=1`` env var.
-      4. Module-level default (``True`` for long-lived processes; CLI flips
-         to ``False`` so one-shot invocations stay sub-second).
-    """
-    if _rebuild_explicit_override is not None:
-        return _rebuild_explicit_override
-    if os.environ.get('MESH_MEM_FORCE_REBUILD', '').strip() == '1':
-        return True
-    if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() == '1':
-        return False
-    return _rebuild_on_init_default
-
-
-def _empty_index_rebuild_allowed() -> bool:
-    """Whether a fresh (zero-row) index may force a one-time rebuild.
-
-    Even when :func:`_should_rebuild_on_init` resolved to ``False``, this
-    backfills a newly provisioned spoke whose zenoh-rocksdb already holds
-    replicated rows but whose SQLite index is still empty, so ``status`` /
-    ``search`` do not report 0 until the next write. It overrides only the
-    *implicit* CLI default-skip (#38); an explicit opt-out
-    (``set_rebuild_on_init_explicit(False)`` or ``MESH_MEM_SKIP_REBUILD=1``)
-    is honored and suppresses the auto-rebuild.
-    """
-    if _rebuild_explicit_override is False:
-        return False
-    if os.environ.get('MESH_MEM_SKIP_REBUILD', '').strip() == '1':
-        return False
-    return True
 
 
 def get_index() -> LocalIndex:
@@ -216,7 +149,7 @@ def _reset_index() -> None:
     flips the flag to False or sets the explicit override) does not leak
     that policy into the next test.
     """
-    global _index, _rebuild_on_init_default, _rebuild_explicit_override
+    global _index
     stop_pending_drain_background()
     _reset_subscribers()
     if _index is not None:
@@ -225,8 +158,7 @@ def _reset_index() -> None:
         except Exception:  # noqa: BLE001
             pass
     _index = None
-    _rebuild_on_init_default = True
-    _rebuild_explicit_override = None
+    reset_rebuild_policy()
     _reset_transport_status()
 
 
@@ -247,106 +179,6 @@ def _parse_iso(s: str) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-_OBS_KEY_PREFIXES = ('mem/obs/', 'mem/tomb/')
-_OBS_KEY_SEGMENTS = 7  # mem / {obs|tomb} / agent / client / pc / session / obs_id
-
-
-def _obs_id_from_key(key_expr: str) -> str | None:
-    """Extract a 32-hex observation_id from a canonical kioku-mesh key.
-
-    Conservative parser. Accepts only the exact ``mem/{obs|tomb}/
-    {agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}``
-    shape (7 slash-separated segments, ``mem/obs/`` or ``mem/tomb/``
-    prefix) with a 32 lowercase hex trailing segment. Anything else
-    (wrong prefix, wrong segment count, malformed obs_id) returns
-    ``None`` so a stray DELETE on an unrelated key cannot drive
-    ``physical_delete`` against a real row whose id happens to collide
-    with the trailing token (Issue #64).
-    """
-    if not key_expr.startswith(_OBS_KEY_PREFIXES):
-        return None
-    parts = key_expr.split('/')
-    if len(parts) != _OBS_KEY_SEGMENTS:
-        return None
-    obs_id = parts[-1]
-    if len(obs_id) == 32 and all(c in '0123456789abcdef' for c in obs_id):
-        return obs_id
-    return None
-
-
-def start_index_subscriber(session: zenoh.Session) -> list:
-    """Subscribe to mem/obs/** and mem/tomb/** to keep SQLite in sync with replication.
-
-    Callbacks are idempotent (upsert / mark_deleted / physical_delete) so
-    overlap with the rebuild scan on startup is safe. PUT-kind samples
-    carry an Observation / Tombstone payload; DELETE-kind samples (issued
-    by ``session.delete``) carry an empty payload and only the key, so the
-    callbacks dispatch on ``sample.kind`` and mirror the upstream delete
-    into the local SQLite index (Issue #64). The returned list holds the
-    two zenoh.Subscriber objects; callers must call undeclare() on each
-    when tearing down (handled by _reset_subscribers / _reset_index).
-    """
-    idx = get_index()
-    if idx.disabled:
-        return []
-
-    def on_obs(sample: Any) -> None:
-        if sample.kind == zenoh.SampleKind.DELETE:
-            obs_id = _obs_id_from_key(str(sample.key_expr))
-            if obs_id is None:
-                log.debug(
-                    'index subscriber on_obs DELETE ignored (invalid obs_id in key %s)',
-                    sample.key_expr,
-                )
-                return
-            try:
-                idx.physical_delete(obs_id)
-            except Exception as e:  # noqa: BLE001
-                log.warning('index subscriber on_obs DELETE failed for %s: %s', obs_id, e)
-            return
-        try:
-            obs = Observation.from_json(sample.payload.to_string())
-            idx.upsert(obs)
-        except json.JSONDecodeError as e:
-            # Issue #31: gc broadcast-purge and other control payloads can
-            # arrive on mem/obs/** with non-Observation bytes. Demote to
-            # DEBUG so steady-state operation does not look pathological.
-            log.debug('index subscriber on_obs non-JSON payload: %s', e)
-        except Exception as e:  # noqa: BLE001
-            log.warning('index subscriber on_obs error: %s', e)
-
-    def on_tomb(sample: Any) -> None:
-        if sample.kind == zenoh.SampleKind.DELETE:
-            # A tombstone DELETE upstream means the tomb (and its mirrored
-            # obs) was physically purged — typically by retention gc or by
-            # ``execute_bulk_purge``. Mirror that into the index so this
-            # peer also drops the row instead of carrying a stale live or
-            # tombstoned record.
-            obs_id = _obs_id_from_key(str(sample.key_expr))
-            if obs_id is None:
-                log.debug(
-                    'index subscriber on_tomb DELETE ignored (invalid obs_id in key %s)',
-                    sample.key_expr,
-                )
-                return
-            try:
-                idx.physical_delete(obs_id)
-            except Exception as e:  # noqa: BLE001
-                log.warning('index subscriber on_tomb DELETE failed for %s: %s', obs_id, e)
-            return
-        try:
-            tomb = Tombstone.from_json(sample.payload.to_string())
-            idx.mark_deleted(tomb.observation_id, tomb.deleted_at)
-        except json.JSONDecodeError as e:
-            log.debug('index subscriber on_tomb non-JSON payload: %s', e)
-        except Exception as e:  # noqa: BLE001
-            log.warning('index subscriber on_tomb error: %s', e)
-
-    sub_obs = session.declare_subscriber('mem/obs/**', on_obs)
-    sub_tomb = session.declare_subscriber('mem/tomb/**', on_tomb)
-    return [sub_obs, sub_tomb]
 
 
 @with_retry
