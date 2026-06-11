@@ -25,6 +25,7 @@ import pytest
 
 from mesh_mem import pending_queue
 from mesh_mem import store
+from mesh_mem import transport
 from mesh_mem.models import Observation
 from mesh_mem.store import QueryErrorReply
 
@@ -69,7 +70,7 @@ def _install_fake_session(monkeypatch: pytest.MonkeyPatch, session: _FakeSession
     """
     monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
     store._reset_index()
-    monkeypatch.setattr(store, '_open_session', lambda: session)
+    monkeypatch.setattr(transport, '_open_session', lambda: session)
     store._reset_session()
 
 
@@ -169,7 +170,7 @@ def test_put_failure_updates_transport_status(monkeypatch: pytest.MonkeyPatch) -
         upsert=lambda obs: None,
         mark_deleted=lambda observation_id, deleted_at: None,
     )
-    monkeypatch.setattr(store, '_open_session', lambda: _BrokenSession())
+    monkeypatch.setattr(transport, '_open_session', lambda: _BrokenSession())
     monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
     store._reset_session()
     store._reset_index()
@@ -213,7 +214,7 @@ def test_failed_put_is_queued_and_replayed_on_next_success(monkeypatch: pytest.M
         mark_deleted=lambda observation_id, deleted_at: None,
     )
     monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
-    monkeypatch.setattr(store, '_open_session', lambda: _BrokenSession())
+    monkeypatch.setattr(transport, '_open_session', lambda: _BrokenSession())
     store._reset_session()
     store._reset_index()
 
@@ -223,7 +224,7 @@ def test_failed_put_is_queued_and_replayed_on_next_success(monkeypatch: pytest.M
     assert store.get_transport_status().pending_puts == 1
 
     working = _WorkingSession()
-    monkeypatch.setattr(store, '_open_session', lambda: working)
+    monkeypatch.setattr(transport, '_open_session', lambda: working)
     store._reset_session()
 
     fresh = Observation(content='fresh')
@@ -263,7 +264,7 @@ def test_pending_drain_is_capped_per_success(monkeypatch: pytest.MonkeyPatch) ->
     )
     monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
     working = _WorkingSession()
-    monkeypatch.setattr(store, '_open_session', lambda: working)
+    monkeypatch.setattr(transport, '_open_session', lambda: working)
     store._reset_session()
     store._reset_index()
 
@@ -311,7 +312,7 @@ def test_pending_drain_retryable_failure_keeps_remaining_rows(monkeypatch: pytes
         store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
 
     flaky = _FlakyDrainSession(queued[0].key_expr)
-    monkeypatch.setattr(store, '_open_session', lambda: flaky)
+    monkeypatch.setattr(transport, '_open_session', lambda: flaky)
     store._reset_session()
     store._reset_index()
 
@@ -347,7 +348,7 @@ def test_malformed_pending_row_is_dropped_before_publish(monkeypatch: pytest.Mon
     store._enqueue_pending_put('observation', f'mem/obs/x/y/z/s/{bad_id}', bad_id, '{not-json')
 
     working = _WorkingSession()
-    monkeypatch.setattr(store, '_open_session', lambda: working)
+    monkeypatch.setattr(transport, '_open_session', lambda: working)
     store._reset_session()
     store._reset_index()
 
@@ -406,7 +407,7 @@ def test_start_pending_drain_background_drains_queued_rows(monkeypatch: pytest.M
     monkeypatch.setattr(store, 'get_index', lambda: dummy_index)
     monkeypatch.setattr(pending_queue, '_PENDING_DRAIN_BATCH', 1)
     working = _WorkingSession()
-    monkeypatch.setattr(store, '_open_session', lambda: working)
+    monkeypatch.setattr(transport, '_open_session', lambda: working)
     store._reset_session()
     store._reset_index()
 
