@@ -15,6 +15,15 @@ tests:
     - ``replication.py``: rebuild policy, key parsing, and the index
       subscriber that mirrors replicated PUT/DELETE into the local index
     - ``purge.py``: retention GC, shadow sweep, and pc-scoped bulk purge
+
+Patching rule (#172): the re-exports are plain aliases, good for *calling*
+only. Assigning or monkeypatching ``store.<name>`` does not propagate into
+the owning module, so stub internals on the module that owns them
+(``mesh_mem.transport`` for ``_open_session`` / ``_session`` /
+``_RETRYABLE_EXC``, ``mesh_mem.pending_queue`` for queue tunables, and so
+on). Patching functions that still live here (``get_index``,
+``find_observation_by_id``, ``_parse_iso``, ``get_session`` as an
+attribute the siblings read) keeps working.
 """
 
 from datetime import datetime

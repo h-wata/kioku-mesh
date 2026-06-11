@@ -642,3 +642,26 @@ def test_search_via_zenoh_cursor_strict_tuple_walks_same_timestamp(monkeypatch: 
     assert strict_ids == [
         r.observation_id for r in rows[3:]
     ], 'cursor_observation_id must drop the boundary row and anything sorted before it'
+
+
+def test_facade_reexports_are_plain_aliases() -> None:
+    """#172: store's re-exports are aliases of the owning module's functions.
+
+    This freezes the patching contract documented in store.py: calling
+    through ``store.<name>`` is supported, but stubbing internals must
+    target the owning module (``transport`` / ``pending_queue``), because
+    assigning ``store.<name>`` only shadows the alias.
+    """
+    # Same objects — calling via store is identical to calling the owner.
+    assert store.get_session is transport.get_session
+    assert store._open_session is transport._open_session
+    assert store.get_transport_status is transport.get_transport_status
+    assert store.drain_pending_puts is pending_queue.drain_pending_puts
+
+    # Shadowing demo: assignment on store must NOT rebind the owner.
+    original = store._open_session
+    try:
+        store._open_session = lambda: None  # type: ignore[assignment]
+        assert transport._open_session is original, 'store assignment must not reach transport'
+    finally:
+        store._open_session = original

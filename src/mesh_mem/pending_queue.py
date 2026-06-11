@@ -7,13 +7,15 @@ once the Zenoh put succeeds — the queue is the explicit holding area for
 writes that have not yet met that contract.
 
 This module owns the queue storage, the drain logic, and the background
-drain worker thread. Transport collaborators (the Zenoh session, the local
-index, retryable-exception classification, and transport-status recording)
-stay in ``store`` and are resolved at call time via :func:`_store` so that
-test monkeypatches on ``store`` (for example ``store._open_session`` or
-``store.get_index``) keep affecting drain behavior. ``store`` re-exports
-this module's public surface, so ``store.drain_pending_puts`` and friends
-remain valid entry points.
+drain worker thread. Collaborators are resolved at call time via
+:func:`_store`, so patching the *function itself* on ``store`` (for example
+``store.get_session`` or ``store.get_index``) keeps affecting drain
+behavior. Note the limit (#172): functions whose implementation lives in
+``transport`` read their *own* module globals, so transport-owned internals
+(``_open_session``, ``_session``, ``_RETRYABLE_EXC``, status recorders)
+must be patched on ``mesh_mem.transport``, not on the ``store`` aliases.
+``store`` re-exports this module's public surface, so
+``store.drain_pending_puts`` and friends remain valid entry points.
 """
 
 import logging
@@ -45,9 +47,12 @@ def _store() -> ModuleType:
     """Return the ``store`` module, resolved lazily to avoid import cycles.
 
     Looked up at call time (not import time) so test monkeypatches on
-    ``store`` attributes — session factory, index handle, retryable
-    exception tuple, status recorders, ``_now_iso_utc`` — stay effective
-    for queue and drain internals.
+    ``store``-level functions — ``get_session``, ``get_index``,
+    ``_now_iso_utc`` — stay effective for queue and drain internals.
+    This only covers the attribute this module reads off ``store``;
+    internals *inside* a transport-owned function (e.g. which session
+    factory ``get_session`` consults) live in ``mesh_mem.transport`` and
+    must be patched there (#172).
     """
     from . import store
 

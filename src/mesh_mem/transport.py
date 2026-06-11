@@ -12,7 +12,12 @@ unchanged so implementation bugs are not hidden by a retry loop.
 
 ``store`` re-exports this module's surface, so ``store.get_session``,
 ``store.with_retry``, ``store.get_transport_status`` and friends remain
-valid entry points for callers and tests.
+valid entry points for *calling*. The re-exports are plain aliases,
+though: assigning or monkeypatching them on ``store`` only shadows the
+alias and does not reach this module (#172). To stub or inspect
+transport internals — ``_open_session``, the cached ``_session``,
+``_mesh_first_probe_success``, ``_RETRYABLE_EXC``, status recorders —
+patch ``mesh_mem.transport`` directly.
 """
 
 from collections import deque
