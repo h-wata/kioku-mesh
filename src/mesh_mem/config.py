@@ -103,6 +103,7 @@ def resolve_write_visibility(explicit: str = '') -> tuple[str, str]:
     requested without its id configured, or on an unknown visibility.
     """
     from .keyspace import VALID_VISIBILITIES
+    from .keyspace import validate_scope_slug
 
     visibility = (explicit or get_default_visibility()).strip()
     if visibility not in VALID_VISIBILITIES:
@@ -115,6 +116,7 @@ def resolve_write_visibility(explicit: str = '') -> tuple[str, str]:
                 "visibility 'user' requires a user_id: set MESH_MEM_USER_ID or add "
                 "'user_id: <slug>' to ~/.config/kioku-mesh/config.yaml (use the same value on all your machines)"
             )
+        validate_scope_slug(visibility, user_id)
         return visibility, user_id
     if visibility == 'team':
         team_id = get_team_id()
@@ -123,6 +125,7 @@ def resolve_write_visibility(explicit: str = '') -> tuple[str, str]:
                 "visibility 'team' requires a team_id: set MESH_MEM_TEAM_ID or add "
                 "'team_id: <slug>' to ~/.config/kioku-mesh/config.yaml"
             )
+        validate_scope_slug(visibility, team_id)
         return visibility, team_id
     return visibility, ''
 

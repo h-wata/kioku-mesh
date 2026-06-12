@@ -202,6 +202,10 @@ def save_observation(
             (default: follow the server-side configured default). The
             user_id / team_id behind the scoped tiers are resolved from
             server configuration, never from tool arguments (ADR-0019).
+            An explicit value intentionally overrides the configured
+            default — the MCP client is trusted at the host boundary
+            (ADR-0014); scope restrictions, if ever needed, belong in a
+            future server-side allowlist.
 
     Returns:
         The generated ``observation_id``.

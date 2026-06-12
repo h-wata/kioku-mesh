@@ -166,29 +166,31 @@ def test_retention_skips_unparseable_deleted_at(single_zenohd: Any) -> None:  # 
     assert _tomb_keys_for(obs.observation_id) != []
 
 
-def test_force_id_broadcast_reaches_unlocatable_key(single_zenohd: Any) -> None:  # noqa: ARG001
-    """Wildcard broadcast purges an obs key that ``find_observation_by_id`` cannot locate.
+def test_force_id_purges_unparseable_key(single_zenohd: Any) -> None:  # noqa: ARG001
+    """The per-id sweep purges an obs key whose payload cannot be parsed.
 
     Simulates the split-brain edge case codex flagged on b09b82c: a key is
     present on the mesh but the live query cannot materialize it as an
-    :class:`Observation` (here: malformed JSON). The per-key delete path is
-    therefore skipped, and only the wildcard broadcast stops the key from
-    surviving the emergency purge.
+    :class:`Observation` (here: malformed JSON). The old implementation
+    could only reach it via the best-effort wildcard broadcast; since the
+    Phase B per-id enumeration (PR #179 Codex P1 fix) the key itself is
+    located and exact-deleted regardless of its payload, so the purge now
+    reports it as removed.
     """
     obs_id = '0' * 32
     malformed_key = f'mem/obs/claude/claude-code/xxx/sess/{obs_id}'
     store.get_session().put(malformed_key, '{ not valid json')
     time.sleep(_INGEST_SETTLE)
 
-    # Sanity: key is present but unparseable, so find_observation_by_id misses it.
+    # Sanity: payload is unparseable, so the payload-level lookup misses it.
     assert store.find_observation_by_id(obs_id) is None
     sess = store.get_session()
     pre = [str(r.ok.key_expr) for r in sess.get('mem/obs/**', timeout=2.0) if r.ok]
     assert malformed_key in pre
 
     obs_removed, tomb_removed = store.physical_delete_observation(obs_id)
-    # Local find missed → obs_removed stays False even though broadcast fires.
-    assert obs_removed is False
+    # Key-level enumeration finds and removes it without parsing the payload.
+    assert obs_removed is True
     assert tomb_removed is False
 
     time.sleep(_INGEST_SETTLE)

@@ -21,6 +21,8 @@ Write paths still emit legacy keys only; visibility-aware key *building*
 lands in Phase B and will live here as well.
 """
 
+import re
+
 OBS_MARKER = 'obs'
 TOMB_MARKER = 'tomb'
 
@@ -38,6 +40,26 @@ _IDENTITY_SEGMENTS = 4  # agent_family / client_id / pc_id / session_id
 # '' = legacy (un-tiered) — writes under mem/{obs,tomb}/... as before.
 VALID_VISIBILITIES: frozenset[str] = frozenset({'', 'mesh', 'user', 'team'})
 
+_SCOPE_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+
+
+def validate_scope_slug(visibility: str, scope_id: str) -> None:
+    """Reject scope ids that would break the key structure.
+
+    The scope id becomes one Zenoh key chunk, so it must be a plain slug:
+    1-64 chars of ``[A-Za-z0-9._-]`` starting alphanumeric. Validated both
+    at config resolution time (so a bad MESH_MEM_USER_ID fails the save
+    with an actionable message instead of crashing in the key builder) and
+    again in :func:`_namespace_prefix` as defense in depth.
+    """
+    if not scope_id:
+        raise ValueError(f"visibility '{visibility}' requires a scope_id (user_id / team_id)")
+    if not _SCOPE_SLUG_RE.match(scope_id):
+        raise ValueError(
+            f'scope_id for visibility {visibility!r} must match [A-Za-z0-9][A-Za-z0-9._-]*'
+            f' (max 64 chars); got {scope_id!r}'
+        )
+
 
 def _namespace_prefix(visibility: str, scope_id: str) -> str:
     """Return the key prefix up to (not including) the obs/tomb marker.
@@ -52,10 +74,7 @@ def _namespace_prefix(visibility: str, scope_id: str) -> str:
     if visibility in _UNSCOPED_TIERS:
         return f'mem/{visibility}'
     if visibility in _SCOPED_TIERS:
-        if not scope_id:
-            raise ValueError(f"visibility '{visibility}' requires a scope_id (user_id / team_id)")
-        if '/' in scope_id or '*' in scope_id or '$' in scope_id:
-            raise ValueError(f'scope_id must be a plain slug, got {scope_id!r}')
+        validate_scope_slug(visibility, scope_id)
         return f'mem/{visibility}/{scope_id}'
     raise ValueError(f'visibility must be one of {sorted(VALID_VISIBILITIES)}; got {visibility!r}')
 
