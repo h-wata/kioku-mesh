@@ -20,6 +20,7 @@ from . import __version__
 from .backend import get_backend
 from .backend import reset_backend
 from .config import get_backend_mode
+from .config import resolve_write_visibility
 from .identity import get_pc_id
 from .identity import get_session_id
 from .models import Observation
@@ -160,6 +161,7 @@ def save_observation(
     source_files: list[str] | None = None,
     references: list[str] | None = None,
     supersedes: list[str] | None = None,
+    visibility: str = '',
 ) -> str:
     """Persist a work note / decision / discovery into the shared mesh memory.
 
@@ -195,12 +197,25 @@ def save_observation(
         source_files: related file paths for traceability.
         references: related PR / Issue / external identifiers.
         supersedes: list of observation_ids this entry replaces.
+        visibility: replication scope — "user" (this user's machines only),
+            "team" (the configured team), "mesh" (every mesh peer), or ""
+            (default: follow the server-side configured default). The
+            user_id / team_id behind the scoped tiers are resolved from
+            server configuration, never from tool arguments (ADR-0019).
+            An explicit value intentionally overrides the configured
+            default — the MCP client is trusted at the host boundary
+            (ADR-0014); scope restrictions, if ever needed, belong in a
+            future server-side allowlist.
 
     Returns:
         The generated ``observation_id``.
     """
     if memory_type not in VALID_MEMORY_TYPES:
         return f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}. got: {memory_type!r}'
+    try:
+        effective_visibility, scope_id = resolve_write_visibility(visibility)
+    except ValueError as e:
+        return str(e)
     obs = Observation(
         content=content,
         project=project,
@@ -212,6 +227,8 @@ def save_observation(
         source_files=source_files or [],
         references=references or [],
         supersedes=supersedes or [],
+        visibility=effective_visibility,
+        scope_id=scope_id,
     )
     get_backend().put_observation(obs)
     return f'saved: {obs.observation_id}'

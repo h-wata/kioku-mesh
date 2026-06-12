@@ -21,6 +21,8 @@ Write paths still emit legacy keys only; visibility-aware key *building*
 lands in Phase B and will live here as well.
 """
 
+import re
+
 OBS_MARKER = 'obs'
 TOMB_MARKER = 'tomb'
 
@@ -34,6 +36,100 @@ _SCOPED_TIERS = ('user', 'team')
 _UNSCOPED_TIERS = ('mesh',)
 
 _IDENTITY_SEGMENTS = 4  # agent_family / client_id / pc_id / session_id
+
+# '' = legacy (un-tiered) — writes under mem/{obs,tomb}/... as before.
+VALID_VISIBILITIES: frozenset[str] = frozenset({'', 'mesh', 'user', 'team'})
+
+_SCOPE_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+
+
+def validate_scope_slug(visibility: str, scope_id: str) -> None:
+    """Reject scope ids that would break the key structure.
+
+    The scope id becomes one Zenoh key chunk, so it must be a plain slug:
+    1-64 chars of ``[A-Za-z0-9._-]`` starting alphanumeric. Validated both
+    at config resolution time (so a bad MESH_MEM_USER_ID fails the save
+    with an actionable message instead of crashing in the key builder) and
+    again in :func:`_namespace_prefix` as defense in depth.
+    """
+    if not scope_id:
+        raise ValueError(f"visibility '{visibility}' requires a scope_id (user_id / team_id)")
+    if not _SCOPE_SLUG_RE.match(scope_id):
+        raise ValueError(
+            f'scope_id for visibility {visibility!r} must match [A-Za-z0-9][A-Za-z0-9._-]*'
+            f' (max 64 chars); got {scope_id!r}'
+        )
+
+
+def _namespace_prefix(visibility: str, scope_id: str) -> str:
+    """Return the key prefix up to (not including) the obs/tomb marker.
+
+    Phase B (ADR-0019): writers branch on ``visibility``. ``''`` keeps the
+    legacy layout so un-configured installs behave exactly as before.
+    Scoped tiers (``user`` / ``team``) require a non-empty ``scope_id``
+    (the user_id / team_id resolved from config — never from LLM input).
+    """
+    if visibility == '':
+        return 'mem'
+    if visibility in _UNSCOPED_TIERS:
+        return f'mem/{visibility}'
+    if visibility in _SCOPED_TIERS:
+        validate_scope_slug(visibility, scope_id)
+        return f'mem/{visibility}/{scope_id}'
+    raise ValueError(f'visibility must be one of {sorted(VALID_VISIBILITIES)}; got {visibility!r}')
+
+
+def obs_key(
+    visibility: str,
+    scope_id: str,
+    agent_family: str,
+    client_id: str,
+    pc_id: str,
+    session_id: str,
+    observation_id: str,
+) -> str:
+    """Build the canonical obs key for the given visibility tier."""
+    prefix = _namespace_prefix(visibility, scope_id)
+    return f'{prefix}/{OBS_MARKER}/{agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}'
+
+
+def tomb_key(
+    visibility: str,
+    scope_id: str,
+    agent_family: str,
+    client_id: str,
+    pc_id: str,
+    session_id: str,
+    observation_id: str,
+) -> str:
+    """Build the canonical tombstone key mirroring :func:`obs_key`."""
+    prefix = _namespace_prefix(visibility, scope_id)
+    return f'{prefix}/{TOMB_MARKER}/{agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}'
+
+
+def mirror_to_tomb_key(obs_key_expr: str) -> str:
+    """Convert a canonical obs key into its mirrored tomb key (any namespace).
+
+    Marker-relative replacement, so it works for legacy and tiered shapes
+    alike. Callers must pass canonical obs keys (validate with
+    :func:`obs_id_from_key` first when the key came off the wire).
+    """
+    return obs_key_expr.replace(f'/{OBS_MARKER}/', f'/{TOMB_MARKER}/', 1)
+
+
+def mirror_to_obs_key(tomb_key_expr: str) -> str:
+    """Inverse of :func:`mirror_to_tomb_key` for canonical tomb keys."""
+    return tomb_key_expr.replace(f'/{TOMB_MARKER}/', f'/{OBS_MARKER}/', 1)
+
+
+def broadcast_obs_selector(observation_id: str) -> str:
+    """Best-effort wildcard delete pattern for an obs id across all namespaces."""
+    return f'mem/**/{OBS_MARKER}/**/{observation_id}'
+
+
+def broadcast_tomb_selector(observation_id: str) -> str:
+    """Best-effort wildcard delete pattern for a tomb id across all namespaces."""
+    return f'mem/**/{TOMB_MARKER}/**/{observation_id}'
 
 
 def obs_selector(agent_family: str = '', client_id: str = '', pc_id: str = '', session_id: str = '') -> str:

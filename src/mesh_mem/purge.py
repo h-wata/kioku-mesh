@@ -39,8 +39,13 @@ import json
 import logging
 from types import ModuleType
 
+from .keyspace import broadcast_obs_selector
+from .keyspace import broadcast_tomb_selector
+from .keyspace import mirror_to_obs_key
+from .keyspace import mirror_to_tomb_key
 from .keyspace import obs_id_from_key
 from .keyspace import OBS_READ_KEY_EXPR
+from .keyspace import TOMB_READ_KEY_EXPR
 from .local_index import LocalIndex
 from .models import Observation
 from .models import Tombstone
@@ -109,24 +114,66 @@ def _list_tombstones() -> list[tuple[str, Tombstone]]:
     """
     session = _store().get_session()
     out: list[tuple[str, Tombstone]] = []
-    for ok in _iter_ok_replies(session, 'mem/tomb/**'):
+    for ok in _iter_ok_replies(session, TOMB_READ_KEY_EXPR):
+        key = str(ok.key_expr)
+        # Canonical gate (ADR-0019 Phase B): the broadened selector can match
+        # off-shape keys; never feed those into the delete paths.
+        if obs_id_from_key(key) is None:
+            log.debug('skip non-canonical tomb key in gc scan: %s', key)
+            continue
         try:
             tomb = Tombstone.from_json(ok.payload.to_string())
         except Exception as e:  # noqa: BLE001
             log.warning('skip malformed tombstone at %s: %s', ok.key_expr, e)
             continue
-        out.append((str(ok.key_expr), tomb))
+        out.append((key, tomb))
     return out
+
+
+def _delete_all_keys_for_id(observation_id: str) -> tuple[int, int]:
+    """Enumerate and exact-delete every canonical obs / tomb key carrying ``observation_id``.
+
+    Covers ALL namespaces (legacy + ADR-0019 tiers). This is the
+    rolling-upgrade safety net (Codex review on PR #179): an old writer may
+    have placed the tombstone under the legacy namespace while the
+    observation itself lives under a tiered key (or vice versa), so
+    deleting only the mirror-derived counterpart would leave the real key
+    behind — and a later rebuild would resurrect the deleted observation.
+
+    Enumerate-then-delete with exact keys (wildcard delete support varies
+    by backend); only keys that pass the canonical parser AND whose leaf id
+    matches are touched. Returns ``(obs_keys_deleted, tomb_keys_deleted)``.
+    """
+    session = _store().get_session()
+    obs_deleted = 0
+    tomb_deleted = 0
+    for selector, is_obs in (
+        (broadcast_obs_selector(observation_id), True),
+        (broadcast_tomb_selector(observation_id), False),
+    ):
+        keys: list[str] = []
+        for ok in _iter_ok_replies(session, selector):
+            key = str(ok.key_expr)
+            if obs_id_from_key(key) != observation_id:
+                continue
+            keys.append(key)
+        for key in keys:
+            session.delete(key)
+            if is_obs:
+                obs_deleted += 1
+            else:
+                tomb_deleted += 1
+    return obs_deleted, tomb_deleted
 
 
 def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
     """Physically purge an observation and any matching tombstones from the mesh.
 
-    Locates the observation by full-id scan so the caller does not need to
-    supply the identity fragments. Always sweeps ``mem/tomb/**`` for any
-    tombstone carrying the same ``observation_id`` — covers the case where
-    a tomb arrived on this router via replication but the obs never did,
-    so the forensic trail is cleaned up as well.
+    Locates every canonical obs / tomb key carrying ``observation_id`` via
+    per-id leaf selectors across all namespaces (legacy + ADR-0019 tiers)
+    and exact-deletes each — this covers the orphan-tomb case (a tomb
+    replicated here without its obs) and the mixed-namespace case where
+    the obs and its tombstone live under different prefixes.
 
     After the per-key deletes we additionally broadcast a wildcard-pattern
     ``session.delete`` for both ``mem/obs/*/*/*/*/{id}`` and
@@ -147,33 +194,26 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
         split-brain guarantee is needed.
     """
     store = _store()
-    obs = store.find_observation_by_id(observation_id)
-    obs_removed = False
-    if obs is not None:
-        delete_key(obs.key_expr)
-        obs_removed = True
-
-    # Enumerate-then-delete across tombs so we catch the orphan-tomb case.
-    tomb_keys: list[str] = []
-    for tomb_key, tomb in _list_tombstones():
-        if tomb.observation_id == observation_id:
-            tomb_keys.append(tomb_key)
-    for k in tomb_keys:
-        delete_key(k)
+    # Per-id enumeration across ALL namespaces (legacy + tiered) replaces the
+    # old global mem/tomb/** scan: cheaper on populated meshes and immune to
+    # the mixed-namespace case where the obs and its tombstone live under
+    # different prefixes (rolling upgrade).
+    obs_deleted, tomb_deleted = _delete_all_keys_for_id(observation_id)
+    obs_removed = obs_deleted > 0
 
     # Broadcast wildcard deletes so reachable peers that didn't surface
     # via the live query above still drop matching keys. Key layout is
     # ``mem/{obs|tomb}/{agent}/{client}/{pc}/{session}/{observation_id}``,
     # so ``*/*/*/*`` matches the four identity segments below the prefix.
     # Best-effort: wildcard delete support varies by backend.
-    _broadcast_delete_best_effort(f'mem/obs/*/*/*/*/{observation_id}')
-    _broadcast_delete_best_effort(f'mem/tomb/*/*/*/*/{observation_id}')
+    _broadcast_delete_best_effort(broadcast_obs_selector(observation_id))
+    _broadcast_delete_best_effort(broadcast_tomb_selector(observation_id))
 
     # Drop the local SQLite row too; otherwise readers would still see the
     # observation via the index even though Zenoh has dropped it.
     store.get_index().physical_delete(observation_id)
 
-    return (obs_removed, bool(tomb_keys))
+    return (obs_removed, tomb_deleted > 0)
 
 
 @dataclass
@@ -206,7 +246,10 @@ def _scan_obs_by_pc_id(
     """
     session = _store().get_session()
     out: list[tuple[str, str, str]] = []
-    for ok in _iter_ok_replies(session, 'mem/obs/**', timeout=30.0):
+    for ok in _iter_ok_replies(session, OBS_READ_KEY_EXPR, timeout=30.0):
+        key_id = obs_id_from_key(str(ok.key_expr))
+        if key_id is None:
+            continue
         try:
             payload = json.loads(ok.payload.to_string())
         except (json.JSONDecodeError, ValueError):
@@ -217,7 +260,7 @@ def _scan_obs_by_pc_id(
         if session_prefix and not sid.startswith(session_prefix):
             continue
         obs_id = payload.get('observation_id')
-        if not isinstance(obs_id, str) or len(obs_id) != 32:
+        if not isinstance(obs_id, str) or obs_id != key_id:
             continue
         out.append((str(ok.key_expr), obs_id, sid))
     return out
@@ -275,7 +318,7 @@ def execute_bulk_purge(
         # wrapped in its own try so an obs-side success is never invalidated
         # by a tomb-side transport hiccup. The Zenoh ``delete`` is a no-op
         # when the tomb slot is absent (bench-obs case), so always safe.
-        tomb_key = 'mem/tomb/' + obs_key[len('mem/obs/') :]
+        tomb_key = mirror_to_tomb_key(obs_key)
         try:
             session.delete(tomb_key)
             tombs_purged += 1
@@ -357,6 +400,12 @@ def _gc_via_sqlite_index(idx: LocalIndex, cutoff_iso: str, project: str) -> int:
             continue
         delete_key(obs.key_expr)
         delete_key(obs.tombstone_key_expr())
+        # Rolling-upgrade safety net: tomb/obs replicas may sit under other
+        # namespaces than the payload-derived pair (Codex review on PR #179).
+        try:
+            _delete_all_keys_for_id(obs_id)
+        except Exception as e:  # noqa: BLE001 — best-effort widening of an already-issued purge
+            log.warning('gc fast-path cross-namespace sweep failed for %s: %s', obs_id, e)
         idx.physical_delete(obs_id)
         purged += 1
     return purged
@@ -444,9 +493,18 @@ def gc_expired_tombstones(
                 continue
             if obs.project != project:
                 continue
-        obs_key = tomb_key.replace('mem/tomb/', 'mem/obs/', 1)
+        obs_key = mirror_to_obs_key(tomb_key)
         delete_key(tomb_key)
         delete_key(obs_key)
+        # Rolling-upgrade safety net: the obs (or replica tombs) may live
+        # under a different namespace than this tomb — e.g. a tiered obs
+        # tombstoned by an old writer under the legacy prefix. Sweep every
+        # canonical key for the id so nothing survives to resurrect on the
+        # next rebuild (Codex review on PR #179).
+        try:
+            _delete_all_keys_for_id(tomb.observation_id)
+        except Exception as e:  # noqa: BLE001 — best-effort widening of an already-issued purge
+            log.warning('gc cross-namespace sweep failed for %s: %s', tomb.observation_id, e)
         # Mirror the purge into the SQLite sidecar so the row does not
         # outlive the Zenoh delete.
         store.get_index().physical_delete(tomb.observation_id)

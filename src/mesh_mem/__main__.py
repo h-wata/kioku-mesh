@@ -31,6 +31,7 @@ from . import mcp_install as mcp_install_module
 from . import tls as tls_module
 from .backend import get_backend
 from .backend import reset_backend
+from .config import resolve_write_visibility
 from .config import write_local_config
 from .identity import get_pc_id
 from .identity import get_session_id
@@ -144,6 +145,11 @@ def _cmd_save(args: argparse.Namespace) -> int:
     source_files = _parse_csv(args.source_files) if args.source_files else []
     references = _parse_csv(args.references) if args.references else []
     supersedes = _parse_csv(args.supersedes) if args.supersedes else []
+    try:
+        visibility, scope_id = resolve_write_visibility(getattr(args, 'visibility', '') or '')
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
     obs = Observation(
         content=args.content,
         project=args.project or '',
@@ -155,6 +161,8 @@ def _cmd_save(args: argparse.Namespace) -> int:
         source_files=source_files,
         references=references,
         supersedes=supersedes,
+        visibility=visibility,
+        scope_id=scope_id,
     )
     get_backend().put_observation(obs)
     print(f'saved: {obs.observation_id}')
@@ -1566,6 +1574,13 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=range(1, 6),
         metavar='1-5',
         help='importance 1-5 (default: 2)',
+    )
+    p_save.add_argument(
+        '--visibility',
+        default='',
+        choices=['', 'user', 'team', 'mesh'],
+        help='replication scope: user (your machines), team, mesh (all peers); '
+        'default follows config.yaml default_visibility (empty = legacy layout)',
     )
     p_save.add_argument('--subject', default='', help='short topic name')
     p_save.add_argument('--summary', default='', help='one-line summary shown in search results')

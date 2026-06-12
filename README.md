@@ -106,6 +106,25 @@ Useful environment variables:
 | `MESH_MEM_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml`; set `local` or `zenoh` |
 | `MESH_MEM_FORCE_REBUILD=1` | Rebuild the local index at CLI startup |
 | `MESH_MEM_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
+| `MESH_MEM_USER_ID` | Your user slug for `--visibility user` (same value on all your machines) |
+| `MESH_MEM_TEAM_ID` | Team slug for `--visibility team` |
+| `MESH_MEM_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = legacy layout) |
+
+### Visibility scopes (experimental)
+
+`save` and the MCP `save_observation` tool accept `--visibility` /
+`visibility` to choose how far a memory replicates:
+
+- `user` — only this user's machines (requires `user_id`, set via
+  `MESH_MEM_USER_ID` or `user_id:` in `~/.config/kioku-mesh/config.yaml`;
+  use the same value on every machine you own)
+- `team` — peers that host the team's storage (requires `team_id`)
+- `mesh` — every peer on the mesh
+- unset — follows `default_visibility` from config; with no config the
+  legacy layout is used and nothing changes
+
+The user/team ids are resolved from server-side configuration, never from
+tool arguments. See ADR-0019 for the design.
 
 ## MCP Clients
 
