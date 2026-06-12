@@ -12,8 +12,8 @@ replication:
       canonical ``mem/{obs|tomb}/.../{observation_id}`` shape before any
       DELETE is mirrored into the index (#64).
     - **replication subscriber**: ``start_index_subscriber`` declares the
-      ``mem/obs/**`` / ``mem/tomb/**`` subscribers whose callbacks mirror
-      replicated PUT/DELETE samples into the local index.
+      obs / tomb subscribers (legacy + ADR-0019 tiered namespaces) whose
+      callbacks mirror replicated PUT/DELETE samples into the local index.
 
 The index handle itself (``get_index`` / ``_index`` / ``_subscribers``) and
 its reset path stay in ``store`` because they own that module state and the
@@ -33,6 +33,9 @@ from typing import Any
 
 import zenoh
 
+from .keyspace import obs_id_from_key
+from .keyspace import OBS_READ_KEY_EXPR
+from .keyspace import TOMB_READ_KEY_EXPR
 from .models import Observation
 from .models import Tombstone
 
@@ -48,9 +51,6 @@ log = logging.getLogger(__name__)
 # ``--rebuild`` flag) outranks both env vars.
 _rebuild_on_init_default: bool = True
 _rebuild_explicit_override: bool | None = None
-
-_OBS_KEY_PREFIXES = ('mem/obs/', 'mem/tomb/')
-_OBS_KEY_SEGMENTS = 7  # mem / {obs|tomb} / agent / client / pc / session / obs_id
 
 
 def _store() -> ModuleType:
@@ -139,31 +139,20 @@ def _empty_index_rebuild_allowed() -> bool:
     return True
 
 
-def _obs_id_from_key(key_expr: str) -> str | None:
-    """Extract a 32-hex observation_id from a canonical kioku-mesh key.
-
-    Conservative parser. Accepts only the exact ``mem/{obs|tomb}/
-    {agent_family}/{client_id}/{pc_id}/{session_id}/{observation_id}``
-    shape (7 slash-separated segments, ``mem/obs/`` or ``mem/tomb/``
-    prefix) with a 32 lowercase hex trailing segment. Anything else
-    (wrong prefix, wrong segment count, malformed obs_id) returns
-    ``None`` so a stray DELETE on an unrelated key cannot drive
-    ``physical_delete`` against a real row whose id happens to collide
-    with the trailing token (Issue #64).
-    """
-    if not key_expr.startswith(_OBS_KEY_PREFIXES):
-        return None
-    parts = key_expr.split('/')
-    if len(parts) != _OBS_KEY_SEGMENTS:
-        return None
-    obs_id = parts[-1]
-    if len(obs_id) == 32 and all(c in '0123456789abcdef' for c in obs_id):
-        return obs_id
-    return None
+# Conservative canonical-key parser (Issue #64), now namespace-aware
+# (ADR-0019 Phase A). Kept under its historical name so the store façade
+# re-export and existing callers/tests stay valid.
+_obs_id_from_key = obs_id_from_key
 
 
 def start_index_subscriber(session: zenoh.Session) -> list:
-    """Subscribe to mem/obs/** and mem/tomb/** to keep SQLite in sync with replication.
+    """Subscribe to obs / tomb keys (legacy + tiered) to keep SQLite in sync.
+
+    ADR-0019 Phase A: the subscriptions use ``mem/**/obs/**`` /
+    ``mem/**/tomb/**`` so PUT/DELETE samples published under the
+    visibility-tiered namespaces (``mem/mesh/...``, ``mem/user/{id}/...``,
+    ``mem/team/{id}/...``) by newer peers are mirrored into the local
+    index exactly like legacy ``mem/obs/**`` traffic.
 
     Callbacks are idempotent (upsert / mark_deleted / physical_delete) so
     overlap with the rebuild scan on startup is safe. PUT-kind samples
@@ -192,8 +181,23 @@ def start_index_subscriber(session: zenoh.Session) -> list:
             except Exception as e:  # noqa: BLE001
                 log.warning('index subscriber on_obs DELETE failed for %s: %s', obs_id, e)
             return
+        # The broadened ADR-0019 selector also matches keys outside the
+        # canonical shapes (e.g. mem/control/obs/...). Never let a payload
+        # under a non-canonical key — or one whose id disagrees with the
+        # key leaf — mutate the index (Codex review on PR #177).
+        key_id = _obs_id_from_key(str(sample.key_expr))
+        if key_id is None:
+            log.debug('index subscriber on_obs PUT ignored (non-canonical key %s)', sample.key_expr)
+            return
         try:
             obs = Observation.from_json(sample.payload.to_string())
+            if obs.observation_id != key_id:
+                log.debug(
+                    'index subscriber on_obs PUT ignored (key/payload id mismatch: key=%s payload_id=%s)',
+                    sample.key_expr,
+                    obs.observation_id,
+                )
+                return
             idx.upsert(obs)
         except json.JSONDecodeError as e:
             # Issue #31: gc broadcast-purge and other control payloads can
@@ -222,14 +226,25 @@ def start_index_subscriber(session: zenoh.Session) -> list:
             except Exception as e:  # noqa: BLE001
                 log.warning('index subscriber on_tomb DELETE failed for %s: %s', obs_id, e)
             return
+        key_id = _obs_id_from_key(str(sample.key_expr))
+        if key_id is None:
+            log.debug('index subscriber on_tomb PUT ignored (non-canonical key %s)', sample.key_expr)
+            return
         try:
             tomb = Tombstone.from_json(sample.payload.to_string())
+            if tomb.observation_id != key_id:
+                log.debug(
+                    'index subscriber on_tomb PUT ignored (key/payload id mismatch: key=%s payload_id=%s)',
+                    sample.key_expr,
+                    tomb.observation_id,
+                )
+                return
             idx.mark_deleted(tomb.observation_id, tomb.deleted_at)
         except json.JSONDecodeError as e:
             log.debug('index subscriber on_tomb non-JSON payload: %s', e)
         except Exception as e:  # noqa: BLE001
             log.warning('index subscriber on_tomb error: %s', e)
 
-    sub_obs = session.declare_subscriber('mem/obs/**', on_obs)
-    sub_tomb = session.declare_subscriber('mem/tomb/**', on_tomb)
+    sub_obs = session.declare_subscriber(OBS_READ_KEY_EXPR, on_obs)
+    sub_tomb = session.declare_subscriber(TOMB_READ_KEY_EXPR, on_tomb)
     return [sub_obs, sub_tomb]

@@ -288,8 +288,10 @@ def test_subscriber_demotes_non_json_payload_to_debug(
     remote = _remote_session(single_zenohd.endpoint)
     try:
         # Publish gibberish under both keyspaces the subscriber watches.
-        remote.put('mem/obs/x/y/z/sess/garbage', 'not json at all')
-        remote.put('mem/tomb/x/y/z/sess/garbage', '{not json either')
+        # Keys must be canonical (32-hex leaf) so the samples reach the
+        # JSON-parse branch instead of the non-canonical-key gate.
+        remote.put('mem/obs/x/y/z/sess/' + 'a' * 32, 'not json at all')
+        remote.put('mem/tomb/x/y/z/sess/' + 'b' * 32, '{not json either')
         time.sleep(_SETTLE)
     finally:
         remote.close()
@@ -634,3 +636,111 @@ def test_reset_index_clears_explicit_override() -> None:
     assert replication._rebuild_explicit_override is True  # noqa: SLF001
     store._reset_index()
     assert replication._rebuild_explicit_override is None  # noqa: SLF001
+
+
+def _tiered_obs_key(prefix: str, obs: Observation) -> str:
+    """Build the ADR-0019 tiered key for ``obs`` under ``prefix`` (e.g. ``mem/user/hwata``)."""
+    return f'{prefix}/obs/{obs.agent_family}/{obs.client_id}/{obs.pc_id}/{obs.session_id}/{obs.observation_id}'
+
+
+def test_subscriber_picks_up_tiered_namespace_puts(single_zenohd: Any) -> None:
+    """ADR-0019 Phase A: obs PUT under mesh/user/team namespaces land in the index."""
+    idx = store.get_index()
+    assert not idx.disabled
+
+    cases = [
+        ('mem/mesh', _mk_obs('tiered mesh obs', project='sub-tiered')),
+        ('mem/user/hwata', _mk_obs('tiered user obs', project='sub-tiered')),
+        ('mem/team/kioku-mesh', _mk_obs('tiered team obs', project='sub-tiered')),
+    ]
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        for prefix, obs in cases:
+            remote.put(_tiered_obs_key(prefix, obs), obs.to_json())
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    ids = {r.observation_id for r in idx.search(project='sub-tiered')}
+    for prefix, obs in cases:
+        assert obs.observation_id in ids, f'subscriber must index obs replicated under {prefix}'
+
+
+def test_subscriber_mirrors_tiered_namespace_delete(single_zenohd: Any) -> None:
+    """ADR-0019 Phase A: a DELETE on a tiered key purges the matching index row."""
+    idx = store.get_index()
+    obs = _mk_obs('tiered delete target', project='sub-tiered-del')
+    idx.upsert(obs)
+    assert obs.observation_id in {r.observation_id for r in idx.search(project='sub-tiered-del')}
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.delete(_tiered_obs_key('mem/user/hwata', obs))
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    assert idx.search(project='sub-tiered-del') == [], 'tiered-namespace DELETE must mirror into the index'
+
+
+def test_rebuild_indexes_tiered_namespace_rows(single_zenohd: Any) -> None:
+    """ADR-0019 Phase A: the startup rebuild scan ingests tiered-namespace rows."""
+    obs = _mk_obs('tiered rebuild obs', project='rebuild-tiered')
+    tombed = _mk_obs('tiered rebuild tombed', project='rebuild-tiered')
+    tomb = Tombstone(observation_id=tombed.observation_id)
+
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(_tiered_obs_key('mem/team/kioku-mesh', obs), obs.to_json())
+        remote.put(_tiered_obs_key('mem/team/kioku-mesh', tombed), tombed.to_json())
+        remote.put(
+            _tiered_obs_key('mem/team/kioku-mesh', tombed).replace('/obs/', '/tomb/', 1),
+            tomb.to_json(),
+        )
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    # Simulate restart: drop the index so get_index() rebuilds from Zenoh.
+    store._reset_index()
+
+    hits = {r.observation_id for r in store.search_observations(project='rebuild-tiered')}
+    assert obs.observation_id in hits, 'rebuild must ingest tiered-namespace obs'
+    assert tombed.observation_id not in hits, 'rebuild must apply tiered-namespace tombstones'
+
+
+def test_subscriber_rejects_payload_under_non_canonical_key(single_zenohd: Any) -> None:
+    """Codex review (PR #177): a valid Observation payload under an off-shape key must not be indexed."""
+    idx = store.get_index()
+    assert not idx.disabled
+
+    smuggled = _mk_obs('smuggled via control namespace', project='sub-noncanon')
+    mismatched = _mk_obs('id mismatch with key leaf', project='sub-noncanon')
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        # Off-shape namespaces that still match the broadened mem/**/obs/** selector.
+        remote.put(f'mem/control/obs/f/c/p/s/{smuggled.observation_id}', smuggled.to_json())
+        remote.put('mem/obs/x/y/z/sess/not-a-hex-id', smuggled.to_json())
+        # Canonical shape but the key leaf disagrees with the payload id.
+        remote.put('mem/obs/f/c/p/s/' + 'c' * 32, mismatched.to_json())
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    assert idx.search(project='sub-noncanon') == [], 'non-canonical or mismatched keys must never reach the index'
+
+
+def test_rebuild_rejects_payload_under_non_canonical_key(single_zenohd: Any) -> None:
+    """Codex review (PR #177): the rebuild scan applies the same canonical-key gate."""
+    smuggled = _mk_obs('smuggled for rebuild', project='rebuild-noncanon')
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(f'mem/control/obs/f/c/p/s/{smuggled.observation_id}', smuggled.to_json())
+        remote.put('mem/obs/f/c/p/s/' + 'd' * 32, smuggled.to_json())  # id mismatch
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    store._reset_index()
+
+    assert store.search_observations(project='rebuild-noncanon') == []

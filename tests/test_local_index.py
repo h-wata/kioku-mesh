@@ -558,26 +558,34 @@ class _FakePayload:
 
 
 class _FakeOk:
-    def __init__(self, s: str) -> None:
+    def __init__(self, s: str, key_expr: str) -> None:
         self.payload = _FakePayload(s)
+        self.key_expr = key_expr
 
 
 class _FakeReply:
-    def __init__(self, s: str) -> None:
-        self.ok = _FakeOk(s)
+    def __init__(self, s: str, key_expr: str) -> None:
+        self.ok = _FakeOk(s, key_expr)
 
 
 class _FakeSession:
-    """Minimal zenoh session mock for rebuild_from_zenoh tests."""
+    """Minimal zenoh session mock for rebuild_from_zenoh tests.
+
+    Replies carry canonical key strings because ``rebuild_from_zenoh``
+    validates each reply key against the keyspace parser before ingesting
+    the payload (PR #177 Codex review).
+    """
 
     def __init__(self, obs: list[Observation], tombs: list[Tombstone]) -> None:
-        self._obs_replies = [_FakeReply(o.to_json()) for o in obs]
-        self._tomb_replies = [_FakeReply(t.to_json()) for t in tombs]
+        self._obs_replies = [_FakeReply(o.to_json(), o.key_expr) for o in obs]
+        self._tomb_replies = [_FakeReply(t.to_json(), f'mem/tomb/f/c/p/s/{t.observation_id}') for t in tombs]
 
     def get(self, key_expr: str, **kwargs: object) -> list[_FakeReply]:  # type: ignore[override]
-        if 'mem/obs' in key_expr:
+        # Selectors are namespace-broadened since ADR-0019 Phase A
+        # ('mem/**/obs/**'), so dispatch on the obs/tomb marker chunk.
+        if '/obs/' in key_expr:
             return self._obs_replies
-        if 'mem/tomb' in key_expr:
+        if '/tomb/' in key_expr:
             return self._tomb_replies
         return []
 

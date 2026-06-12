@@ -35,6 +35,9 @@ import sqlite3
 import threading
 
 from .identity import state_dir
+from .keyspace import obs_id_from_key
+from .keyspace import OBS_READ_KEY_EXPR
+from .keyspace import TOMB_READ_KEY_EXPR
 from .models import Observation
 from .models import Tombstone
 
@@ -585,26 +588,59 @@ class LocalIndex:
         Idempotent: safe to call on every startup. Returns counts of rows
         added, tombstone marks applied, rebuild-shadow marks applied, and
         unchanged rows.
+
+        ADR-0019 Phase A: the scan selectors cover both the legacy
+        ``mem/{obs,tomb}/**`` namespace and the visibility-tiered ones
+        (``mem/mesh/...``, ``mem/user/{id}/...``, ``mem/team/{id}/...``),
+        so rows written by newer peers are indexed too.
         """
         if self._disabled or self._conn is None:
             return RebuildStats()
 
         obs_list: list[Observation] = []
-        for reply in session.get('mem/obs/**', timeout=30.0):  # type: ignore[attr-defined]
+        for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if reply.ok:
+                # The broadened selector can match non-canonical keys; never
+                # ingest a payload whose key is off-shape or disagrees with
+                # the payload id (Codex review on PR #177).
+                key_id = obs_id_from_key(str(reply.ok.key_expr))
+                if key_id is None:
+                    log.debug('rebuild_from_zenoh skip non-canonical obs key: %s', reply.ok.key_expr)
+                    continue
                 try:
-                    obs_list.append(Observation.from_json(reply.ok.payload.to_string()))
+                    obs = Observation.from_json(reply.ok.payload.to_string())
                 except Exception as e:  # noqa: BLE001
                     log.warning('rebuild_from_zenoh skip malformed obs: %s', e)
+                    continue
+                if obs.observation_id != key_id:
+                    log.warning(
+                        'rebuild_from_zenoh skip key/payload id mismatch: key=%s payload_id=%s',
+                        reply.ok.key_expr,
+                        obs.observation_id,
+                    )
+                    continue
+                obs_list.append(obs)
 
         tomb_ids: dict[str, str] = {}
-        for reply in session.get('mem/tomb/**', timeout=30.0):  # type: ignore[attr-defined]
+        for reply in session.get(TOMB_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if reply.ok:
+                key_id = obs_id_from_key(str(reply.ok.key_expr))
+                if key_id is None:
+                    log.debug('rebuild_from_zenoh skip non-canonical tomb key: %s', reply.ok.key_expr)
+                    continue
                 try:
                     tomb = Tombstone.from_json(reply.ok.payload.to_string())
-                    tomb_ids[tomb.observation_id] = tomb.deleted_at
                 except Exception as e:  # noqa: BLE001
                     log.warning('rebuild_from_zenoh skip malformed tomb: %s', e)
+                    continue
+                if tomb.observation_id != key_id:
+                    log.warning(
+                        'rebuild_from_zenoh skip key/payload id mismatch: key=%s payload_id=%s',
+                        reply.ok.key_expr,
+                        tomb.observation_id,
+                    )
+                    continue
+                tomb_ids[tomb.observation_id] = tomb.deleted_at
 
         added = 0
         marked_deleted = 0

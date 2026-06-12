@@ -31,9 +31,14 @@ from mesh_mem.store import QueryErrorReply
 
 
 def _ok_reply(obs: Observation) -> SimpleNamespace:
-    """Build a fake ``ok`` reply holding a serialized observation."""
+    """Build a fake ``ok`` reply holding a serialized observation.
+
+    ``key_expr`` is a plain canonical key string because the read paths
+    validate ``str(ok.key_expr)`` against the keyspace parser before
+    ingesting the payload (PR #177 Codex review).
+    """
     ok = SimpleNamespace(
-        key_expr=SimpleNamespace(as_str=lambda o=obs: f'mem/obs/fake/k/p/s/{o.observation_id}'),
+        key_expr=f'mem/obs/fake/k/p/s/{obs.observation_id}',
         payload=SimpleNamespace(to_string=lambda o=obs: o.to_json()),
     )
     return SimpleNamespace(ok=ok, err=None)
@@ -142,7 +147,8 @@ def test_find_by_id_via_zenoh_uses_leaf_selector(monkeypatch: pytest.MonkeyPatch
 
     assert hit is not None
     assert hit.observation_id == obs.observation_id
-    assert fake.calls == [f'mem/obs/**/{obs.observation_id}']
+    # ADR-0019 Phase A: the leaf selector covers legacy + tiered namespaces.
+    assert fake.calls == [f'mem/**/obs/**/{obs.observation_id}']
 
 
 def test_find_by_id_via_zenoh_rejects_invalid_observation_id(monkeypatch: pytest.MonkeyPatch) -> None:
