@@ -31,6 +31,7 @@ from datetime import timezone
 import logging
 
 from .keyspace import find_by_id_selector
+from .keyspace import obs_id_from_key
 from .keyspace import obs_selector
 from .keyspace import tomb_selector
 from .local_index import LocalIndex
@@ -336,7 +337,12 @@ def _search_via_zenoh(
 
     tombs: set[str] = set()
     for ok in _iter_ok_replies(session, tomb_expr):
-        tombs.add(str(ok.key_expr).rsplit('/', 1)[-1])
+        # Canonical-key gate (Codex review on PR #177): the broadened
+        # selector can match non-canonical keys; only a well-formed tomb
+        # key may hide an observation.
+        tomb_id = obs_id_from_key(str(ok.key_expr))
+        if tomb_id is not None:
+            tombs.add(tomb_id)
 
     q = query.lower()
     # Use a dict keyed by observation_id so multiple Zenoh storages replying
@@ -344,10 +350,17 @@ def _search_via_zenoh(
     # produce duplicates (#12). Last-writer-wins within a single GET scan.
     results_by_id: dict[str, Observation] = {}
     for ok in _iter_ok_replies(session, key_expr):
+        key_id = obs_id_from_key(str(ok.key_expr))
+        if key_id is None:
+            log.debug('skip non-canonical obs key in fallback scan: %s', ok.key_expr)
+            continue
         try:
             obs = Observation.from_json(ok.payload.to_string())
         except Exception as e:  # noqa: BLE001
             log.warning('skip malformed payload at %s: %s', ok.key_expr, e)
+            continue
+        if obs.observation_id != key_id:
+            log.debug('skip key/payload id mismatch in fallback scan: %s', ok.key_expr)
             continue
         if obs.observation_id in tombs:
             continue
@@ -428,6 +441,8 @@ def _find_by_id_via_zenoh(observation_id: str) -> Observation | None:
         return None
     session = get_session()
     for ok in _iter_ok_replies(session, find_by_id_selector(observation_id)):
+        if obs_id_from_key(str(ok.key_expr)) != observation_id:
+            continue
         try:
             obs = Observation.from_json(ok.payload.to_string())
         except Exception:  # noqa: BLE001

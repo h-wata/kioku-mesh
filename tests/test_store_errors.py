@@ -31,9 +31,14 @@ from mesh_mem.store import QueryErrorReply
 
 
 def _ok_reply(obs: Observation) -> SimpleNamespace:
-    """Build a fake ``ok`` reply holding a serialized observation."""
+    """Build a fake ``ok`` reply holding a serialized observation.
+
+    ``key_expr`` is a plain canonical key string because the read paths
+    validate ``str(ok.key_expr)`` against the keyspace parser before
+    ingesting the payload (PR #177 Codex review).
+    """
     ok = SimpleNamespace(
-        key_expr=SimpleNamespace(as_str=lambda o=obs: f'mem/obs/fake/k/p/s/{o.observation_id}'),
+        key_expr=f'mem/obs/fake/k/p/s/{obs.observation_id}',
         payload=SimpleNamespace(to_string=lambda o=obs: o.to_json()),
     )
     return SimpleNamespace(ok=ok, err=None)

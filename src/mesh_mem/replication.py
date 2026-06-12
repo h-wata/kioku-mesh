@@ -181,8 +181,23 @@ def start_index_subscriber(session: zenoh.Session) -> list:
             except Exception as e:  # noqa: BLE001
                 log.warning('index subscriber on_obs DELETE failed for %s: %s', obs_id, e)
             return
+        # The broadened ADR-0019 selector also matches keys outside the
+        # canonical shapes (e.g. mem/control/obs/...). Never let a payload
+        # under a non-canonical key — or one whose id disagrees with the
+        # key leaf — mutate the index (Codex review on PR #177).
+        key_id = _obs_id_from_key(str(sample.key_expr))
+        if key_id is None:
+            log.debug('index subscriber on_obs PUT ignored (non-canonical key %s)', sample.key_expr)
+            return
         try:
             obs = Observation.from_json(sample.payload.to_string())
+            if obs.observation_id != key_id:
+                log.debug(
+                    'index subscriber on_obs PUT ignored (key/payload id mismatch: key=%s payload_id=%s)',
+                    sample.key_expr,
+                    obs.observation_id,
+                )
+                return
             idx.upsert(obs)
         except json.JSONDecodeError as e:
             # Issue #31: gc broadcast-purge and other control payloads can
@@ -211,8 +226,19 @@ def start_index_subscriber(session: zenoh.Session) -> list:
             except Exception as e:  # noqa: BLE001
                 log.warning('index subscriber on_tomb DELETE failed for %s: %s', obs_id, e)
             return
+        key_id = _obs_id_from_key(str(sample.key_expr))
+        if key_id is None:
+            log.debug('index subscriber on_tomb PUT ignored (non-canonical key %s)', sample.key_expr)
+            return
         try:
             tomb = Tombstone.from_json(sample.payload.to_string())
+            if tomb.observation_id != key_id:
+                log.debug(
+                    'index subscriber on_tomb PUT ignored (key/payload id mismatch: key=%s payload_id=%s)',
+                    sample.key_expr,
+                    tomb.observation_id,
+                )
+                return
             idx.mark_deleted(tomb.observation_id, tomb.deleted_at)
         except json.JSONDecodeError as e:
             log.debug('index subscriber on_tomb non-JSON payload: %s', e)

@@ -288,8 +288,10 @@ def test_subscriber_demotes_non_json_payload_to_debug(
     remote = _remote_session(single_zenohd.endpoint)
     try:
         # Publish gibberish under both keyspaces the subscriber watches.
-        remote.put('mem/obs/x/y/z/sess/garbage', 'not json at all')
-        remote.put('mem/tomb/x/y/z/sess/garbage', '{not json either')
+        # Keys must be canonical (32-hex leaf) so the samples reach the
+        # JSON-parse branch instead of the non-canonical-key gate.
+        remote.put('mem/obs/x/y/z/sess/' + 'a' * 32, 'not json at all')
+        remote.put('mem/tomb/x/y/z/sess/' + 'b' * 32, '{not json either')
         time.sleep(_SETTLE)
     finally:
         remote.close()
@@ -705,3 +707,40 @@ def test_rebuild_indexes_tiered_namespace_rows(single_zenohd: Any) -> None:
     hits = {r.observation_id for r in store.search_observations(project='rebuild-tiered')}
     assert obs.observation_id in hits, 'rebuild must ingest tiered-namespace obs'
     assert tombed.observation_id not in hits, 'rebuild must apply tiered-namespace tombstones'
+
+
+def test_subscriber_rejects_payload_under_non_canonical_key(single_zenohd: Any) -> None:
+    """Codex review (PR #177): a valid Observation payload under an off-shape key must not be indexed."""
+    idx = store.get_index()
+    assert not idx.disabled
+
+    smuggled = _mk_obs('smuggled via control namespace', project='sub-noncanon')
+    mismatched = _mk_obs('id mismatch with key leaf', project='sub-noncanon')
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        # Off-shape namespaces that still match the broadened mem/**/obs/** selector.
+        remote.put(f'mem/control/obs/f/c/p/s/{smuggled.observation_id}', smuggled.to_json())
+        remote.put('mem/obs/x/y/z/sess/not-a-hex-id', smuggled.to_json())
+        # Canonical shape but the key leaf disagrees with the payload id.
+        remote.put('mem/obs/f/c/p/s/' + 'c' * 32, mismatched.to_json())
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    assert idx.search(project='sub-noncanon') == [], 'non-canonical or mismatched keys must never reach the index'
+
+
+def test_rebuild_rejects_payload_under_non_canonical_key(single_zenohd: Any) -> None:
+    """Codex review (PR #177): the rebuild scan applies the same canonical-key gate."""
+    smuggled = _mk_obs('smuggled for rebuild', project='rebuild-noncanon')
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(f'mem/control/obs/f/c/p/s/{smuggled.observation_id}', smuggled.to_json())
+        remote.put('mem/obs/f/c/p/s/' + 'd' * 32, smuggled.to_json())  # id mismatch
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    store._reset_index()
+
+    assert store.search_observations(project='rebuild-noncanon') == []

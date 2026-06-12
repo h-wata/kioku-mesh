@@ -39,6 +39,7 @@ import json
 import logging
 from types import ModuleType
 
+from .keyspace import obs_id_from_key
 from .keyspace import OBS_READ_KEY_EXPR
 from .local_index import LocalIndex
 from .models import Observation
@@ -517,10 +518,17 @@ def gc_expired_shadows(
         for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if not reply.ok:
                 continue
+            # Only a payload under a canonical key whose leaf id matches the
+            # payload id may revive a shadowed row (Codex review on PR #177).
+            key_id = obs_id_from_key(str(reply.ok.key_expr))
+            if key_id is None:
+                continue
             try:
                 obs = Observation.from_json(reply.ok.payload.to_string())
             except Exception as e:  # noqa: BLE001
                 log.warning('gc_expired_shadows skip malformed obs payload: %s', e)
+                continue
+            if obs.observation_id != key_id:
                 continue
             if obs.observation_id in candidate_set:
                 zenoh_obs_by_id[obs.observation_id] = obs
