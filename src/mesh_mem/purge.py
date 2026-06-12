@@ -39,8 +39,13 @@ import json
 import logging
 from types import ModuleType
 
+from .keyspace import broadcast_obs_selector
+from .keyspace import broadcast_tomb_selector
+from .keyspace import mirror_to_obs_key
+from .keyspace import mirror_to_tomb_key
 from .keyspace import obs_id_from_key
 from .keyspace import OBS_READ_KEY_EXPR
+from .keyspace import TOMB_READ_KEY_EXPR
 from .local_index import LocalIndex
 from .models import Observation
 from .models import Tombstone
@@ -109,13 +114,19 @@ def _list_tombstones() -> list[tuple[str, Tombstone]]:
     """
     session = _store().get_session()
     out: list[tuple[str, Tombstone]] = []
-    for ok in _iter_ok_replies(session, 'mem/tomb/**'):
+    for ok in _iter_ok_replies(session, TOMB_READ_KEY_EXPR):
+        key = str(ok.key_expr)
+        # Canonical gate (ADR-0019 Phase B): the broadened selector can match
+        # off-shape keys; never feed those into the delete paths.
+        if obs_id_from_key(key) is None:
+            log.debug('skip non-canonical tomb key in gc scan: %s', key)
+            continue
         try:
             tomb = Tombstone.from_json(ok.payload.to_string())
         except Exception as e:  # noqa: BLE001
             log.warning('skip malformed tombstone at %s: %s', ok.key_expr, e)
             continue
-        out.append((str(ok.key_expr), tomb))
+        out.append((key, tomb))
     return out
 
 
@@ -166,8 +177,8 @@ def physical_delete_observation(observation_id: str) -> tuple[bool, bool]:
     # ``mem/{obs|tomb}/{agent}/{client}/{pc}/{session}/{observation_id}``,
     # so ``*/*/*/*`` matches the four identity segments below the prefix.
     # Best-effort: wildcard delete support varies by backend.
-    _broadcast_delete_best_effort(f'mem/obs/*/*/*/*/{observation_id}')
-    _broadcast_delete_best_effort(f'mem/tomb/*/*/*/*/{observation_id}')
+    _broadcast_delete_best_effort(broadcast_obs_selector(observation_id))
+    _broadcast_delete_best_effort(broadcast_tomb_selector(observation_id))
 
     # Drop the local SQLite row too; otherwise readers would still see the
     # observation via the index even though Zenoh has dropped it.
@@ -206,7 +217,10 @@ def _scan_obs_by_pc_id(
     """
     session = _store().get_session()
     out: list[tuple[str, str, str]] = []
-    for ok in _iter_ok_replies(session, 'mem/obs/**', timeout=30.0):
+    for ok in _iter_ok_replies(session, OBS_READ_KEY_EXPR, timeout=30.0):
+        key_id = obs_id_from_key(str(ok.key_expr))
+        if key_id is None:
+            continue
         try:
             payload = json.loads(ok.payload.to_string())
         except (json.JSONDecodeError, ValueError):
@@ -217,7 +231,7 @@ def _scan_obs_by_pc_id(
         if session_prefix and not sid.startswith(session_prefix):
             continue
         obs_id = payload.get('observation_id')
-        if not isinstance(obs_id, str) or len(obs_id) != 32:
+        if not isinstance(obs_id, str) or obs_id != key_id:
             continue
         out.append((str(ok.key_expr), obs_id, sid))
     return out
@@ -275,7 +289,7 @@ def execute_bulk_purge(
         # wrapped in its own try so an obs-side success is never invalidated
         # by a tomb-side transport hiccup. The Zenoh ``delete`` is a no-op
         # when the tomb slot is absent (bench-obs case), so always safe.
-        tomb_key = 'mem/tomb/' + obs_key[len('mem/obs/') :]
+        tomb_key = mirror_to_tomb_key(obs_key)
         try:
             session.delete(tomb_key)
             tombs_purged += 1
@@ -444,7 +458,7 @@ def gc_expired_tombstones(
                 continue
             if obs.project != project:
                 continue
-        obs_key = tomb_key.replace('mem/tomb/', 'mem/obs/', 1)
+        obs_key = mirror_to_obs_key(tomb_key)
         delete_key(tomb_key)
         delete_key(obs_key)
         # Mirror the purge into the SQLite sidecar so the row does not

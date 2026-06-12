@@ -73,9 +73,11 @@ def test_subscriber_preserves_extras_end_to_end(single_zenohd: Any) -> None:
 
     obs = _mk_obs('forward-compat payload', project='sub-extras')
     newer = json.loads(obs.to_json())
-    newer['visibility'] = 'pub'  # plausible future scalar (ADR-0019)
+    # 'visibility' graduated to a known field in Phase B — use fields that
+    # are still unknown to this schema as the forward-compat probes.
+    newer['priority_hint'] = 'high'  # plausible future scalar
     newer['routing_hints'] = {'hub': 'tokyo', 'prio': 3}  # nested unknown
-    extras_expected = {'visibility': 'pub', 'routing_hints': {'hub': 'tokyo', 'prio': 3}}
+    extras_expected = {'priority_hint': 'high', 'routing_hints': {'hub': 'tokyo', 'prio': 3}}
 
     remote = _remote_session(single_zenohd.endpoint)
     try:
@@ -93,7 +95,7 @@ def test_subscriber_preserves_extras_end_to_end(single_zenohd: Any) -> None:
     assert restored.content == 'forward-compat payload'
     # Re-emission puts the unknown fields back into the wire payload.
     reemitted = json.loads(restored.to_json())
-    assert reemitted['visibility'] == 'pub'
+    assert reemitted['priority_hint'] == 'high'
     assert reemitted['routing_hints'] == {'hub': 'tokyo', 'prio': 3}
 
     # Second hop: upsert the restored object again (store-and-forward) and re-search.
@@ -111,8 +113,9 @@ def test_rebuild_preserves_extras_from_zenoh_storage(single_zenohd: Any) -> None
     """
     obs = _mk_obs('forward-compat via rebuild', project='rebuild-extras')
     newer = json.loads(obs.to_json())
-    newer['visibility'] = 'team'
-    newer['team_id'] = 'kioku-mesh'
+    # Unknown-to-this-schema fields ('visibility' is known since Phase B).
+    newer['org_id'] = 'kioku-mesh'
+    newer['retention_class'] = 'gold'
 
     remote = _remote_session(single_zenohd.endpoint)
     try:
@@ -126,10 +129,10 @@ def test_rebuild_preserves_extras_from_zenoh_storage(single_zenohd: Any) -> None
 
     hits = [r for r in store.search_observations(project='rebuild-extras') if r.observation_id == obs.observation_id]
     assert hits, 'rebuild must repopulate the newer-schema obs from zenoh storage'
-    assert getattr(hits[0], '_extras', {}) == {'visibility': 'team', 'team_id': 'kioku-mesh'}
+    assert getattr(hits[0], '_extras', {}) == {'org_id': 'kioku-mesh', 'retention_class': 'gold'}
     reemitted = json.loads(hits[0].to_json())
-    assert reemitted['visibility'] == 'team'
-    assert reemitted['team_id'] == 'kioku-mesh'
+    assert reemitted['org_id'] == 'kioku-mesh'
+    assert reemitted['retention_class'] == 'gold'
 
 
 def test_subscriber_picks_up_remote_tombstone(single_zenohd: Any) -> None:

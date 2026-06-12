@@ -24,6 +24,9 @@ from .identity import get_agent_family
 from .identity import get_client_id
 from .identity import get_pc_id
 from .identity import get_session_id
+from .keyspace import obs_key
+from .keyspace import tomb_key
+from .keyspace import VALID_VISIBILITIES
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +77,14 @@ class Observation:
     source_files: list[str] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
     supersedes: list[str] = field(default_factory=list)
+    # ADR-0019 Phase B: replication scope. '' = legacy layout (mem/obs/...).
+    # Deliberately NOT defaulted from config: a legacy payload parsed via
+    # from_json must keep deriving its original (legacy) keys, otherwise
+    # delete/gc would target the wrong namespace. Write entry points resolve
+    # the effective visibility via config.resolve_write_visibility and pass
+    # it explicitly.
+    visibility: str = ''
+    scope_id: str = ''
 
     def __post_init__(self) -> None:
         if self.importance < 1:
@@ -82,6 +93,8 @@ class Observation:
             self.importance = 5
         if self.memory_type not in VALID_MEMORY_TYPES:
             raise ValueError(f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}; got {self.memory_type!r}')
+        if self.visibility not in VALID_VISIBILITIES:
+            raise ValueError(f'visibility must be one of {sorted(VALID_VISIBILITIES)}; got {self.visibility!r}')
         # Non-dataclass side channel for unknown fields from newer schemas.
         # Persistence boundary: _extras is only preserved through to_json / from_json.
         # Any clone path that bypasses this pair (e.g. dataclasses.replace()) will drop _extras.
@@ -90,11 +103,27 @@ class Observation:
     @property
     def key_expr(self) -> str:
         """Return the Zenoh key expression placing this observation into the mesh."""
-        return f'mem/obs/{self.agent_family}/{self.client_id}/{self.pc_id}/{self.session_id}/{self.observation_id}'
+        return obs_key(
+            self.visibility,
+            self.scope_id,
+            self.agent_family,
+            self.client_id,
+            self.pc_id,
+            self.session_id,
+            self.observation_id,
+        )
 
     def tombstone_key_expr(self) -> str:
-        """Return the mirrored tombstone key (``mem/tomb/...``) for this observation."""
-        return self.key_expr.replace('mem/obs/', 'mem/tomb/', 1)
+        """Return the mirrored tombstone key (``.../tomb/...``) for this observation."""
+        return tomb_key(
+            self.visibility,
+            self.scope_id,
+            self.agent_family,
+            self.client_id,
+            self.pc_id,
+            self.session_id,
+            self.observation_id,
+        )
 
     def to_json(self) -> str:
         """Serialize to a compact UTF-8 JSON string, re-emitting preserved unknown fields."""
@@ -120,6 +149,16 @@ class Observation:
                 raw_type,
             )
             parsed['memory_type'] = 'note'
+        raw_visibility = parsed.get('visibility')
+        if raw_visibility is not None and raw_visibility not in VALID_VISIBILITIES:
+            # A future tier we do not know. Clamp to '' so parsing succeeds;
+            # locally derived keys would be wrong for such an observation, but
+            # read paths only need the payload and delete/gc stay conservative.
+            log.debug(
+                'Observation.from_json: clamping unknown visibility %r to legacy (peer may be on a newer schema)',
+                raw_visibility,
+            )
+            parsed['visibility'] = ''
         return _from_dict_compat(cls, parsed)
 
 

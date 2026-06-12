@@ -78,3 +78,51 @@ def test_find_by_id_selector_covers_all_namespaces() -> None:
     assert sel.intersects(zenoh.KeyExpr(f'mem/obs/f/c/p/s/{_ID}'))
     assert sel.intersects(zenoh.KeyExpr(f'mem/team/x/obs/f/c/p/s/{_ID}'))
     assert not sel.intersects(zenoh.KeyExpr(f'mem/obs/f/c/p/s/{"b" * 32}'))
+
+
+def test_obs_key_builders_per_tier() -> None:
+    """Phase B: writers branch on visibility; '' keeps the legacy layout."""
+    args = ('claude', 'cc', 'pc1', 's1', _ID)
+    assert keyspace.obs_key('', '', *args) == f'mem/obs/claude/cc/pc1/s1/{_ID}'
+    assert keyspace.obs_key('mesh', '', *args) == f'mem/mesh/obs/claude/cc/pc1/s1/{_ID}'
+    assert keyspace.obs_key('user', 'hwata', *args) == f'mem/user/hwata/obs/claude/cc/pc1/s1/{_ID}'
+    assert keyspace.obs_key('team', 'kioku', *args) == f'mem/team/kioku/obs/claude/cc/pc1/s1/{_ID}'
+    assert keyspace.tomb_key('user', 'hwata', *args) == f'mem/user/hwata/tomb/claude/cc/pc1/s1/{_ID}'
+    # Every built key round-trips through the canonical parser.
+    for vis, scope in [('', ''), ('mesh', ''), ('user', 'hwata'), ('team', 'kioku')]:
+        assert keyspace.obs_id_from_key(keyspace.obs_key(vis, scope, *args)) == _ID
+        assert keyspace.obs_id_from_key(keyspace.tomb_key(vis, scope, *args)) == _ID
+
+
+def test_obs_key_builders_reject_bad_input() -> None:
+    import pytest
+
+    args = ('claude', 'cc', 'pc1', 's1', _ID)
+    with pytest.raises(ValueError):
+        keyspace.obs_key('user', '', *args)  # scoped tier without scope id
+    with pytest.raises(ValueError):
+        keyspace.obs_key('team', '', *args)
+    with pytest.raises(ValueError):
+        keyspace.obs_key('user', 'a/b', *args)  # slug must not contain separators
+    with pytest.raises(ValueError):
+        keyspace.obs_key('user', 'a*', *args)  # nor wildcards
+    with pytest.raises(ValueError):
+        keyspace.obs_key('org', '', *args)  # unknown tier
+
+
+def test_mirror_key_helpers_are_marker_relative() -> None:
+    obs = f'mem/user/hwata/obs/claude/cc/pc1/s1/{_ID}'
+    tomb = f'mem/user/hwata/tomb/claude/cc/pc1/s1/{_ID}'
+    assert keyspace.mirror_to_tomb_key(obs) == tomb
+    assert keyspace.mirror_to_obs_key(tomb) == obs
+    legacy_obs = f'mem/obs/claude/cc/pc1/s1/{_ID}'
+    assert keyspace.mirror_to_obs_key(keyspace.mirror_to_tomb_key(legacy_obs)) == legacy_obs
+
+
+def test_broadcast_selectors_cover_all_namespaces() -> None:
+    obs_sel = zenoh.KeyExpr(keyspace.broadcast_obs_selector(_ID))
+    tomb_sel = zenoh.KeyExpr(keyspace.broadcast_tomb_selector(_ID))
+    assert obs_sel.intersects(zenoh.KeyExpr(f'mem/obs/f/c/p/s/{_ID}'))
+    assert obs_sel.intersects(zenoh.KeyExpr(f'mem/user/hwata/obs/f/c/p/s/{_ID}'))
+    assert tomb_sel.intersects(zenoh.KeyExpr(f'mem/team/x/tomb/f/c/p/s/{_ID}'))
+    assert not obs_sel.intersects(zenoh.KeyExpr(f'mem/obs/f/c/p/s/{"b" * 32}'))

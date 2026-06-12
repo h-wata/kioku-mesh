@@ -281,8 +281,9 @@ def test_physical_delete_survives_wildcard_rejection(monkeypatch: pytest.MonkeyP
     assert obs_removed is False
     assert tomb_removed is False
     # Both wildcard patterns were attempted despite raising each time.
-    assert any(k.startswith('mem/obs/') for k in fake.delete_calls), fake.delete_calls
-    assert any(k.startswith('mem/tomb/') for k in fake.delete_calls), fake.delete_calls
+    # Since ADR-0019 Phase B the broadcasts cover all namespaces (mem/**/...).
+    assert any('/obs/' in k for k in fake.delete_calls), fake.delete_calls
+    assert any('/tomb/' in k for k in fake.delete_calls), fake.delete_calls
 
 
 # ---------------------------------------------------------------------------
