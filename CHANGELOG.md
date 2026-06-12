@@ -10,6 +10,20 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-12
+
+### Added
+
+- **Readers for visibility-tiered namespaces (ADR-0019 Phase A, #177).** All read paths — the replication subscriber, the startup index rebuild, the legacy Zenoh fallback search / find-by-id, and the shadow-sweep re-verify — now cover the upcoming `mem/mesh/**`, `mem/user/{user_id}/**` and `mem/team/{team_id}/**` namespaces alongside the legacy `mem/{obs,tomb}/**`. A single broadened selector per kind (`mem/**/obs/**`; Zenoh's `**` matches zero or more chunks) covers every shape. A new `keyspace` module centralizes the key vocabulary. Writes are unchanged (legacy keys only — Phase B); upgrade all mesh hosts to 0.5.x before any host starts writing tiered keys.
+- **Canonical-key gate on every index-mutating read path (Codex review on #177).** The broadened selectors also match key shapes outside the spec; a valid Observation payload under such a key could previously have polluted the local index. Every ingest point now requires the key to parse as a canonical kioku-mesh key and the payload `observation_id` to equal the key's trailing id — including the shadow-revive path in `gc_expired_shadows`, so a forged payload can no longer resurrect a shadowed row.
+- **Session-scoped save block + nudge in `get_memory_status` (#158, #160).** The status output gains `session_age`, `this_session_saves`, `this_session_last_save_age` and a conditional machine-readable `nudge` (no saves after 10 min, or 20+ min since the last save). Counts are derived from the observation store, not process-local state, so they survive MCP server restarts. Server instructions re-define save triggers as language-agnostic semantic acts with EN/JA/ZH/KO anchors (#159), and an optional Claude Code hook (`scripts/hooks/check-unsaved-decisions.sh`) reminds about unsaved decisions on PreCompact / `/clear` (#161).
+
+### Changed
+
+- **`store.py` split into focused modules (#167; PRs #170, #171, #173, #174).** The 1,608-line monolith is now `pending_queue.py` (failed-put queue + drain worker), `transport.py` (Zenoh session lifecycle, retry policy, transport status), `replication.py` (rebuild policy, key parsing, replication subscriber) and `purge.py` (retention GC, shadow sweep, pc-scoped bulk purge), leaving a ~430-line read/write core. Pure refactor: `store.<name>` keeps working for every public symbol via façade re-exports. Note for test authors: the re-exports are plain aliases — monkeypatch internals on the owning module, not on `store` (#172, #175; the contract is documented in `store.py` and frozen by a test).
+- **ADR-0019 visibility tiers renamed to `user` / `team` / `mesh` (#176).** The originally proposed `priv` (never leaves one host) inverted the primary use case — on a personal multi-PC mesh, "private" notes are exactly the ones that should sync across the owner's machines — and labeling personal data `pub` was misleading. Tiers are now named by reach; all three are Zenoh-backed (no more SQLite-as-source-of-truth exception); a machine-local tier is deferred until a concrete need appears. Docs only — ADR-0019/0020 remain Proposed.
+
+
 ## [0.4.1] - 2026-06-01
 
 ### Removed
