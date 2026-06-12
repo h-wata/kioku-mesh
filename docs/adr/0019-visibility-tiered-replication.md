@@ -81,6 +81,42 @@ visibility = user
   選択）のみとし、複数 team に参加している場合の `team_id` 選択のみ例外的に許す。
 - `user_id` / `team_id` は namespace slug であり、**security principal ではない**。
 
+### Per-directory default — プロジェクトローカル設定（2026-06-12 追記）
+
+default visibility はディレクトリ（リポジトリ）単位で切り替えられるべきである。
+「個人開発のリポジトリでは user、チーム開発のリポジトリでは team」が自然な
+運用であり、グローバル config 一本ではこれを表現できない。
+
+`.editorconfig` 方式の **プロジェクトローカル設定ファイル** を導入する:
+
+- カレントディレクトリから上方に `.kioku-mesh.yaml` を探索し、最初に
+  見つかったものを採用する。MCP server はクライアント（Claude Code 等）が
+  プロジェクトディレクトリを cwd として起動するため、CLI / MCP の両方で
+  同じ探索が機能する。
+- 解決の優先順位: **環境変数 > プロジェクトの `.kioku-mesh.yaml` >
+  グローバル `~/.config/kioku-mesh/config.yaml` > 未設定（legacy）**。
+- プロジェクトファイルで設定できるのは **`default_visibility` と `team_id`
+  のみ**。`user_id` は人に紐づく識別子であり、リポジトリにコミットされうる
+  ファイルから設定できてはならない（他人の clone が user namespace を
+  乗っ取る事故の防止）。
+
+#### 信頼上の注意
+
+`.kioku-mesh.yaml` は **リポジトリ由来のコンテンツが書き込み先を変える**
+仕組みである。悪意ある（または単に設定ミスのある）リポジトリを clone して
+作業すると、意図せず team / mesh スコープへ保存される可能性がある。緩和策:
+
+- save の応答に **実効 visibility を必ず表示**する
+  （例: `saved: <id> (visibility=team/kioku-mesh)`）。エージェント・人間の
+  双方が保存のたびにスコープを確認できる。
+- visibility を**広げる方向**（user → team / mesh）の値がプロジェクト
+  ファイル由来である場合の警告表示は、運用で必要になった時点で検討する。
+
+これは ADR-0019 Alt 2 で却下した「project **名** で複製範囲を決める」とは
+別物である。Alt 2 の問題（rename が storage migration になる）はここでは
+発生しない — ディレクトリ連動するのは書き込み時の **default の選択** だけで、
+確定した visibility / scope_id は従来通り payload と key に焼き込まれる。
+
 ### Isolation model
 
 この ADR で採用するのは **Soft isolation** である。
