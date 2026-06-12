@@ -26,6 +26,34 @@ def _config_path() -> Path:
     return _config_dir() / 'config.yaml'
 
 
+PROJECT_CONFIG_NAME = '.kioku-mesh.yaml'
+
+
+def find_project_config(start: Path | None = None) -> Path | None:
+    """Walk upward from ``start`` (default: cwd) looking for ``.kioku-mesh.yaml``.
+
+    Returns the first match, searching ``start`` itself, then each parent
+    up to the filesystem root (``.editorconfig`` style). ``None`` when no
+    project config exists anywhere on the path.
+    """
+    cur = (start or Path.cwd()).resolve()
+    for directory in (cur, *cur.parents):
+        candidate = directory / PROJECT_CONFIG_NAME
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _read_project_config() -> dict:
+    path = find_project_config()
+    if path is None:
+        return {}
+    return _read_yaml(path)
+
+
 def _read_yaml(path: Path) -> dict:
     if yaml is None:
         # Fallback: simple key: value line parser for the single-field case.
@@ -60,6 +88,12 @@ def get_user_id() -> str:
     philosophy as ADR-0004 identity): an LLM-supplied value could pollute
     the ``mem/user/{user_id}/**`` namespace. Note the value must match
     across all of one user's machines for their memories to converge.
+
+    Also deliberately NOT read from the project-local ``.kioku-mesh.yaml``
+    (unlike :func:`get_team_id` / :func:`get_default_visibility`): user_id
+    identifies a person, and a file that may be committed to a repository
+    must never be able to set it — otherwise anyone cloning a repo could
+    have their writes land in (and pollute) someone else's user namespace.
     """
     env = os.environ.get('MESH_MEM_USER_ID', '').strip()
     if env:
@@ -69,10 +103,21 @@ def get_user_id() -> str:
 
 
 def get_team_id() -> str:
-    """Return the configured team scope id (``MESH_MEM_TEAM_ID`` env > config > '')."""
+    """Return the configured team scope id.
+
+    Priority (highest to lowest):
+      1. ``MESH_MEM_TEAM_ID`` env var
+      2. ``team_id:`` in the nearest project ``.kioku-mesh.yaml`` (cwd upward)
+      3. ``team_id:`` in ``~/.config/kioku-mesh/config.yaml``
+      4. ``''`` (unset)
+    """
     env = os.environ.get('MESH_MEM_TEAM_ID', '').strip()
     if env:
         return env
+    project = _read_project_config()
+    val = str(project.get('team_id', '') or '').strip()
+    if val:
+        return val
     cfg = _read_yaml(_config_path())
     return str(cfg.get('team_id', '') or '').strip()
 
@@ -80,12 +125,20 @@ def get_team_id() -> str:
 def get_default_visibility() -> str:
     """Return the default visibility for new writes.
 
-    Priority: ``MESH_MEM_DEFAULT_VISIBILITY`` env var > ``default_visibility:``
-    in config.yaml > ``''`` (legacy layout — behaves exactly like pre-0.6).
+    Priority (highest to lowest):
+      1. ``MESH_MEM_DEFAULT_VISIBILITY`` env var
+      2. ``default_visibility:`` in the nearest project ``.kioku-mesh.yaml``
+         (searched from cwd upward — per-directory default, ADR-0019)
+      3. ``default_visibility:`` in ``~/.config/kioku-mesh/config.yaml``
+      4. ``''`` (legacy layout — behaves exactly like pre-0.6)
     """
     env = os.environ.get('MESH_MEM_DEFAULT_VISIBILITY', '').strip()
     if env:
         return env
+    project = _read_project_config()
+    val = str(project.get('default_visibility', '') or '').strip()
+    if val:
+        return val
     cfg = _read_yaml(_config_path())
     return str(cfg.get('default_visibility', '') or '').strip()
 
@@ -123,11 +176,29 @@ def resolve_write_visibility(explicit: str = '') -> tuple[str, str]:
         if not team_id:
             raise ValueError(
                 "visibility 'team' requires a team_id: set MESH_MEM_TEAM_ID or add "
-                "'team_id: <slug>' to ~/.config/kioku-mesh/config.yaml"
+                "'team_id: <slug>' to .kioku-mesh.yaml (project) or ~/.config/kioku-mesh/config.yaml"
             )
         validate_scope_slug(visibility, team_id)
         return visibility, team_id
     return visibility, ''
+
+
+def format_visibility(visibility: str, scope_id: str) -> str:
+    """Human-readable effective visibility for save responses.
+
+    ADR-0019 trust mitigation: every save response must surface the
+    effective scope (the project ``.kioku-mesh.yaml`` can change where a
+    write lands, so agent and human alike see it on each save).
+
+      - ``('', '')``          -> ``'legacy'``
+      - ``('mesh', '')``      -> ``'mesh'``
+      - ``('user', 'hwata')`` -> ``'user/hwata'``
+    """
+    if not visibility:
+        return 'legacy'
+    if scope_id:
+        return f'{visibility}/{scope_id}'
+    return visibility
 
 
 def get_backend_mode() -> str:

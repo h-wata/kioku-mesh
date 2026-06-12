@@ -31,6 +31,7 @@ from . import mcp_install as mcp_install_module
 from . import tls as tls_module
 from .backend import get_backend
 from .backend import reset_backend
+from .config import format_visibility
 from .config import resolve_write_visibility
 from .config import write_local_config
 from .identity import get_pc_id
@@ -165,7 +166,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
         scope_id=scope_id,
     )
     get_backend().put_observation(obs)
-    print(f'saved: {obs.observation_id}')
+    print(f'saved: {obs.observation_id} (visibility={format_visibility(visibility, scope_id)})')
     return 0
 
 

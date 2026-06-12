@@ -19,6 +19,7 @@ from fastmcp import FastMCP
 from . import __version__
 from .backend import get_backend
 from .backend import reset_backend
+from .config import format_visibility
 from .config import get_backend_mode
 from .config import resolve_write_visibility
 from .identity import get_pc_id
@@ -231,7 +232,7 @@ def save_observation(
         scope_id=scope_id,
     )
     get_backend().put_observation(obs)
-    return f'saved: {obs.observation_id}'
+    return f'saved: {obs.observation_id} (visibility={format_visibility(effective_visibility, scope_id)})'
 
 
 @mcp.tool()
