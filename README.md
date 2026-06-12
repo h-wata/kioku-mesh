@@ -126,6 +126,20 @@ Useful environment variables:
 The user/team ids are resolved from server-side configuration, never from
 tool arguments. See ADR-0019 for the design.
 
+A per-project default can be set with a `.kioku-mesh.yaml` in the repository
+(found by searching upward from the current directory; env vars still win,
+the global config is the fallback):
+
+```yaml
+# .kioku-mesh.yaml — project-local defaults
+default_visibility: team
+team_id: kioku-mesh
+```
+
+`user_id` is intentionally **not** read from this file (a committed file must
+never set a personal namespace), and every save response echoes the effective
+scope, e.g. `saved: <id> (visibility=team/kioku-mesh)`.
+
 ## MCP Clients
 
 `kioku-mesh mcp install` handles the common setups:

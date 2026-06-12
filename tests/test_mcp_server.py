@@ -35,6 +35,11 @@ from mesh_mem.models import Observation  # noqa: E402
 _INGEST_SETTLE = 0.25
 
 
+def _saved_id(text: str) -> str:
+    """Extract the observation id from ``saved: <id> (visibility=...)``."""
+    return text.strip().split()[1]
+
+
 def _mk_obs(content: str, project: str = 'mcp-test') -> Observation:
     return Observation(
         content=content,
@@ -116,7 +121,7 @@ def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa
     msg = _run(_go())
     assert 'saved' in msg
     # Extract the 32-char id (last whitespace-separated token of the success message).
-    obs_id = msg.split()[-1]
+    obs_id = _saved_id(msg)
     assert len(obs_id) == 32
 
     time.sleep(_INGEST_SETTLE)
@@ -420,7 +425,7 @@ def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # no
 
     msg = _run(_go())
     assert 'saved' in msg
-    obs_id = msg.split()[-1]
+    obs_id = _saved_id(msg)
     time.sleep(_INGEST_SETTLE)
     found = store.find_observation_by_id(obs_id)
     assert found is not None
@@ -473,7 +478,7 @@ def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: 
 
     msg = _run(_go())
     assert 'saved' in msg
-    obs_id = msg.split()[-1]
+    obs_id = _saved_id(msg)
     time.sleep(_INGEST_SETTLE)
     found = store.find_observation_by_id(obs_id)
     assert found is not None

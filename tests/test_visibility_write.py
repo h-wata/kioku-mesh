@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from pathlib import Path
 import time
 from typing import Any
 
@@ -108,6 +109,133 @@ def test_tiered_payload_roundtrips_visibility() -> None:
     assert (restored.visibility, restored.scope_id) == ('user', 'hwata')
     assert restored.key_expr == obs.key_expr
     assert restored.tombstone_key_expr() == obs.tombstone_key_expr()
+
+
+# ---------------------------------------------------------------------------
+# Project-local .kioku-mesh.yaml (per-directory default, ADR-0019 addendum)
+# ---------------------------------------------------------------------------
+
+
+def _isolate_visibility_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Scrub visibility env vars and point both config sources at tmp_path.
+
+    Returns the global config dir (XDG) so tests can drop a config.yaml in.
+    ``monkeypatch.chdir`` keeps the upward ``.kioku-mesh.yaml`` search from
+    escaping into the real filesystem above the test run.
+    """
+    monkeypatch.delenv('MESH_MEM_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
+    monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
+    xdg = tmp_path / 'xdg'
+    (xdg / 'kioku-mesh').mkdir(parents=True)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(xdg))
+    monkeypatch.chdir(tmp_path)
+    return xdg / 'kioku-mesh'
+
+
+@pytest.mark.parametrize('depth', [0, 1, 2])
+def test_project_config_found_walking_up(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, depth: int) -> None:
+    """.kioku-mesh.yaml is discovered from cwd itself, a parent, or a grandparent."""
+    _isolate_visibility_config(monkeypatch, tmp_path)
+    (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: mesh\n')
+    cwd = tmp_path
+    for name in ('a', 'b')[:depth]:
+        cwd = cwd / name
+        cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    assert config.find_project_config() == tmp_path / '.kioku-mesh.yaml'
+    assert config.get_default_visibility() == 'mesh'
+
+
+def test_nearest_project_config_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _isolate_visibility_config(monkeypatch, tmp_path)
+    (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: mesh\n')
+    nested = tmp_path / 'sub'
+    nested.mkdir()
+    (nested / '.kioku-mesh.yaml').write_text('default_visibility: team\n')
+    monkeypatch.chdir(nested)
+    assert config.find_project_config() == nested / '.kioku-mesh.yaml'
+    assert config.get_default_visibility() == 'team'
+
+
+def test_no_project_config_falls_back_to_global(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg_dir = _isolate_visibility_config(monkeypatch, tmp_path)
+    (cfg_dir / 'config.yaml').write_text('default_visibility: mesh\nteam_id: global-team\n')
+    assert config.find_project_config() is None
+    assert config.get_default_visibility() == 'mesh'
+    assert config.get_team_id() == 'global-team'
+
+
+def test_env_beats_project_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _isolate_visibility_config(monkeypatch, tmp_path)
+    (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: proj-team\n')
+    monkeypatch.setenv('MESH_MEM_DEFAULT_VISIBILITY', 'mesh')
+    monkeypatch.setenv('MESH_MEM_TEAM_ID', 'env-team')
+    assert config.get_default_visibility() == 'mesh'
+    assert config.get_team_id() == 'env-team'
+
+
+def test_project_config_beats_global(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg_dir = _isolate_visibility_config(monkeypatch, tmp_path)
+    (cfg_dir / 'config.yaml').write_text('default_visibility: mesh\nteam_id: global-team\n')
+    (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: proj-team\n')
+    assert config.get_default_visibility() == 'team'
+    assert config.get_team_id() == 'proj-team'
+
+
+def test_project_config_cannot_set_user_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """user_id in a (committable) project file must be ignored — ADR-0019."""
+    _isolate_visibility_config(monkeypatch, tmp_path)
+    (tmp_path / '.kioku-mesh.yaml').write_text('user_id: mallory\ndefault_visibility: user\n')
+    assert config.get_user_id() == ''
+    # And the resolution fails actionably instead of writing as 'mallory'.
+    with pytest.raises(ValueError, match='MESH_MEM_USER_ID'):
+        config.resolve_write_visibility('')
+
+
+def test_project_team_default_resolves_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _isolate_visibility_config(monkeypatch, tmp_path)
+    (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: kioku-mesh\n')
+    assert config.resolve_write_visibility('') == ('team', 'kioku-mesh')
+
+
+def test_format_visibility_variants() -> None:
+    assert config.format_visibility('', '') == 'legacy'
+    assert config.format_visibility('mesh', '') == 'mesh'
+    assert config.format_visibility('user', 'hwata') == 'user/hwata'
+    assert config.format_visibility('team', 'kioku-mesh') == 'team/kioku-mesh'
+
+
+def test_save_responses_show_effective_visibility(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """CLI and MCP save responses echo the effective scope (ADR-0019 trust note)."""
+    from mesh_mem import mcp_server
+    from mesh_mem.__main__ import main as cli_main
+    from mesh_mem.backend import reset_backend
+
+    _isolate_visibility_config(monkeypatch, tmp_path)
+    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    reset_backend()
+
+    msg = mcp_server.save_observation(content='legacy save', project='vis-resp')
+    assert '(visibility=legacy)' in msg
+
+    msg = mcp_server.save_observation(content='mesh save', project='vis-resp', visibility='mesh')
+    assert '(visibility=mesh)' in msg
+
+    monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
+    msg = mcp_server.save_observation(content='user save', project='vis-resp', visibility='user')
+    assert '(visibility=user/hwata)' in msg
+
+    # Project file drives the CLI default; the response surfaces it.
+    (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: kioku-mesh\n')
+    rc = cli_main(['save', 'team save', '-p', 'vis-resp'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '(visibility=team/kioku-mesh)' in out
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,11 @@ from mesh_mem.models import Observation  # noqa: E402
 _INGEST_SETTLE = 0.25
 
 
+def _saved_id(text: str) -> str:
+    """Extract the observation id from ``saved: <id> (visibility=...)``."""
+    return text.strip().split()[1]
+
+
 def _find_mesh_mem_mcp() -> str | None:
     """Locate the ``kioku-mesh-mcp`` console script, preferring the active interpreter's venv."""
     # Prefer the binary right next to the interpreter running the test — this
@@ -108,7 +113,7 @@ def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None: 
 
     msg = asyncio.run(_go())
     assert 'saved' in msg
-    obs_id = msg.split()[-1]
+    obs_id = _saved_id(msg)
     assert len(obs_id) == 32
 
     time.sleep(_INGEST_SETTLE)
@@ -155,7 +160,7 @@ def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixt
     assert rc == 0
     out = capsys.readouterr().out
     assert 'saved' in out
-    obs_id = out.strip().split()[-1]
+    obs_id = _saved_id(out)
     assert len(obs_id) == 32
 
     time.sleep(_INGEST_SETTLE)
@@ -190,7 +195,7 @@ def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> No
         ]
     )
     assert rc == 0
-    obs_id = capsys.readouterr().out.strip().split()[-1]
+    obs_id = _saved_id(capsys.readouterr().out)
 
     time.sleep(_INGEST_SETTLE)
     rc2 = cli_main(['get-memory', obs_id])
@@ -222,7 +227,7 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
         ]
     )
     assert rc == 0
-    obs_id = capsys.readouterr().out.strip().split()[-1]
+    obs_id = _saved_id(capsys.readouterr().out)
 
     time.sleep(_INGEST_SETTLE)
     rc2 = cli_main(['search', '--project', 'proj-search'])
@@ -296,7 +301,7 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
         ]
     )
     assert rc == 0
-    obs_id = capsys.readouterr().out.strip().split()[-1]
+    obs_id = _saved_id(capsys.readouterr().out)
 
     time.sleep(_INGEST_SETTLE)
     rc2 = cli_main(['search', '--project', 'proj-search-json', '--format', 'json'])
@@ -438,7 +443,7 @@ def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture)
     """--source-files a.py,b.py is parsed into list[str]."""
     rc = cli_main(['save', 'csv-test', '--source-files', 'a.py,b.py'])
     assert rc == 0
-    obs_id = capsys.readouterr().out.strip().split()[-1]
+    obs_id = _saved_id(capsys.readouterr().out)
 
     time.sleep(_INGEST_SETTLE)
     obs = store.find_observation_by_id(obs_id)
@@ -450,7 +455,7 @@ def test_cli_references_csv(single_zenohd: Any, capsys: pytest.CaptureFixture) -
     """--references #73,PR#68 is parsed into list[str]."""
     rc = cli_main(['save', 'refs-test', '--references', '#73,PR#68'])
     assert rc == 0
-    obs_id = capsys.readouterr().out.strip().split()[-1]
+    obs_id = _saved_id(capsys.readouterr().out)
 
     time.sleep(_INGEST_SETTLE)
     obs = store.find_observation_by_id(obs_id)
