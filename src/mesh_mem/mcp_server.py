@@ -163,7 +163,7 @@ def save_observation(
     supersedes: list[str] | None = None,
     visibility: str = '',
 ) -> str:
-    """Persist a work note / decision / discovery into the shared mesh memory.
+    """Persist a work note / decision / discovery into the shared kioku-mesh memory.
 
     Call this PROACTIVELY after ANY decision, bug fix, discovery, or convention —
     do not wait for the user to ask. If you just made a design choice, fixed a
@@ -245,7 +245,7 @@ def search_memory(
     since_iso: str = '',
     limit: int = 50,
 ) -> str:
-    """Search the shared mesh memory, narrowing by key_expr and filtering in Python.
+    """Search the shared kioku-mesh memory, narrowing by key_expr and filtering in Python.
 
     If results are unexpectedly empty for work you know was done previously, this
     is a signal that ``save_observation`` may have been skipped — call it
@@ -406,7 +406,7 @@ def _compute_save_nudge(
 
 @mcp.tool()
 def get_memory_status() -> str:
-    """Summarize the server's view of the mesh memory for troubleshooting.
+    """Summarize the server's view of the kioku-mesh memory for troubleshooting.
 
     Check ``last_save_at`` and the ``this_session_*`` block in the output —
     if ``this_session_saves`` is 0 in a long-running session, or ``nudge`` is
