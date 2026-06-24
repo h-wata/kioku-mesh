@@ -12,6 +12,9 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- messaging Phase 2: PresenceManager (30s heartbeat, 90s TTL, scope isolation) (#185)
+- messaging Phase 2: ZenohBridge (spool ↔ Zenoh put/sub, 64 KiB body limit) (#185)
+- messaging Phase 2: MCP tools `check_messages` / `ack_message` with server-side scope resolution (#185)
 - messaging Phase 1: Message/Ack schema, keyspace builder, local inbox spool, local ack index (#185)
 
 ### Changed

@@ -130,6 +130,15 @@ class LocalMessageIndex:
                 ).fetchall()
             return [row['msg_id'] for row in rows]
 
+    def find_scope(self, msg_id: str, recipient_session_id: str) -> str | None:
+        """Return the scope for a registered (msg_id, recipient_session_id) pair, or None."""
+        with self._connect() as conn:
+            row = conn.execute(
+                'SELECT scope FROM messages WHERE msg_id = ? AND recipient_session_id = ?',
+                (msg_id, recipient_session_id),
+            ).fetchone()
+            return row['scope'] if row else None
+
     def purge_expired(self, now: datetime | None = None) -> int:
         """Delete messages whose expires_at has passed; returns count removed.
 
