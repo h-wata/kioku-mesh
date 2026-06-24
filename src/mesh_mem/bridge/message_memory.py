@@ -97,11 +97,11 @@ def _requires_promotion(msg: Any) -> bool:
     extras = getattr(msg, '_extras', None)
     if isinstance(extras, dict):
         metadata = extras.get('metadata', {})
-        if isinstance(metadata, dict) and metadata.get('promote_hint'):
+        if isinstance(metadata, dict) and metadata.get('promote_hint') is True:
             return True
     # Convenience shorthand via payload dict
     payload = getattr(msg, 'payload', None)
-    if isinstance(payload, dict) and payload.get('promote_hint'):
+    if isinstance(payload, dict) and payload.get('promote_hint') is True:
         return True
     return False
 
@@ -197,4 +197,6 @@ class MessageMemoryBridge:
         )
 
         self._promoted_ids.add(msg_id)
+        # TODO(Phase 5): promote() の戻り値を bool → PromotionResult(success, observation_id, visibility) に拡張予定
+        # 現在 save_fn の戻り値 (observation_id / visibility) は捨てている
         return True

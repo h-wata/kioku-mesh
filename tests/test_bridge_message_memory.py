@@ -238,3 +238,101 @@ class TestBridgeLayering:
 
         save_fn = MagicMock(return_value='saved: id (visibility=team)')
         assert isinstance(save_fn, SaveObservationCallable)
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (R1): promote_hint strict bool — truthy 非 bool 値で昇格しない
+# ---------------------------------------------------------------------------
+
+
+class TestPromoteHintStrictBool:
+    def test_promote_hint_string_yes_does_not_promote(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        msg.payload['promote_hint'] = 'yes'
+        result = bridge.promote(msg)
+        assert result is False
+        save_fn.assert_not_called()
+
+    def test_promote_hint_int_1_does_not_promote(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        msg.payload['promote_hint'] = 1
+        result = bridge.promote(msg)
+        assert result is False
+        save_fn.assert_not_called()
+
+    def test_promote_hint_string_true_does_not_promote(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        msg.payload['promote_hint'] = 'true'
+        result = bridge.promote(msg)
+        assert result is False
+        save_fn.assert_not_called()
+
+    def test_promote_hint_float_1_does_not_promote(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        msg.payload['promote_hint'] = 1.0
+        result = bridge.promote(msg)
+        assert result is False
+        save_fn.assert_not_called()
+
+    def test_promote_hint_bool_true_promotes(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=True)
+        result = bridge.promote(msg)
+        assert result is True
+        save_fn.assert_called_once()
+
+    def test_promote_hint_bool_false_does_not_promote(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        msg.payload['promote_hint'] = False
+        result = bridge.promote(msg)
+        assert result is False
+        save_fn.assert_not_called()
+
+    def test_promote_hint_extras_metadata_strict_bool(self) -> None:
+        """_extras['metadata']['promote_hint'] も strict bool True のみ昇格する."""
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        # _extras に metadata を設定 (truthy 非 bool)
+        msg._extras['metadata'] = {'promote_hint': 'yes'}
+        result = bridge.promote(msg)
+        assert result is False
+        save_fn.assert_not_called()
+
+    def test_promote_hint_extras_metadata_bool_true_promotes(self) -> None:
+        bridge, save_fn = _make_bridge()
+        msg = _make_msg(promote_hint=False)
+        msg._extras['metadata'] = {'promote_hint': True}
+        result = bridge.promote(msg)
+        assert result is True
+        save_fn.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (R2): save_fn 例外時に _promoted_ids 未登録 — 再試行可能
+# ---------------------------------------------------------------------------
+
+
+class TestSaveFnFailurePath:
+    def test_promote_save_fn_failure_keeps_retriable(self) -> None:
+        save_fn = MagicMock(side_effect=RuntimeError('storage unavailable'))
+        bridge = MessageMemoryBridge(save_fn)
+        msg = _make_msg(promote_hint=True)
+
+        # save_fn が例外を投げると promote() も例外を伝播する
+        with pytest.raises(RuntimeError, match='storage unavailable'):
+            bridge.promote(msg)
+
+        # msg_id は promoted_ids に登録されていない (再試行可能)
+        assert msg.msg_id not in bridge._promoted_ids
+
+        # 同じ msg_id で再度 promote() を呼べること
+        save_fn.side_effect = None
+        save_fn.return_value = 'saved: obs-retry (visibility=team)'
+        result = bridge.promote(msg)
+        assert result is True
+        assert msg.msg_id in bridge._promoted_ids

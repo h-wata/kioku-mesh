@@ -21,6 +21,8 @@ versions without a migration path until `1.0.0`.
 
 ### Fixed
 
+- bridge: `promote_hint` を strict bool (`is True`) 判定に変更、truthy 非 bool 値で昇格しない (R1) (#185)
+- bridge: `save_fn` 例外時に `_promoted_ids` へ登録しない failure-path test 追加 (R2) (#185)
 - Fix `_messaging_scopes()` to reject unknown visibility values (B1: prevents silent scope widening) (#185)
 - Add defensive validation in `put_message()` for recipient kind and ID fields (C1) (#185)
 - Add `scopes` field to `Presence.to_dict()` payload for consumer clarity (C2) (#185)
