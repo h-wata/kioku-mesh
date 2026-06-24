@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kioku-mesh"
-version = "0.5.0"
+version = "0.6.0"
 description = "Cross-agent distributed memory over a mesh transport (currently Zenoh)"
 requires-python = ">=3.10"
 readme = "README.md"

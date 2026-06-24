@@ -10,6 +10,8 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-24
+
 ### Changed
 
 - **`src/mesh_mem/` を ADR-0023 に従い `core/`・`memory/`・`messaging/`・`bridge/` の 4 層に分離 (Issue #186).** Zenoh セッション・mTLS・identity・keyspace・config 等のインフラ層を `core/` に、store・local_index・pending_queue 等の観測データ管理層を `memory/` に移動。`messaging/` と `bridge/` は現時点でスタブ枠のみ（ADR-0023 策定、実装は未着手）。既存の `src/mesh_mem/*.py` は `sys.modules` エイリアスとして残し、後方互換を保つ。`core` が `memory` を import しないことを `tests/test_layering.py` の AST 静的解析で担保。
