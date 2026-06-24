@@ -344,3 +344,43 @@ class TestListActivePeers:
             peers = mgr.list_active_peers('mesh')
 
         assert peers == []
+
+
+# ---------------------------------------------------------------------------
+# C2: scopes field in Presence.to_dict()
+# ---------------------------------------------------------------------------
+
+
+class TestPresencePayloadScopes:
+    def test_to_dict_includes_scopes_field(self) -> None:
+        p = Presence(agent_id='a', session_id='s', host='h', last_seen=_now())
+        with (
+            patch('mesh_mem.messaging.presence.get_agent_family', return_value='claude'),
+            patch('mesh_mem.messaging.presence.get_client_id', return_value='a'),
+        ):
+            d = p.to_dict()
+        assert 'scopes' in d
+        assert isinstance(d['scopes'], list)
+
+    def test_scopes_field_reflects_assigned_scopes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
+        monkeypatch.setenv('MESH_MEM_TEAM_ID', 'kioku')
+        put_calls: list[dict] = []
+
+        mock_session = MagicMock()
+
+        def _capture(key: str, payload: Any) -> None:
+            put_calls.append({'key': key, 'payload': json.loads(payload)})
+
+        mock_session.put.side_effect = _capture
+
+        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+            mgr = PresenceManager()
+            mgr._publish_once()
+
+        assert len(put_calls) >= 1
+        for call in put_calls:
+            scopes = call['payload'].get('scopes', None)
+            assert scopes is not None, 'scopes field missing from presence payload'
+            assert isinstance(scopes, list)
+            assert len(scopes) > 0, 'scopes field should not be empty when user/team configured'

@@ -70,11 +70,17 @@ class ZenohBridge:
 
         recipient: dict[str, Any] = msg.recipient if isinstance(msg.recipient, dict) else {}
         kind = recipient.get('kind', 'session')
+        if kind not in ('session', 'agent'):
+            raise ValueError(f"Invalid recipient kind: {kind!r}. Must be 'session' or 'agent'.")
         if kind == 'agent':
             recipient_id = str(recipient.get('agent_id', '') or '')
+            if not recipient_id:
+                raise ValueError("recipient kind='agent' requires a non-empty agent_id.")
             key = agent_inbox_key(scope, recipient_id, msg.msg_id)
         else:
             recipient_id = str(recipient.get('session_id', '') or recipient.get('id', '') or '')
+            if not recipient_id:
+                raise ValueError("recipient kind='session' requires a non-empty session_id.")
             key = session_inbox_key(scope, recipient_id, msg.msg_id)
 
         self._session.put(key, payload_bytes)

@@ -119,6 +119,9 @@ def _get_messaging_index() -> LocalMessageIndex:
     return _messaging_index
 
 
+_VALID_VISIBILITIES = frozenset({'', 'user', 'team', 'mesh'})
+
+
 def _messaging_scopes(visibility: str) -> list[str]:
     """Resolve which msg/** scopes to query based on ``visibility``.
 
@@ -126,7 +129,14 @@ def _messaging_scopes(visibility: str) -> list[str]:
     ``'user'`` / ``'team'`` / ``'mesh'`` → that single tier.
     ``user_id`` / ``team_id`` are resolved from server-side config, never
     from tool arguments (ADR-0019).
+
+    Raises:
+    ------
+    ValueError
+        For any visibility value outside the known set ``{'', 'user', 'team', 'mesh'}``.
     """
+    if visibility not in _VALID_VISIBILITIES:
+        raise ValueError(f"Unknown visibility: {visibility!r}. Use 'mesh', 'user', 'team', or ''.")
     if visibility == 'mesh':
         return ['mesh']
     if visibility == 'user':
@@ -561,11 +571,14 @@ def check_messages(
         JSON string with shape ``{"messages": [...], "count": N, "truncated": bool}``.
     """
     limit = max(1, min(100, limit))
+    try:
+        scopes = _messaging_scopes(visibility)
+    except ValueError as e:
+        return json.dumps({'error': str(e)})
     session_id = get_session_id()
     from .core.identity import get_client_id
 
     agent_id = get_client_id()
-    scopes = _messaging_scopes(visibility)
     index = _get_messaging_index()
 
     since_dt: datetime | None = None
@@ -695,7 +708,10 @@ def ack_message(
     scope = index.find_scope(msg_id, session_id)
     if scope is None:
         if visibility:
-            scopes = _messaging_scopes(visibility)
+            try:
+                scopes = _messaging_scopes(visibility)
+            except ValueError as e:
+                return f'ack failed: {e}'
             scope = scopes[0] if scopes else 'mesh'
         else:
             scope = 'mesh'

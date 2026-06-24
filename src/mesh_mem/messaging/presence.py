@@ -72,6 +72,7 @@ class Presence:
     last_seen: datetime
     capabilities: list[str] = field(default_factory=list)
     delivery_adapters: list[str] = field(default_factory=list)
+    scopes: list[str] = field(default_factory=list)
 
     def is_active(self, now: datetime | None = None) -> bool:
         """Return True if last_seen is within PRESENCE_TTL seconds."""
@@ -102,6 +103,7 @@ class Presence:
             'ttl_sec': PRESENCE_TTL,
             'capabilities': self.capabilities,
             'delivery_adapters': self.delivery_adapters,
+            'scopes': list(self.scopes),
         }
 
 
@@ -154,6 +156,7 @@ class PresenceManager:
         if not scopes:
             return
         presence = self._build_presence()
+        presence.scopes = list(scopes)
         payload = json.dumps(presence.to_dict()).encode('utf-8')
         try:
             session = _get_zenoh_session()

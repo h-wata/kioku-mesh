@@ -17,6 +17,12 @@ versions without a migration path until `1.0.0`.
 - messaging Phase 2: MCP tools `check_messages` / `ack_message` with server-side scope resolution (#185)
 - messaging Phase 1: Message/Ack schema, keyspace builder, local inbox spool, local ack index (#185)
 
+### Fixed
+
+- Fix `_messaging_scopes()` to reject unknown visibility values (B1: prevents silent scope widening) (#185)
+- Add defensive validation in `put_message()` for recipient kind and ID fields (C1) (#185)
+- Add `scopes` field to `Presence.to_dict()` payload for consumer clarity (C2) (#185)
+
 ### Changed
 
 - messaging: keyspace key shape を設計 memo (0185) の inbox path に合わせた — `session_inbox_key` / `agent_inbox_key` に `scope` 引数を追加し、`msg/{scope}/inbox/{session|agent}/{id}/{msg_id}` を生成するよう変更 (B1)

@@ -212,3 +212,52 @@ class TestSetupSubscriber:
 
         assert mock_sub.undeclare.call_count == 2
         assert bridge._subscribers == []
+
+
+# ---------------------------------------------------------------------------
+# C1: recipient validation
+# ---------------------------------------------------------------------------
+
+
+class TestPutMessageRecipientValidation:
+    def test_rejects_invalid_recipient_kind(self) -> None:
+        bridge = ZenohBridge(MagicMock(), MessageSpool())
+        msg = _make_msg(recipient_kind='session', recipient_id='s1')
+        msg.recipient = {'kind': 'broadcast'}  # type: ignore[assignment]
+        with pytest.raises(ValueError, match='Invalid recipient kind'):
+            bridge.put_message(msg, 'mesh')
+
+    def test_rejects_empty_session_id(self) -> None:
+        bridge = ZenohBridge(MagicMock(), MessageSpool())
+        msg = _make_msg(recipient_kind='session', recipient_id='s1')
+        msg.recipient = {'kind': 'session', 'session_id': ''}  # type: ignore[assignment]
+        with pytest.raises(ValueError, match='session_id'):
+            bridge.put_message(msg, 'mesh')
+
+    def test_rejects_none_session_id(self) -> None:
+        bridge = ZenohBridge(MagicMock(), MessageSpool())
+        msg = _make_msg(recipient_kind='session', recipient_id='s1')
+        msg.recipient = {'kind': 'session', 'session_id': None}  # type: ignore[assignment]
+        with pytest.raises(ValueError, match='session_id'):
+            bridge.put_message(msg, 'mesh')
+
+    def test_rejects_empty_agent_id(self) -> None:
+        bridge = ZenohBridge(MagicMock(), MessageSpool())
+        msg = _make_msg(recipient_kind='agent', recipient_id='ag1')
+        msg.recipient = {'kind': 'agent', 'agent_id': ''}  # type: ignore[assignment]
+        with pytest.raises(ValueError, match='agent_id'):
+            bridge.put_message(msg, 'mesh')
+
+    def test_valid_session_recipient_succeeds(self) -> None:
+        mock_session = MagicMock()
+        bridge = ZenohBridge(mock_session, MessageSpool())
+        msg = _make_msg(recipient_kind='session', recipient_id='valid-sess')
+        bridge.put_message(msg, 'mesh')
+        mock_session.put.assert_called_once()
+
+    def test_valid_agent_recipient_succeeds(self) -> None:
+        mock_session = MagicMock()
+        bridge = ZenohBridge(mock_session, MessageSpool())
+        msg = _make_msg(recipient_kind='agent', recipient_id='valid-agent')
+        bridge.put_message(msg, 'mesh')
+        mock_session.put.assert_called_once()
