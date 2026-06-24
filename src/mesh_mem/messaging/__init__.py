@@ -1,4 +1,46 @@
-"""Messaging layer stub: future pub/sub and RPC layer (ADR-0023, not yet implemented).
+"""Messaging layer — Phase 1 of ADR-0022 (ADR-0023 layering enforced).
 
-現時点では枠のみ。memory モジュールへの直接依存は禁止（ADR-0023 参照）。
+Phase 1 exports:
+  models   — Message, Ack, is_expired
+  keyspace — key builder functions for msg/** and inbox/** namespaces
+  spool    — in-memory MessageSpool + send_message / check_inbox internal API
+  local_index — SQLite ack state + msg_id dedup + ack_message internal API
+
+Phase 2+ (not yet implemented): Zenoh pub/sub, presence, MCP tools, tmux adapter.
+
+memory モジュールへの直接依存は禁止（ADR-0023 参照）。
 """
+
+from .keyspace import ack_key
+from .keyspace import agent_inbox_key
+from .keyspace import mesh_broadcast_key
+from .keyspace import parse_scope_from_key
+from .keyspace import session_inbox_key
+from .keyspace import team_key
+from .keyspace import user_key
+from .local_index import ack_message
+from .local_index import LocalMessageIndex
+from .models import Ack
+from .models import is_expired
+from .models import Message
+from .spool import check_inbox
+from .spool import MessageSpool
+from .spool import send_message
+
+__all__ = [
+    'Ack',
+    'LocalMessageIndex',
+    'Message',
+    'MessageSpool',
+    'ack_key',
+    'ack_message',
+    'agent_inbox_key',
+    'check_inbox',
+    'is_expired',
+    'mesh_broadcast_key',
+    'parse_scope_from_key',
+    'send_message',
+    'session_inbox_key',
+    'team_key',
+    'user_key',
+]
