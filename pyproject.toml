@@ -50,6 +50,7 @@ dev = [
 test = [
     "fastmcp>=0.2",
     "PyYAML>=6.0",
+    "pytest-xdist>=3.0",
 ]
 completion = [
     "argcomplete>=3.0",
