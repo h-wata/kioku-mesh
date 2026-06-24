@@ -44,40 +44,72 @@ def _parse_dt(value: str | datetime | None) -> datetime | None:
 
 @dataclass
 class Message:
-    """A scoped agent-to-agent message (direct delivery, Phase 1)."""
+    """A scoped agent-to-agent message (direct delivery, Phase 1).
 
+    Required positional fields: sender_id, scope, payload.
+    All other fields have defaults so existing call sites continue to work.
+
+    B2 additions follow the design memo (ADR-0022) direct delivery schema:
+      schema_version, kind, sender, recipient, body, content_type,
+      requires_ack, delivery_adapters, correlation_id, _extras.
+    """
+
+    # --- identity / routing (required) ---
     sender_id: str
     scope: str  # "mesh" | "team/{team_id}" | "user/{user_id}"
-    payload: dict[str, Any]
+    payload: dict[str, Any]  # kept for backward compat; prefer body for new code
+
+    # --- envelope (optional with defaults) ---
     msg_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     created_at: datetime = field(default_factory=_utc_now)
     expires_at: datetime | None = None
     ttl_sec: int | None = None
     sender_seq: int | None = None  # best-effort monotonic; no ordering guarantee
 
+    # --- direct delivery schema (B2 — ADR-0022) ---
+    schema_version: str = '1.0'
+    kind: str = 'direct'  # "direct" | "broadcast" (Phase 2+)
+    sender: dict[str, Any] = field(default_factory=dict)  # identity object for sender
+    recipient: dict[str, Any] = field(default_factory=dict)  # {"kind": "session"|"agent", "id": "..."}
+    body: dict[str, Any] | str = field(default_factory=dict)  # first-class content; use instead of payload
+    content_type: str = 'text/plain'
+    requires_ack: bool = False
+    delivery_adapters: list[str] = field(default_factory=list)
+    correlation_id: str | None = None
+    _extras: dict[str, Any] = field(default_factory=dict)  # unknown fields for forward compatibility
+
     def to_json(self) -> str:
-        return json.dumps(
-            {
-                'msg_id': self.msg_id,
-                'sender_id': self.sender_id,
-                'scope': self.scope,
-                'payload': self.payload,
-                'created_at': _iso(self.created_at),
-                'expires_at': _iso(self.expires_at) if self.expires_at is not None else None,
-                'ttl_sec': self.ttl_sec,
-                'sender_seq': self.sender_seq,
-            },
-            ensure_ascii=False,
-        )
+        d: dict[str, Any] = {
+            'msg_id': self.msg_id,
+            'sender_id': self.sender_id,
+            'scope': self.scope,
+            'payload': self.payload,
+            'created_at': _iso(self.created_at),
+            'expires_at': _iso(self.expires_at) if self.expires_at is not None else None,
+            'ttl_sec': self.ttl_sec,
+            'sender_seq': self.sender_seq,
+            'schema_version': self.schema_version,
+            'kind': self.kind,
+            'sender': self.sender,
+            'recipient': self.recipient,
+            'body': self.body,
+            'content_type': self.content_type,
+            'requires_ack': self.requires_ack,
+            'delivery_adapters': self.delivery_adapters,
+            'correlation_id': self.correlation_id,
+        }
+        return json.dumps(d, ensure_ascii=False)
 
     @classmethod
     def from_json(cls, s: str) -> Message:
-        """Parse JSON, ignoring unknown fields for forward compatibility."""
+        """Parse JSON; unknown fields are captured in _extras for forward compatibility."""
         data: dict[str, Any] = json.loads(s)
         data['created_at'] = _parse_dt(data.get('created_at')) or _utc_now()
         data['expires_at'] = _parse_dt(data.get('expires_at'))
-        known = {f.name for f in _fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        schema_fields = {f.name for f in _fields(cls) if f.name != '_extras'}
+        kwargs: dict[str, Any] = {k: v for k, v in data.items() if k in schema_fields}
+        kwargs['_extras'] = {k: v for k, v in data.items() if k not in schema_fields}
+        return cls(**kwargs)
 
 
 @dataclass

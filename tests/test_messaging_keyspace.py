@@ -36,11 +36,29 @@ class TestScopedKeys:
 
 
 class TestInboxKeys:
-    def test_session_inbox_key(self) -> None:
-        assert session_inbox_key('sess-abc', 'msg003') == 'inbox/session/sess-abc/msg003'
+    def test_session_inbox_key_mesh_scope(self) -> None:
+        key = session_inbox_key('mesh', 'sess-abc', 'msg003')
+        assert key == 'msg/mesh/inbox/session/sess-abc/msg003'
 
-    def test_agent_inbox_key(self) -> None:
-        assert agent_inbox_key('agent-x', 'msg004') == 'inbox/agent/agent-x/msg004'
+    def test_session_inbox_key_team_scope(self) -> None:
+        key = session_inbox_key('team/kioku-mesh', 'sess-abc', 'msg003')
+        assert key == 'msg/team/kioku-mesh/inbox/session/sess-abc/msg003'
+
+    def test_session_inbox_key_user_scope(self) -> None:
+        key = session_inbox_key('user/hwata', 'sess-abc', 'msg003')
+        assert key == 'msg/user/hwata/inbox/session/sess-abc/msg003'
+
+    def test_agent_inbox_key_mesh_scope(self) -> None:
+        key = agent_inbox_key('mesh', 'agent-x', 'msg004')
+        assert key == 'msg/mesh/inbox/agent/agent-x/msg004'
+
+    def test_agent_inbox_key_team_scope(self) -> None:
+        key = agent_inbox_key('team/kioku-mesh', 'agent-x', 'msg004')
+        assert key == 'msg/team/kioku-mesh/inbox/agent/agent-x/msg004'
+
+    def test_inbox_key_starts_with_msg_scope(self) -> None:
+        key = session_inbox_key('mesh', 'sess', 'mid')
+        assert key.startswith('msg/mesh/inbox/session/')
 
 
 class TestAckKey:
@@ -79,10 +97,11 @@ class TestParseScopeFromKey:
     def test_unknown_key_returns_none(self) -> None:
         assert parse_scope_from_key('some/random/key') is None
 
-    def test_inbox_key_returns_none(self) -> None:
-        # inbox keys do not start with msg/**
-        key = session_inbox_key('sess', 'msg')
-        assert parse_scope_from_key(key) is None
+    def test_inbox_key_returns_scope(self) -> None:
+        # B1: inbox keys are now under msg/{scope}/inbox/... so parse_scope_from_key returns the scope
+        assert parse_scope_from_key(session_inbox_key('mesh', 'sess', 'mid')) == 'mesh'
+        assert parse_scope_from_key(session_inbox_key('team/kioku-mesh', 'sess', 'mid')) == 'team/kioku-mesh'
+        assert parse_scope_from_key(agent_inbox_key('user/hwata', 'agent-x', 'mid')) == 'user/hwata'
 
     def test_empty_string_returns_none(self) -> None:
         assert parse_scope_from_key('') is None

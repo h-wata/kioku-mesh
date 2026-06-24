@@ -28,11 +28,13 @@ def _iso(dt: datetime) -> str:
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS messages (
-    msg_id     TEXT PRIMARY KEY,
-    scope      TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    expires_at TEXT,
-    is_acked   INTEGER NOT NULL DEFAULT 0
+    msg_id               TEXT NOT NULL,
+    recipient_session_id TEXT NOT NULL,
+    scope                TEXT NOT NULL,
+    created_at           TEXT NOT NULL,
+    expires_at           TEXT,
+    is_acked             INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (msg_id, recipient_session_id)
 );
 CREATE TABLE IF NOT EXISTS acks (
     msg_id               TEXT NOT NULL,
@@ -62,14 +64,16 @@ class LocalMessageIndex:
         finally:
             conn.close()
 
-    def register(self, msg: Message) -> bool:
-        """Register msg; returns True if inserted, False if msg_id already known (dedup)."""
+    def register(self, msg: Message, recipient_session_id: str) -> bool:
+        """Register msg for a recipient session; returns True if inserted, False if already known (dedup)."""
         with self._connect() as conn:
             try:
                 conn.execute(
-                    'INSERT INTO messages (msg_id, scope, created_at, expires_at) VALUES (?, ?, ?, ?)',
+                    'INSERT INTO messages (msg_id, recipient_session_id, scope, created_at, expires_at)'
+                    ' VALUES (?, ?, ?, ?, ?)',
                     (
                         msg.msg_id,
+                        recipient_session_id,
                         msg.scope,
                         _iso(msg.created_at),
                         _iso(msg.expires_at) if msg.expires_at is not None else None,
@@ -81,15 +85,24 @@ class LocalMessageIndex:
                 return False
 
     def record_ack(self, ack: Ack) -> None:
-        """Record an ack and mark the message as acked in messages table."""
+        """Record an ack and mark the per-session row as acked.
+
+        Raises ValueError if (msg_id, recipient_session_id) is not registered.
+        """
         with self._connect() as conn:
+            row = conn.execute(
+                'SELECT 1 FROM messages WHERE msg_id = ? AND recipient_session_id = ?',
+                (ack.msg_id, ack.recipient_session_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f'unknown msg_id: {ack.msg_id!r}')
             conn.execute(
                 'INSERT OR REPLACE INTO acks (msg_id, recipient_session_id, acked_at) VALUES (?, ?, ?)',
                 (ack.msg_id, ack.recipient_session_id, _iso(ack.acked_at)),
             )
             conn.execute(
-                'UPDATE messages SET is_acked = 1 WHERE msg_id = ?',
-                (ack.msg_id,),
+                'UPDATE messages SET is_acked = 1 WHERE msg_id = ? AND recipient_session_id = ?',
+                (ack.msg_id, ack.recipient_session_id),
             )
             conn.commit()
 
@@ -102,17 +115,18 @@ class LocalMessageIndex:
             ).fetchone()
             return row is not None
 
-    def list_unacked(self, scope: str | None = None) -> list[str]:
-        """Return msg_ids of unacked registered messages, optionally filtered by scope."""
+    def list_unacked(self, recipient_session_id: str, scope: str | None = None) -> list[str]:
+        """Return msg_ids of unacked messages for a recipient session, optionally filtered by scope."""
         with self._connect() as conn:
             if scope is not None:
                 rows = conn.execute(
-                    'SELECT msg_id FROM messages WHERE is_acked = 0 AND scope = ?',
-                    (scope,),
+                    'SELECT msg_id FROM messages WHERE is_acked = 0 AND recipient_session_id = ? AND scope = ?',
+                    (recipient_session_id, scope),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    'SELECT msg_id FROM messages WHERE is_acked = 0',
+                    'SELECT msg_id FROM messages WHERE is_acked = 0 AND recipient_session_id = ?',
+                    (recipient_session_id,),
                 ).fetchall()
             return [row['msg_id'] for row in rows]
 

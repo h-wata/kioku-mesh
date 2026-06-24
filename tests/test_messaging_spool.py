@@ -190,18 +190,18 @@ class TestLocalMessageIndex:
     def test_register_inserts(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg = _make_msg(expires_at=_future(), ttl_sec=None)
-        assert idx.register(msg) is True
+        assert idx.register(msg, 'test-session') is True
 
     def test_register_dedup_returns_false(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg = _make_msg()
-        assert idx.register(msg) is True
-        assert idx.register(msg) is False
+        assert idx.register(msg, 'test-session') is True
+        assert idx.register(msg, 'test-session') is False
 
     def test_ack_message_flow(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg = _make_msg()
-        idx.register(msg)
+        idx.register(msg, 'sess-abc')
         ack = ack_message(idx, msg.msg_id, 'sess-abc')
         assert isinstance(ack, Ack)
         assert ack.msg_id == msg.msg_id
@@ -211,42 +211,60 @@ class TestLocalMessageIndex:
     def test_is_acked_false_before_ack(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg = _make_msg()
-        idx.register(msg)
+        idx.register(msg, 'sess-xyz')
         assert not idx.is_acked(msg.msg_id, 'sess-xyz')
 
     def test_list_unacked_scope_filter(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg_mesh = _make_msg(scope='mesh')
         msg_team = _make_msg(scope='team/kioku-mesh')
-        idx.register(msg_mesh)
-        idx.register(msg_team)
-        unacked_mesh = idx.list_unacked(scope='mesh')
+        idx.register(msg_mesh, 'test-session')
+        idx.register(msg_team, 'test-session')
+        unacked_mesh = idx.list_unacked('test-session', scope='mesh')
         assert msg_mesh.msg_id in unacked_mesh
         assert msg_team.msg_id not in unacked_mesh
 
     def test_list_unacked_excludes_acked(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg = _make_msg()
-        idx.register(msg)
+        idx.register(msg, 'sess-abc')
         ack_message(idx, msg.msg_id, 'sess-abc')
-        assert msg.msg_id not in idx.list_unacked()
+        assert msg.msg_id not in idx.list_unacked('sess-abc')
 
     def test_purge_expired(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         active = _make_msg(expires_at=_future(), ttl_sec=None)
         expired = _make_msg(expires_at=_past(), ttl_sec=None)
-        idx.register(active)
-        idx.register(expired)
+        idx.register(active, 'test-session')
+        idx.register(expired, 'test-session')
         count = idx.purge_expired()
         assert count == 1
-        remaining = idx.list_unacked()
+        remaining = idx.list_unacked('test-session')
         assert active.msg_id in remaining
         assert expired.msg_id not in remaining
 
     def test_purge_expired_with_no_expires_at(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
         msg = _make_msg(expires_at=None, ttl_sec=None)  # no expiry
-        idx.register(msg)
+        idx.register(msg, 'test-session')
         count = idx.purge_expired()
         assert count == 0
-        assert msg.msg_id in idx.list_unacked()
+        assert msg.msg_id in idx.list_unacked('test-session')
+
+    def test_two_sessions_ack_independently(self, tmp_path: Path) -> None:
+        idx = LocalMessageIndex(tmp_path / 'inbox.db')
+        msg = _make_msg()
+        idx.register(msg, 'sess-1')
+        idx.register(msg, 'sess-2')
+        ack_message(idx, msg.msg_id, 'sess-1')
+        assert idx.is_acked(msg.msg_id, 'sess-1')
+        assert not idx.is_acked(msg.msg_id, 'sess-2')
+        assert msg.msg_id not in idx.list_unacked('sess-1')
+        assert msg.msg_id in idx.list_unacked('sess-2')
+
+    def test_ack_unknown_msg_raises_value_error(self, tmp_path: Path) -> None:
+        import pytest
+
+        idx = LocalMessageIndex(tmp_path / 'inbox.db')
+        with pytest.raises(ValueError, match='unknown msg_id'):
+            ack_message(idx, 'nonexistent-id', 'sess-abc')
