@@ -12,6 +12,7 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- messaging Phase 3: tmux send-keys adapter (opt-in)。default off、exact pane/sender/scope allowlist、8 KiB size limit、retry+drop、注入 ≠ ack 契約 (#185)
 - messaging Phase 2: PresenceManager (30s heartbeat, 90s TTL, scope isolation) (#185)
 - messaging Phase 2: ZenohBridge (spool ↔ Zenoh put/sub, 64 KiB body limit) (#185)
 - messaging Phase 2: MCP tools `check_messages` / `ack_message` with server-side scope resolution (#185)

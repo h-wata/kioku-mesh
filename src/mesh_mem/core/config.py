@@ -6,6 +6,8 @@ kioku-mesh-specific runtime settings such as which backend to use.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from dataclasses import field
 import os
 from pathlib import Path
 
@@ -222,3 +224,32 @@ def write_local_config() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('backend: local\n', encoding='utf-8')
     return path
+
+
+@dataclass
+class MessagingTmuxAdapterConfig:
+    """Config for the opt-in tmux send-keys delivery adapter (ADR-0022 Phase 3).
+
+    Default off — ``enabled`` must be explicitly set to ``True`` in config;
+    no pane injection occurs otherwise.
+    """
+
+    enabled: bool = False
+    pane_allowlist: list[str] = field(default_factory=list)
+    sender_allowlist: list[str] = field(default_factory=list)
+    scope_allowlist: list[str] = field(default_factory=lambda: ['user'])
+    max_body_bytes: int = 8192
+
+
+def get_messaging_tmux_adapter_config() -> MessagingTmuxAdapterConfig:
+    """Read tmux adapter config from global config YAML; defaults to all-off."""
+    cfg = _read_yaml(_config_path())
+    messaging: dict = cfg.get('messaging', {}) or {}
+    tmux: dict = messaging.get('tmux', {}) or {}
+    return MessagingTmuxAdapterConfig(
+        enabled=bool(tmux.get('enabled', False)),
+        pane_allowlist=list(tmux.get('pane_allowlist', [])),
+        sender_allowlist=list(tmux.get('sender_allowlist', [])),
+        scope_allowlist=list(tmux.get('scope_allowlist', ['user'])),
+        max_body_bytes=int(tmux.get('max_body_bytes', 8192)),
+    )
