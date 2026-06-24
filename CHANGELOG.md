@@ -12,6 +12,7 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- feat(messaging): Phase 4 bridge 昇格 — MessageMemoryBridge で received message を save_observation に転送 (#185)
 - messaging Phase 3: tmux send-keys adapter (opt-in)。default off、exact pane/sender/scope allowlist、8 KiB size limit、retry+drop、注入 ≠ ack 契約 (#185)
 - messaging Phase 2: PresenceManager (30s heartbeat, 90s TTL, scope isolation) (#185)
 - messaging Phase 2: ZenohBridge (spool ↔ Zenoh put/sub, 64 KiB body limit) (#185)
