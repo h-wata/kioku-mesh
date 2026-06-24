@@ -10,6 +10,10 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- messaging Phase 1: Message/Ack schema, keyspace builder, local inbox spool, local ack index (#185)
+
 ## [0.6.0] - 2026-06-24
 
 ### Changed
