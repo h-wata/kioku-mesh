@@ -14,6 +14,12 @@ versions without a migration path until `1.0.0`.
 
 - messaging Phase 1: Message/Ack schema, keyspace builder, local inbox spool, local ack index (#185)
 
+### Changed
+
+- messaging: keyspace key shape を設計 memo (0185) の inbox path に合わせた — `session_inbox_key` / `agent_inbox_key` に `scope` 引数を追加し、`msg/{scope}/inbox/{session|agent}/{id}/{msg_id}` を生成するよう変更 (B1)
+- messaging: `Message` dataclass に direct delivery schema の first-class フィールドを追加 — `schema_version`, `kind`, `sender`, `recipient`, `body`, `content_type`, `requires_ack`, `delivery_adapters`, `correlation_id`, `_extras` (B2)
+- messaging: local inbox index の Ack/dedup を recipient session 単位に変更 — `messages` table を `(msg_id, recipient_session_id)` 複合 PK に、`ack_message()` は未知 msg_id で `ValueError` を raise (B3)
+
 ## [0.6.0] - 2026-06-24
 
 ### Changed

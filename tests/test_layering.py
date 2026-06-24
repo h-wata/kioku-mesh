@@ -130,3 +130,20 @@ def test_stub_layers_exist() -> None:
     """Stub packages for messaging/ and bridge/ layers exist."""
     assert (SRC_ROOT / 'messaging' / '__init__.py').exists(), 'messaging/__init__.py が存在しません'
     assert (SRC_ROOT / 'bridge' / '__init__.py').exists(), 'bridge/__init__.py が存在しません'
+
+
+def test_messaging_does_not_import_memory() -> None:
+    """ADR-0023: messaging layer must not directly import memory layer."""
+    messaging_dir = SRC_ROOT / 'messaging'
+    violations: list[str] = []
+    for p in sorted(messaging_dir.glob('*.py')):
+        tree = ast.parse(p.read_text(encoding='utf-8'))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                if isinstance(node, ast.ImportFrom) and node.level > 0:
+                    abs_mod = _build_absolute_module(node.level, MESSAGING_PKG, node.module)
+                else:
+                    abs_mod = getattr(node, 'module', '') or ''
+                if abs_mod.startswith(MEMORY_PKG):
+                    violations.append(f'{p.name}: imports {abs_mod!r}')
+    assert not violations, 'messaging 層が memory 層に直接依存しています (ADR-0023 違反):\n' + '\n'.join(violations)
