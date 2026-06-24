@@ -81,6 +81,21 @@ class TestTmuxAdapterGuards:
         assert result is False
         mock_run.assert_not_called()
 
+    def test_payload_8192_bytes_accepted(self) -> None:
+        """Body at exactly 8192 bytes (the limit) must be injected, not dropped.
+
+        Guards accept body_bytes <= max_body_bytes; only body_bytes > limit drops.
+        """
+        boundary_body = 'x' * 8192
+        cfg = _cfg(max_body_bytes=8192)
+        with (
+            patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run,
+            patch('mesh_mem.messaging.tmux_adapter.time.sleep'),
+        ):
+            result = try_inject(_msg(body=boundary_body), _PANE, cfg)
+        assert result is True
+        assert mock_run.call_count == 2
+
 
 class TestTmuxAdapterInjection:
     """Verify correct injection behavior when all guards pass."""

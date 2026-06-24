@@ -24,6 +24,10 @@ versions without a migration path until `1.0.0`.
 - Add defensive validation in `put_message()` for recipient kind and ID fields (C1) (#185)
 - Add `scopes` field to `Presence.to_dict()` payload for consumer clarity (C2) (#185)
 
+### Tests
+
+- test: tmux adapter の 8 KiB boundary pass ケース追加 (test_payload_8192_bytes_accepted)
+
 ### Changed
 
 - test: pytest-xdist 並列化導入、全テスト実行時間 90秒 → 21秒に短縮（-n auto、16コア）
