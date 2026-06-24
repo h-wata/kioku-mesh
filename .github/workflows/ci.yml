@@ -40,4 +40,4 @@ jobs:
         uses: pre-commit/action@v3.0.1
 
       - name: Run pytest
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short -n auto
