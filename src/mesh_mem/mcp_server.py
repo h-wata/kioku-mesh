@@ -9,6 +9,7 @@ space by guessing values. Narrow-down is allowed on ``search_memory``.
 from contextlib import closing
 from datetime import datetime
 from datetime import timezone
+import json
 import os
 import re
 import socket
@@ -21,9 +22,18 @@ from .backend import get_backend
 from .backend import reset_backend
 from .config import format_visibility
 from .config import get_backend_mode
+from .config import get_team_id
+from .config import get_user_id
 from .config import resolve_write_visibility
+from .core.identity import state_dir
+from .core.transport import get_session as _get_zenoh_session
 from .identity import get_pc_id
 from .identity import get_session_id
+from .messaging.keyspace import ack_key
+from .messaging.local_index import ack_message as _ack_message_internal
+from .messaging.local_index import LocalMessageIndex
+from .messaging.models import is_expired
+from .messaging.models import Message
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import MAX_SEARCH
@@ -96,6 +106,54 @@ so search results stay scannable.
 """
 
 mcp = FastMCP('kioku-mesh', instructions=_INSTRUCTIONS)
+
+_messaging_index: LocalMessageIndex | None = None
+
+
+def _get_messaging_index() -> LocalMessageIndex:
+    """Return the process-scoped LocalMessageIndex, creating it on first call."""
+    global _messaging_index
+    if _messaging_index is None:
+        db_path = state_dir() / 'messaging' / 'inbox.db'
+        _messaging_index = LocalMessageIndex(db_path)
+    return _messaging_index
+
+
+_VALID_VISIBILITIES = frozenset({'', 'user', 'team', 'mesh'})
+
+
+def _messaging_scopes(visibility: str) -> list[str]:
+    """Resolve which msg/** scopes to query based on ``visibility``.
+
+    ``''`` → all configured scopes (user + team + mesh).
+    ``'user'`` / ``'team'`` / ``'mesh'`` → that single tier.
+    ``user_id`` / ``team_id`` are resolved from server-side config, never
+    from tool arguments (ADR-0019).
+
+    Raises:
+    ------
+    ValueError
+        For any visibility value outside the known set ``{'', 'user', 'team', 'mesh'}``.
+    """
+    if visibility not in _VALID_VISIBILITIES:
+        raise ValueError(f"Unknown visibility: {visibility!r}. Use 'mesh', 'user', 'team', or ''.")
+    if visibility == 'mesh':
+        return ['mesh']
+    if visibility == 'user':
+        uid = get_user_id()
+        return [f'user/{uid}'] if uid else []
+    if visibility == 'team':
+        tid = get_team_id()
+        return [f'team/{tid}'] if tid else []
+    # empty → all reachable
+    scopes: list[str] = ['mesh']
+    uid = get_user_id()
+    if uid:
+        scopes.append(f'user/{uid}')
+    tid = get_team_id()
+    if tid:
+        scopes.append(f'team/{tid}')
+    return scopes
 
 
 def _split_zenoh_connect_endpoints(raw: str | None) -> list[str]:
@@ -482,6 +540,200 @@ def drain_pending_puts(limit: int | None = None) -> str:
     drained = get_backend().drain_pending(limit=limit, wait=True)
     remaining = get_backend().get_status().pending_puts
     return f'pending_puts drain complete: drained={drained}, remaining={remaining}'
+
+
+@mcp.tool()
+def check_messages(
+    limit: int = 20,
+    visibility: str = '',
+    include_acked: bool = False,
+    include_expired: bool = False,
+    since_iso: str = '',
+) -> str:
+    """Poll the kioku-mesh inbox for pending messages addressed to this session.
+
+    Queries Zenoh for messages delivered to the current session and agent,
+    registers them in the local inbox index, and returns unread entries.
+
+    ``user_id``, ``team_id``, ``session_id``, and ``pc_id`` are resolved
+    server-side from config and environment — they are intentionally NOT
+    tool arguments (ADR-0019 / ADR-0022).
+
+    Args:
+        limit: maximum number of messages to return (1–100, default 20).
+        visibility: scope to query — ``''`` (all configured), ``user``,
+            ``team``, or ``mesh``.
+        include_acked: include already-acknowledged messages (default False).
+        include_expired: include TTL-expired messages, for debugging (default False).
+        since_iso: optional ISO 8601 lower bound for ``created_at``.
+
+    Returns:
+        JSON string with shape ``{"messages": [...], "count": N, "truncated": bool}``.
+    """
+    limit = max(1, min(100, limit))
+    try:
+        scopes = _messaging_scopes(visibility)
+    except ValueError as e:
+        return json.dumps({'error': str(e)})
+    session_id = get_session_id()
+    from .core.identity import get_client_id
+
+    agent_id = get_client_id()
+    index = _get_messaging_index()
+
+    since_dt: datetime | None = None
+    if since_iso:
+        try:
+            since_dt = datetime.fromisoformat(since_iso.replace('Z', '+00:00'))
+        except ValueError:
+            return json.dumps({'error': f'invalid since_iso: {since_iso!r}'})
+
+    messages: list[Message] = []
+    seen_ids: set[str] = set()
+
+    try:
+        session = _get_zenoh_session()
+    except Exception as e:  # noqa: BLE001
+        return json.dumps({'error': f'Zenoh session unavailable: {type(e).__name__}: {e}'})
+
+    for scope in scopes:
+        selectors = [
+            f'msg/{scope}/inbox/session/{session_id}/**',
+            f'msg/{scope}/inbox/agent/{agent_id}/**',
+        ]
+        for selector in selectors:
+            try:
+                for reply in session.get(selector, timeout=3.0):
+                    if not reply.ok:
+                        continue
+                    try:
+                        json_str = reply.ok.payload.to_bytes().decode('utf-8')
+                        msg = Message.from_json(json_str)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if msg.msg_id in seen_ids:
+                        continue
+                    seen_ids.add(msg.msg_id)
+                    # Override scope from key context if not set on message
+                    if not msg.scope:
+                        msg.scope = scope
+                    index.register(msg, session_id)
+                    messages.append(msg)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # Apply filters
+    filtered: list[Message] = []
+    for msg in messages:
+        if not include_expired and is_expired(msg):
+            continue
+        if not include_acked and index.is_acked(msg.msg_id, session_id):
+            continue
+        if since_dt is not None:
+            created = msg.created_at
+            if created.tzinfo is None:
+                from datetime import timezone as _tz
+
+                created = created.replace(tzinfo=_tz.utc)
+            if created < since_dt:
+                continue
+        filtered.append(msg)
+
+    # Sort: (created_at, sender_seq, msg_id) ascending
+    def _sort_key(m: Message) -> tuple[str, int, str]:
+        ts = m.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if m.created_at else ''
+        seq = m.sender_seq if m.sender_seq is not None else 0
+        return ts, seq, m.msg_id
+
+    filtered.sort(key=_sort_key)
+    truncated = len(filtered) > limit
+    page = filtered[:limit]
+
+    items = []
+    for msg in page:
+        sender = msg.sender if isinstance(msg.sender, dict) else {}
+        recipient = msg.recipient if isinstance(msg.recipient, dict) else {}
+        body = msg.body if msg.body else msg.payload
+        items.append(
+            {
+                'msg_id': msg.msg_id,
+                'subject': msg._extras.get('subject', ''),  # noqa: SLF001
+                'body': body,
+                'created_at': msg.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.created_at else '',
+                'expires_at': msg.expires_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.expires_at else None,
+                'scope': msg.scope,
+                'sender': {
+                    'agent_id': sender.get('agent_id', msg.sender_id),
+                    'session_id': sender.get('session_id', ''),
+                },
+                'recipient': {
+                    'kind': recipient.get('kind', 'session'),
+                    'session_id': recipient.get('session_id', ''),
+                },
+                'acked': index.is_acked(msg.msg_id, session_id),
+                'delivery_adapters': msg.delivery_adapters,
+            }
+        )
+
+    return json.dumps({'messages': items, 'count': len(items), 'truncated': truncated})
+
+
+@mcp.tool()
+def ack_message(
+    msg_id: str,
+    visibility: str = '',
+) -> str:
+    """Acknowledge a kioku-mesh inbox message as processed by this session.
+
+    Records the ack in the local inbox index and publishes the ack key to
+    Zenoh so the sender can observe delivery.
+
+    ``recipient_session_id`` is resolved from the current process's
+    session identity — it is intentionally NOT a tool argument (ADR-0022).
+
+    Args:
+        msg_id: full 32-hex message id.
+        visibility: scope hint — ``''`` (look up from local index), ``user``,
+            ``team``, or ``mesh``.
+
+    Returns:
+        Confirmation string ``acked: <msg_id> (scope=<scope>)`` on success.
+    """
+    if not msg_id or len(msg_id) != 32:
+        return 'msg_id must be a full 32-hex string.'
+    session_id = get_session_id()
+    index = _get_messaging_index()
+
+    # Determine scope: prefer local index lookup, fall back to visibility param
+    scope = index.find_scope(msg_id, session_id)
+    if scope is None:
+        if visibility:
+            try:
+                scopes = _messaging_scopes(visibility)
+            except ValueError as e:
+                return f'ack failed: {e}'
+            scope = scopes[0] if scopes else 'mesh'
+        else:
+            scope = 'mesh'
+
+    try:
+        _ack_message_internal(index, msg_id, session_id)
+    except ValueError as e:
+        return f'ack failed: {e}'
+
+    # Publish ack to Zenoh (best-effort; local ack is already recorded)
+    try:
+        zenoh_session = _get_zenoh_session()
+        key = ack_key(scope, msg_id, session_id)
+        payload = json.dumps({'msg_id': msg_id, 'recipient_session_id': session_id, 'status': 'acknowledged'}).encode(
+            'utf-8'
+        )
+        zenoh_session.put(key, payload)
+    except Exception as e:  # noqa: BLE001
+        # Local ack succeeded; Zenoh publish failure is non-fatal
+        return f'acked: {msg_id} (scope={scope}) [zenoh_publish_failed: {type(e).__name__}]'
+
+    return f'acked: {msg_id} (scope={scope})'
 
 
 def _is_tty_misinvocation() -> bool:
