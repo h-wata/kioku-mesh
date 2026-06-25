@@ -1726,22 +1726,27 @@ def test_search_all_short_terms_uses_like_and(tmp_path: Path) -> None:
 
     When every term in the query is < 3 chars, no FTS term is produced and
     the query degrades to multiple LIKE conditions ANDed together.
+
+    Uses non-hex terms ('qx', 'zy') to avoid false positive matches against
+    the hex observation_id stored in payload_json.
     """
     idx = LocalIndex.connect(str(tmp_path / 'short_and.db'))
     try:
-        wanted = _mk_obs('db migration: ab test result', project='short')
-        has_db_only = _mk_obs('db only without the other term', project='short')
-        has_ab_only = _mk_obs('ab only without the other term', project='short')
+        # 'qx' and 'zy' contain only non-hex chars (q, x, y, z are outside [0-9a-f]),
+        # preventing accidental matches against observation_id UUID strings.
+        wanted = _mk_obs('qx and zy pair both present', project='shortand')
+        has_qx_only = _mk_obs('qx only without the second token', project='shortand')
+        has_zy_only = _mk_obs('zy only without the first token', project='shortand')
         idx.upsert(wanted)
-        idx.upsert(has_db_only)
-        idx.upsert(has_ab_only)
+        idx.upsert(has_qx_only)
+        idx.upsert(has_zy_only)
 
-        # 'db' and 'ab' are both 2 chars → LIKE AND path regardless of FTS capability.
-        results = idx.search(query='db ab', project='short', include_superseded=True)
+        # 'qx' and 'zy' are both 2 chars → LIKE AND path regardless of FTS capability.
+        results = idx.search(query='qx zy', project='shortand', include_superseded=True)
         ids = {r.observation_id for r in results}
-        assert wanted.observation_id in ids, 'obs containing both db and ab must match'
-        assert has_db_only.observation_id not in ids, 'obs with only db must not match'
-        assert has_ab_only.observation_id not in ids, 'obs with only ab must not match'
+        assert wanted.observation_id in ids, 'obs containing both qx and zy must match'
+        assert has_qx_only.observation_id not in ids, 'obs with only qx must not match'
+        assert has_zy_only.observation_id not in ids, 'obs with only zy must not match'
     finally:
         idx.close()
 
