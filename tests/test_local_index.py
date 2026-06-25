@@ -1032,9 +1032,9 @@ def test_close_runs_wal_checkpoint(tmp_path: Path) -> None:
     # before our manual close); the assertion that matters is post-close.
     idx.close()
     if wal_path.exists():
-        assert wal_path.stat().st_size == 0, (
-            f'WAL must be truncated to zero by close(), got {wal_path.stat().st_size} bytes'
-        )
+        assert (
+            wal_path.stat().st_size == 0
+        ), f'WAL must be truncated to zero by close(), got {wal_path.stat().st_size} bytes'
 
 
 def test_periodic_wal_checkpoint_resets_counter(tmp_path: Path) -> None:
@@ -1095,9 +1095,9 @@ def test_short_query_falls_back_to_like(tmp_path: Path) -> None:
         idx.upsert(obs)
 
         results = idx.search(query='AI', include_superseded=True)
-        assert any(r.observation_id == obs.observation_id for r in results), (
-            'Short query "AI" must still match via LIKE fallback'
-        )
+        assert any(
+            r.observation_id == obs.observation_id for r in results
+        ), 'Short query "AI" must still match via LIKE fallback'
     finally:
         idx.close()
 
@@ -1343,9 +1343,9 @@ def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
         ids = [r.observation_id for r in results]
         if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
             # FTS path: high-relevance (dense) obs should rank first (lower bm25 rank value).
-            assert ids.index(obs_high.observation_id) < ids.index(obs_low.observation_id), (
-                'High-relevance obs must rank before low-relevance obs in FTS path'
-            )
+            assert ids.index(obs_high.observation_id) < ids.index(
+                obs_low.observation_id
+            ), 'High-relevance obs must rank before low-relevance obs in FTS path'
 
         # Tie-break: two obs with same content (same relevance), newer first.
         obs_older = _mk_obs('tiebreak content same words', project='tie')
@@ -1359,9 +1359,9 @@ def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
         ids_tie = [r.observation_id for r in results_tie]
         if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
             # FTS path: ORDER BY rank, created_at DESC — newer first on tie.
-            assert ids_tie.index(obs_newer.observation_id) < ids_tie.index(obs_older.observation_id), (
-                'Newer obs must appear before older obs when bm25 rank is equal'
-            )
+            assert ids_tie.index(obs_newer.observation_id) < ids_tie.index(
+                obs_older.observation_id
+            ), 'Newer obs must appear before older obs when bm25 rank is equal'
     finally:
         idx.close()
 
@@ -1458,9 +1458,9 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
         # FTS search must find obs_b after rebuild.
         if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
             fts_results = idx.search(query='replacement', include_superseded=True)
-            assert any(r.observation_id == obs_b.observation_id for r in fts_results), (
-                'obs_b must be findable via FTS after rebuild'
-            )
+            assert any(
+                r.observation_id == obs_b.observation_id for r in fts_results
+            ), 'obs_b must be findable via FTS after rebuild'
 
         # superseded_by must be reconstructed: obs_a hidden by default.
         results_default = idx.search(include_superseded=False)
