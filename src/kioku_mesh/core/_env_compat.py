@@ -15,6 +15,9 @@ _NEW_PREFIX = 'KIOKU_MESH_'
 _OLD_PREFIX = 'MESH_MEM_'
 _REMOVAL_VERSION = 'v1.0.0'
 
+# D1: emit DeprecationWarning once per legacy key per process lifetime.
+_warned_keys: set[str] = set()
+
 
 def get_env(key: str, default: str | None = '') -> str | None:
     """Return the value of *key* (a ``KIOKU_MESH_*`` env var), with legacy fallback.
@@ -44,13 +47,15 @@ def get_env(key: str, default: str | None = '') -> str | None:
     legacy_key = _OLD_PREFIX + suffix
     legacy_val = os.environ.get(legacy_key)
     if legacy_val is not None:
-        warnings.warn(
-            f'Environment variable {legacy_key!r} is deprecated. '
-            f'Please rename it to {key!r}. '
-            f'{legacy_key!r} support will be removed in {_REMOVAL_VERSION} (ADR-0024).',
-            DeprecationWarning,
-            stacklevel=3,
-        )
+        if legacy_key not in _warned_keys:
+            _warned_keys.add(legacy_key)
+            warnings.warn(
+                f'Environment variable {legacy_key!r} is deprecated. '
+                f'Please rename it to {key!r}. '
+                f'{legacy_key!r} support will be removed in {_REMOVAL_VERSION} (ADR-0024).',
+                DeprecationWarning,
+                stacklevel=3,
+            )
         return legacy_val
 
     return default

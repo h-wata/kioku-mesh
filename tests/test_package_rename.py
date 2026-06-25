@@ -96,3 +96,59 @@ class TestEnvVarCompat:
 
         with pytest.raises(ValueError, match='KIOKU_MESH_'):
             get_env('MESH_MEM_STATE_DIR')
+
+    def test_env_warning_fires_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """D1 regression: same legacy key warns only once per process lifetime."""
+        from kioku_mesh.core import _env_compat
+
+        new_key = 'KIOKU_MESH_RENAME_TEST_ONCE'
+        legacy_key = 'MESH_MEM_RENAME_TEST_ONCE'
+        monkeypatch.delenv(new_key, raising=False)
+        monkeypatch.setenv(legacy_key, 'val')
+        _env_compat._warned_keys.discard(legacy_key)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter('always')
+            _env_compat.get_env(new_key)
+            _env_compat.get_env(new_key)
+        dep = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        assert len(dep) == 1, f'Expected 1 warning, got {len(dep)}'
+
+
+class TestMeshMemSubmoduleShim:
+    """B1 regression: submodule import via mesh_mem.X works with DeprecationWarning."""
+
+    def _clear_mesh_mem_modules(self) -> None:
+        for key in list(sys.modules):
+            if key == 'mesh_mem' or key.startswith('mesh_mem.'):
+                sys.modules.pop(key, None)
+
+    def test_submodule_local_index(self) -> None:
+        self._clear_mesh_mem_modules()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            from mesh_mem.local_index import LocalIndex  # noqa: F401
+
+        assert LocalIndex is not None
+
+    def test_submodule_local_index_warns(self) -> None:
+        self._clear_mesh_mem_modules()
+        with pytest.warns(DeprecationWarning):
+            from mesh_mem.local_index import LocalIndex  # noqa: F401
+
+        assert LocalIndex is not None
+
+    def test_submodule_models(self) -> None:
+        self._clear_mesh_mem_modules()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            from mesh_mem.models import Observation  # noqa: F401
+
+        assert Observation is not None
+
+    def test_submodule_core_models(self) -> None:
+        self._clear_mesh_mem_modules()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            from mesh_mem.core.models import Observation  # noqa: F401
+
+        assert Observation is not None

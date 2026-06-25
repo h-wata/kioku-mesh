@@ -97,18 +97,21 @@ kioku-mesh doctor
 
 Useful environment variables:
 
+> **Note (ADR-0024):** The env var prefix was renamed from `MESH_MEM_` to `KIOKU_MESH_`.
+> The old `MESH_MEM_*` names are still accepted as a deprecated fallback until v1.0.0.
+
 | Variable | Purpose |
 |---|---|
-| `MESH_MEM_AGENT_FAMILY` | Agent family, such as `claude` or `codex` |
-| `MESH_MEM_CLIENT_ID` | Client name, such as `claude-code` |
-| `MESH_MEM_SESSION_ID` | Optional stable session id |
-| `MESH_MEM_STATE_DIR` | State directory; defaults under the user data dir |
-| `MESH_MEM_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml`; set `local` or `zenoh` |
-| `MESH_MEM_FORCE_REBUILD=1` | Rebuild the local index at CLI startup |
-| `MESH_MEM_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
-| `MESH_MEM_USER_ID` | Your user slug for `--visibility user` (same value on all your machines) |
-| `MESH_MEM_TEAM_ID` | Team slug for `--visibility team` |
-| `MESH_MEM_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = legacy layout) |
+| `KIOKU_MESH_AGENT_FAMILY` | Agent family, such as `claude` or `codex` |
+| `KIOKU_MESH_CLIENT_ID` | Client name, such as `claude-code` |
+| `KIOKU_MESH_SESSION_ID` | Optional stable session id |
+| `KIOKU_MESH_STATE_DIR` | State directory; defaults under the user data dir |
+| `KIOKU_MESH_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml`; set `local` or `zenoh` |
+| `KIOKU_MESH_FORCE_REBUILD=1` | Rebuild the local index at CLI startup |
+| `KIOKU_MESH_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
+| `KIOKU_MESH_USER_ID` | Your user slug for `--visibility user` (same value on all your machines) |
+| `KIOKU_MESH_TEAM_ID` | Team slug for `--visibility team` |
+| `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = legacy layout) |
 
 ### Visibility scopes (experimental)
 
@@ -116,7 +119,7 @@ Useful environment variables:
 `visibility` to choose how far a memory replicates:
 
 - `user` — only this user's machines (requires `user_id`, set via
-  `MESH_MEM_USER_ID` or `user_id:` in `~/.config/kioku-mesh/config.yaml`;
+  `KIOKU_MESH_USER_ID` or `user_id:` in `~/.config/kioku-mesh/config.yaml`;
   use the same value on every machine you own)
 - `team` — peers that host the team's storage (requires `team_id`)
 - `mesh` — every peer on the mesh
