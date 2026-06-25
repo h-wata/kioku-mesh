@@ -264,6 +264,12 @@ def _rebuild_fts_from_obs_index(conn: sqlite3.Connection) -> None:
     idempotent and repairs old databases where the table is missing rows,
     contains stale rows, or was created before content/tags/project were
     populated correctly.
+
+    Note on ``group_concat`` ordering: SQLite's ``json_each`` iterates array
+    elements in index order, so ``group_concat(value, ' ')`` over
+    ``json_each(payload_json, '$.tags')`` produces the same string as
+    Python's ``' '.join(obs.tags)``. This relies on the current SQLite
+    implementation; verify when upgrading SQLite major versions.
     """
     conn.execute('DELETE FROM obs_fts')
     conn.execute(
