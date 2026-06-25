@@ -124,6 +124,11 @@ _FTS_DELETE_SQL = 'DELETE FROM obs_fts WHERE observation_id = ?'
 _PathLike = str | Path
 
 
+def _quote_fts_term(term: str) -> str:
+    """Return ``term`` as an FTS5 literal phrase."""
+    return '"' + term.replace('"', '""') + '"'
+
+
 def _disabled_via_env() -> bool:
     return get_env('KIOKU_MESH_DISABLE_INDEX', '').strip() == '1'
 
@@ -461,10 +466,10 @@ class LocalIndex:
 
         Filters compose with AND. Empty-string filters are skipped (matches
         ``store.search_observations`` semantics). ``query`` runs through a
-        3-stage fallback (ADR-0021):
-          1. FTS5 trigram (if available, query >= 3 chars)
-          2. FTS5 standard (if available, any query length)
-          3. LIKE against ``payload_json`` (always available)
+        3-stage fallback (ADR-0021): space-separated terms use AND
+        semantics, terms with 3+ chars use FTS5 when available, and shorter
+        terms (or all terms when FTS5 is unavailable) use LIKE against
+        ``payload_json``.
 
         ``include_deleted=True`` returns both tombstoned and rebuild-shadowed
         rows. The name is historical but the behavior is intentionally "show
@@ -533,14 +538,25 @@ class LocalIndex:
             where.append('created_at <= ?')
             params.append(until_iso)
 
-        # ADR-0021: 3-stage query fallback.
-        use_fts = bool(query) and self._fts_cap != _FTS_CAP_LIKE
-        if use_fts and self._fts_cap == _FTS_CAP_TRIGRAM and len(query) < 3:
-            use_fts = False  # trigram requires >= 3 chars; fall through to LIKE
+        # ADR-0021: 3-stage query fallback. Split multi-term queries into
+        # AND semantics; trigram cannot match terms shorter than 3 chars, so
+        # those terms are added as payload_json LIKE filters.
+        query_terms = query.split()
+        if self._fts_cap == _FTS_CAP_LIKE:
+            fts_terms: list[str] = []
+            like_terms = query_terms
+        else:
+            fts_terms = [term for term in query_terms if len(term) >= 3]
+            like_terms = [term for term in query_terms if len(term) < 3]
+        for term in like_terms:
+            where.append('LOWER(payload_json) LIKE ?')
+            params.append(f'%{term.lower()}%')
+        use_fts = bool(fts_terms)
 
         if use_fts:
             # FTS5 path: CTE join for bm25 ranking.
             fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
+            match_expr = ' AND '.join(_quote_fts_term(term) for term in fts_terms)
             sql = (
                 'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
                 'SELECT o.payload_json '
@@ -549,11 +565,8 @@ class LocalIndex:
                 f'{fts_where} '
                 'ORDER BY f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
             )
-            rows_params: list[object] = [query, *params, max(1, limit)]
+            rows_params: list[object] = [match_expr, *params, max(1, limit)]
         else:
-            if query:
-                where.append('LOWER(payload_json) LIKE ?')
-                params.append(f'%{query.lower()}%')
             sql = 'SELECT payload_json FROM obs_index'
             if where:
                 sql += ' WHERE ' + ' AND '.join(where)
@@ -570,14 +583,16 @@ class LocalIndex:
                 if use_fts:
                     # FTS query failed (e.g. unsupported syntax); fall back to LIKE.
                     log.debug('LocalIndex.search FTS failed, falling back to LIKE: %s', e)
-                    like_where = [*where, 'LOWER(payload_json) LIKE ?'] if query else where
+                    like_where = [*where]
+                    like_params = [*params]
+                    for term in fts_terms:
+                        like_where.append('LOWER(payload_json) LIKE ?')
+                        like_params.append(f'%{term.lower()}%')
                     like_sql = 'SELECT payload_json FROM obs_index'
                     if like_where:
                         like_sql += ' WHERE ' + ' AND '.join(like_where)
                     like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
-                    like_params: list[object] = (
-                        [*params, f'%{query.lower()}%', max(1, limit)] if query else [*params, max(1, limit)]
-                    )
+                    like_params.append(max(1, limit))
                     try:
                         rows = self._conn.execute(like_sql, like_params).fetchall()
                     except sqlite3.Error as e2:
