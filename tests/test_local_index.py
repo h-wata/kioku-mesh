@@ -1124,17 +1124,23 @@ def test_multi_word_query_uses_and_semantics_for_non_contiguous_terms(tmp_path: 
 
 
 def test_multi_word_query_mixes_fts_and_short_like_terms(tmp_path: Path) -> None:
-    """Terms shorter than trigram length are enforced with LIKE alongside FTS terms."""
+    """Terms shorter than trigram length are enforced with LIKE alongside FTS terms.
+
+    Uses non-hex short term ('qx') to avoid false-positive matches against
+    hex observation_id UUID strings stored in payload_json.
+    """
     idx = LocalIndex.connect(str(tmp_path / 'mixed_short_terms.db'))
     try:
-        wanted = _mk_obs('db migration caused a tokenizer regression', project='mixed')
-        long_only = _mk_obs('migration without the short database abbreviation', project='mixed')
-        short_only = _mk_obs('db only mention', project='mixed')
+        # 'qx' is 2 chars (non-hex: q, x ∉ [0-9a-f]) → LIKE path
+        # 'migration' is ≥3 chars → FTS path
+        wanted = _mk_obs('qx migration caused a tokenizer regression', project='mixed')
+        long_only = _mk_obs('migration without the short abbreviation', project='mixed')
+        short_only = _mk_obs('qx only mention', project='mixed')
         idx.upsert(wanted)
         idx.upsert(long_only)
         idx.upsert(short_only)
 
-        results = idx.search(query='db migration', project='mixed', include_superseded=True)
+        results = idx.search(query='qx migration', project='mixed', include_superseded=True)
 
         assert [r.observation_id for r in results] == [wanted.observation_id]
     finally:
@@ -1681,5 +1687,110 @@ def test_rebuild_fts_tags_edge_cases(tmp_path: Path) -> None:
         assert lockstep_notags == ''
         assert rebuilt_notags == lockstep_notags
 
+    finally:
+        idx.close()
+
+
+# ---------------------------------------------------------------------------
+# R2 / R6: LIKE wildcard escape and query edge cases (PR #211 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_search_like_escape_wildcards(tmp_path: Path) -> None:
+    """R2: % and _ in short query terms are treated as literal chars via LIKE ESCAPE.
+
+    Short terms (< 3 chars) always route through LIKE regardless of FTS
+    capability, so using 2-char terms makes the escape behaviour deterministic.
+    Without the ESCAPE clause, '_b' would match any single char + b (over-match).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'like_escape.db'))
+    try:
+        obs_underscore = _mk_obs('key_bar underscore match', project='esc')
+        obs_no_underscore = _mk_obs('keyXbar no underscore here', project='esc')
+        obs_percent = _mk_obs('rate a% percent match', project='esc')
+        obs_no_percent = _mk_obs('rate ax no percent here', project='esc')
+        idx.upsert(obs_underscore)
+        idx.upsert(obs_no_underscore)
+        idx.upsert(obs_percent)
+        idx.upsert(obs_no_percent)
+
+        # '_b' is 2 chars → always LIKE; must match literal underscore, not any-char + b.
+        us_ids = {r.observation_id for r in idx.search(query='_b', project='esc', include_superseded=True)}
+        assert obs_underscore.observation_id in us_ids, '_b must match literal underscore'
+        assert obs_no_underscore.observation_id not in us_ids, '_b must not over-match Xb'
+
+        # 'a%' is 2 chars → always LIKE; must match literal percent, not a + wildcard.
+        pct_ids = {r.observation_id for r in idx.search(query='a%', project='esc', include_superseded=True)}
+        assert obs_percent.observation_id in pct_ids, 'a% must match literal percent'
+        assert obs_no_percent.observation_id not in pct_ids, 'a% must not over-match ax'
+    finally:
+        idx.close()
+
+
+def test_search_all_short_terms_uses_like_and(tmp_path: Path) -> None:
+    """R6: All terms shorter than the trigram threshold use LIKE AND semantics.
+
+    When every term in the query is < 3 chars, no FTS term is produced and
+    the query degrades to multiple LIKE conditions ANDed together.
+
+    Uses non-hex terms ('qx', 'zy') to avoid false positive matches against
+    the hex observation_id stored in payload_json.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'short_and.db'))
+    try:
+        # 'qx' and 'zy' contain only non-hex chars (q, x, y, z are outside [0-9a-f]),
+        # preventing accidental matches against observation_id UUID strings.
+        wanted = _mk_obs('qx and zy pair both present', project='shortand')
+        has_qx_only = _mk_obs('qx only without the second token', project='shortand')
+        has_zy_only = _mk_obs('zy only without the first token', project='shortand')
+        idx.upsert(wanted)
+        idx.upsert(has_qx_only)
+        idx.upsert(has_zy_only)
+
+        # 'qx' and 'zy' are both 2 chars → LIKE AND path regardless of FTS capability.
+        results = idx.search(query='qx zy', project='shortand', include_superseded=True)
+        ids = {r.observation_id for r in results}
+        assert wanted.observation_id in ids, 'obs containing both qx and zy must match'
+        assert has_qx_only.observation_id not in ids, 'obs with only qx must not match'
+        assert has_zy_only.observation_id not in ids, 'obs with only zy must not match'
+    finally:
+        idx.close()
+
+
+def test_search_term_with_double_quote_escape(tmp_path: Path) -> None:
+    """R6: A query term containing a double-quote is sanitised by _quote_fts_term.
+
+    _quote_fts_term replaces " with "" inside the FTS5 phrase literal so the
+    query is accepted without raising a syntax error.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'dquote.db'))
+    try:
+        obs = _mk_obs('say hello greeting phrase', project='dquote')
+        idx.upsert(obs)
+
+        # 'say "hi"' contains an embedded double-quote; must not raise.
+        results = idx.search(query='say "hi"', project='dquote', include_superseded=True)
+        assert isinstance(results, list), 'search with embedded " must return a list without error'
+    finally:
+        idx.close()
+
+
+def test_search_whitespace_only_returns_recency(tmp_path: Path) -> None:
+    """R6: A whitespace-only query produces no terms and returns all live rows.
+
+    str.split() on whitespace-only input yields an empty list, so no LIKE
+    or FTS filter is appended and the query falls through to recency order.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'whitespace.db'))
+    try:
+        obs1 = _mk_obs('alpha observation', project='ws')
+        obs2 = _mk_obs('beta observation', project='ws')
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+
+        results = idx.search(query='   ', project='ws', include_superseded=True)
+        ids = {r.observation_id for r in results}
+        assert obs1.observation_id in ids, 'whitespace-only query must return all live rows'
+        assert obs2.observation_id in ids
     finally:
         idx.close()
