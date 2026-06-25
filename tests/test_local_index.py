@@ -1408,3 +1408,115 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
         assert obs_b.observation_id in default_ids, 'obs_b must be visible after rebuild'
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# R9: supersedes-aware hide x FTS full rebuild (PR #207 cross-review)
+# ---------------------------------------------------------------------------
+
+
+def _seed_legacy_supersedes_db(db: Path) -> tuple['Observation', 'Observation']:
+    """Seed a legacy DB (schema v2, no superseded_by column, no obs_fts) with a supersedes pair.
+
+    Returns (old_obs, new_obs) where new_obs.supersedes=[old_obs.observation_id].
+    Used by R9 regression tests to simulate opening a legacy DB where the schema
+    migration must backfill superseded_by and then trigger FTS full rebuild.
+    """
+    old_obs = _mk_obs('rebuild fts superseded content', project='r9')
+    new_obs = Observation(
+        content='rebuild fts superseder content',
+        project='r9',
+        agent_family='claude',
+        client_id='test',
+        pc_id='testpc',
+        session_id='testsession',
+        supersedes=[old_obs.observation_id],
+    )
+    with sqlite3.connect(str(db)) as raw:
+        raw.executescript("""
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO schema_version(version) VALUES (2);
+CREATE TABLE obs_index (
+  observation_id TEXT PRIMARY KEY,
+  project TEXT,
+  created_at TEXT,
+  memory_type TEXT,
+  importance INTEGER,
+  subject TEXT,
+  summary TEXT,
+  payload_json TEXT,
+  deleted_at TEXT,
+  shadowed_at TEXT
+);
+""")
+        raw.executemany(
+            'INSERT INTO obs_index '
+            '(observation_id, project, created_at, memory_type, importance, subject, summary, payload_json) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                (
+                    o.observation_id,
+                    o.project,
+                    o.created_at,
+                    o.memory_type,
+                    o.importance,
+                    o.subject,
+                    o.summary,
+                    o.to_json(),
+                )
+                for o in (old_obs, new_obs)
+            ],
+        )
+        raw.commit()
+    return old_obs, new_obs
+
+
+def test_supersedes_aware_hide_after_fts_full_rebuild(tmp_path: Path) -> None:
+    """(g) supersedes-aware 隠蔽が FTS full rebuild 直後でも効く (R9).
+
+    Legacy DB (no obs_fts, no superseded_by column) is opened by
+    LocalIndex.connect(); the migration backfills superseded_by from
+    payload_json and rebuilds obs_fts. Even though both rows land in
+    obs_fts, the existence-based superseded_by JOIN must hide old_obs
+    from default search. Both FTS5 and LIKE paths apply the JOIN filter
+    so this assertion holds regardless of _fts_cap.
+    """
+    db = tmp_path / 'r9_hide.db'
+    old_obs, new_obs = _seed_legacy_supersedes_db(db)
+
+    idx = LocalIndex.connect(str(db))
+    try:
+        results = idx.search(query='rebuild fts', include_superseded=False)
+        result_ids = {r.observation_id for r in results}
+        assert new_obs.observation_id in result_ids, (
+            f'superseder new_obs must be visible after FTS rebuild (fts_cap={idx._fts_cap!r})'  # noqa: SLF001
+        )
+        assert old_obs.observation_id not in result_ids, (
+            f'superseded old_obs must be hidden after FTS rebuild (fts_cap={idx._fts_cap!r})'  # noqa: SLF001
+        )
+    finally:
+        idx.close()
+
+
+def test_supersedes_aware_include_superseded_after_fts_full_rebuild(tmp_path: Path) -> None:
+    """(h) include_superseded=True returns both rows after FTS full rebuild (R9).
+
+    Boundary complement of test_supersedes_aware_hide_after_fts_full_rebuild:
+    with include_superseded=True both old_obs and new_obs must appear even
+    immediately after FTS full rebuild from a legacy DB.
+    """
+    db = tmp_path / 'r9_include.db'
+    old_obs, new_obs = _seed_legacy_supersedes_db(db)
+
+    idx = LocalIndex.connect(str(db))
+    try:
+        results = idx.search(query='rebuild fts', include_superseded=True)
+        result_ids = {r.observation_id for r in results}
+        assert new_obs.observation_id in result_ids, (
+            f'superseder new_obs must appear with include_superseded=True (fts_cap={idx._fts_cap!r})'  # noqa: SLF001
+        )
+        assert old_obs.observation_id in result_ids, (
+            f'superseded old_obs must appear with include_superseded=True (fts_cap={idx._fts_cap!r})'  # noqa: SLF001
+        )
+    finally:
+        idx.close()
