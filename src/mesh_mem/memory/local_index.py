@@ -115,7 +115,10 @@ _MARK_SHADOWED_SQL = (
 )
 
 # ADR-0021: FTS5 lockstep sync SQL.
-_FTS_UPSERT_SQL = 'INSERT OR REPLACE INTO obs_fts(observation_id, content, subject, summary) VALUES (?, ?, ?, ?)'
+_FTS_UPSERT_SQL = (
+    'INSERT OR REPLACE INTO obs_fts(observation_id, content, subject, summary, tags, project) '
+    'VALUES (?, ?, ?, ?, ?, ?)'
+)
 _FTS_DELETE_SQL = 'DELETE FROM obs_fts WHERE observation_id = ?'
 
 
@@ -201,26 +204,53 @@ def _ensure_schema(conn: sqlite3.Connection) -> str:
     if 'shadowed_at' not in cols:
         conn.execute('ALTER TABLE obs_index ADD COLUMN shadowed_at TEXT')
     # ADR-0021: superseded_by tracks which observation superseded this row.
-    if 'superseded_by' not in cols:
+    superseded_by_is_new = 'superseded_by' not in cols
+    if superseded_by_is_new:
         conn.execute('ALTER TABLE obs_index ADD COLUMN superseded_by TEXT')
-    # ADR-0021: FTS5 virtual table for full-text search.
+        # R5: backfill superseded_by from payload_json.supersedes for existing rows.
+        import json as _json  # noqa: PLC0415
+
+        rows_with_supersedes = conn.execute(
+            'SELECT observation_id, payload_json FROM obs_index '
+            "WHERE json_extract(payload_json, '$.supersedes') IS NOT NULL"
+        ).fetchall()
+        for superseder_id, payload_json_str in rows_with_supersedes:
+            try:
+                payload = _json.loads(payload_json_str)
+                supersedes_list = payload.get('supersedes') or []
+                if supersedes_list:
+                    placeholders = ','.join('?' for _ in supersedes_list)
+                    conn.execute(
+                        f'UPDATE obs_index SET superseded_by = ? '
+                        f'WHERE observation_id IN ({placeholders}) AND superseded_by IS NULL',
+                        [superseder_id, *supersedes_list],
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+    # ADR-0021: FTS5 virtual table for full-text search (content/subject/summary/tags/project).
     fts_cap = _detect_fts_cap(conn)
-    if fts_cap == _FTS_CAP_TRIGRAM:
-        conn.execute(
-            'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
-            "(observation_id UNINDEXED, content, subject, summary, tokenize='trigram')"
-        )
-    elif fts_cap == _FTS_CAP_FTS5:
-        conn.execute(
-            'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
-            '(observation_id UNINDEXED, content, subject, summary)'
-        )
-    # Backfill obs_fts from existing live rows (no-op when obs_fts is already populated).
     if fts_cap != _FTS_CAP_LIKE:
+        # R3a: drop obs_fts if it was created without tags/project columns.
+        fts_sql_row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='obs_fts'").fetchone()
+        if fts_sql_row and 'tags' not in (fts_sql_row[0] or ''):
+            conn.execute('DROP TABLE IF EXISTS obs_fts')
+        if fts_cap == _FTS_CAP_TRIGRAM:
+            conn.execute(
+                'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
+                "(observation_id UNINDEXED, content, subject, summary, tags, project, tokenize='trigram')"
+            )
+        else:
+            conn.execute(
+                'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
+                '(observation_id UNINDEXED, content, subject, summary, tags, project)'
+            )
+        # Backfill obs_fts from existing live rows (no-op when already populated).
         conn.execute(
-            'INSERT OR IGNORE INTO obs_fts(observation_id, content, subject, summary) '
+            'INSERT OR IGNORE INTO obs_fts(observation_id, content, subject, summary, tags, project) '
             "SELECT observation_id, COALESCE(json_extract(payload_json, '$.content'), ''), "
-            "COALESCE(subject, ''), COALESCE(summary, '') "
+            "COALESCE(subject, ''), COALESCE(summary, ''), "
+            "COALESCE(json_extract(payload_json, '$.tags'), ''), "
+            "COALESCE(project, '') "
             'FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
         )
     conn.execute('DELETE FROM schema_version')
@@ -333,6 +363,8 @@ class LocalIndex:
                             obs.content,
                             obs.subject or '',
                             obs.summary or '',
+                            ' '.join(obs.tags or []),
+                            obs.project or '',
                         ),
                     )
                 self._conn.commit()
@@ -440,11 +472,12 @@ class LocalIndex:
         if not include_deleted:
             where.append('deleted_at IS NULL')
             where.append('shadowed_at IS NULL')
-        # ADR-0021: existence-based supersedes filter.
+        # ADR-0021: existence-based supersedes filter. Superseder must be live
+        # (not deleted AND not shadowed) to keep the superseded row hidden.
         if not include_superseded:
             where.append(
                 '(superseded_by IS NULL OR superseded_by NOT IN '
-                '(SELECT observation_id FROM obs_index WHERE deleted_at IS NULL))'
+                '(SELECT observation_id FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL))'
             )
         if project:
             where.append('project = ?')
@@ -488,7 +521,7 @@ class LocalIndex:
                 'FROM obs_index o '
                 'JOIN fts_match f ON f.observation_id = o.observation_id'
                 f'{fts_where} '
-                'ORDER BY f.rank LIMIT ?'
+                'ORDER BY f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
             )
             rows_params: list[object] = [query, *params, max(1, limit)]
         else:
@@ -864,6 +897,33 @@ class LocalIndex:
                     self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
                 if shadow_rows:
                     self._conn.executemany(_MARK_SHADOWED_SQL, shadow_rows)
+                # ADR-0021 R1: rebuild obs_fts and superseded_by as recovery path.
+                if self._fts_cap != _FTS_CAP_LIKE:
+                    self._conn.execute('DELETE FROM obs_fts')
+                    tombstoned_ids = {r[1] for r in mark_rows}
+                    fts_rows = [
+                        (
+                            obs.observation_id,
+                            obs.content,
+                            obs.subject or '',
+                            obs.summary or '',
+                            ' '.join(obs.tags or []),
+                            obs.project or '',
+                        )
+                        for obs in obs_list
+                        if obs.observation_id not in tombstoned_ids
+                    ]
+                    if fts_rows:
+                        self._conn.executemany(_FTS_UPSERT_SQL, fts_rows)
+                # Reconstruct superseded_by from obs_list (reset first for idempotency).
+                self._conn.execute('UPDATE obs_index SET superseded_by = NULL')
+                for obs in obs_list:
+                    if obs.supersedes:
+                        placeholders = ','.join('?' for _ in obs.supersedes)
+                        self._conn.execute(
+                            f'UPDATE obs_index SET superseded_by = ? WHERE observation_id IN ({placeholders})',
+                            [obs.observation_id, *obs.supersedes],
+                        )
                 self._conn.execute('COMMIT')
             except sqlite3.Error as e:
                 try:
