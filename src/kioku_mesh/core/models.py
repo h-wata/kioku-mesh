@@ -102,7 +102,7 @@ class Observation:
 
     @property
     def key_expr(self) -> str:
-        """Return the Zenoh key expression placing this observation into the mesh."""
+        """Zenoh key expression placing this observation into the mesh."""
         return obs_key(
             self.visibility,
             self.scope_id,

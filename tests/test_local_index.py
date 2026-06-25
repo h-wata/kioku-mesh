@@ -87,6 +87,80 @@ CREATE TABLE obs_index (
         idx.close()
 
 
+def test_local_index_migrates_legacy_db_and_rebuilds_fts(tmp_path: Path) -> None:
+    """Legacy DBs without ``obs_fts`` must become searchable on first open."""
+    db = tmp_path / 'legacy_fts.db'
+    obs1 = _mk_obs('zenoh replicated memory search', project='legacy', tags=['zenoh'])
+    obs2 = _mk_obs('another zenoh note', project='legacy')
+    with sqlite3.connect(str(db)) as raw:
+        raw.executescript("""
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO schema_version(version) VALUES (2);
+CREATE TABLE obs_index (
+  observation_id TEXT PRIMARY KEY,
+  project TEXT,
+  created_at TEXT,
+  memory_type TEXT,
+  importance INTEGER,
+  subject TEXT,
+  summary TEXT,
+  payload_json TEXT,
+  deleted_at TEXT,
+  shadowed_at TEXT
+);
+""")
+        raw.executemany(
+            'INSERT INTO obs_index '
+            '(observation_id, project, created_at, memory_type, importance, subject, summary, payload_json) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+                (
+                    obs.observation_id,
+                    obs.project,
+                    obs.created_at,
+                    obs.memory_type,
+                    obs.importance,
+                    obs.subject,
+                    obs.summary,
+                    obs.to_json(),
+                )
+                for obs in (obs1, obs2)
+            ],
+        )
+        raw.commit()
+
+    idx = LocalIndex.connect(str(db))
+    try:
+        hits = idx.search(query='zenoh', project='legacy', include_superseded=True)
+        assert {hit.observation_id for hit in hits} == {obs1.observation_id, obs2.observation_id}
+        with sqlite3.connect(str(db)) as raw:
+            if idx._fts_cap != 'like':  # noqa: SLF001
+                tables = {row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                assert 'obs_fts' in tables
+                (fts_count,) = raw.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+                assert fts_count == 2
+    finally:
+        idx.close()
+
+
+def test_direct_constructor_opens_db_and_runs_migration(tmp_path: Path) -> None:
+    """``LocalIndex(db_path=...)`` supports task verifier scripts."""
+    db = tmp_path / 'direct.db'
+    setup = LocalIndex.connect(str(db))
+    obs = _mk_obs('zenoh direct constructor search', project='direct')
+    try:
+        setup.upsert(obs)
+    finally:
+        setup.close()
+
+    idx = LocalIndex(db_path=db)
+    try:
+        hits = idx.search(query='zenoh', project='direct', include_superseded=True)
+        assert [hit.observation_id for hit in hits] == [obs.observation_id]
+    finally:
+        idx.close()
+
+
 def test_local_index_upsert_observation(tmp_path: Path) -> None:
     idx = LocalIndex.connect(str(tmp_path / 'upsert.db'))
     try:
