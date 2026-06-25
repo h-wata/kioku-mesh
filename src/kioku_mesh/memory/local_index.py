@@ -32,6 +32,7 @@ import logging
 from pathlib import Path
 import sqlite3
 import threading
+from typing import Union
 
 from kioku_mesh.core._env_compat import get_env
 
@@ -121,6 +122,7 @@ _FTS_UPSERT_SQL = (
     'VALUES (?, ?, ?, ?, ?, ?)'
 )
 _FTS_DELETE_SQL = 'DELETE FROM obs_fts WHERE observation_id = ?'
+_PathLike = Union[str, Path]
 
 
 def _disabled_via_env() -> bool:
@@ -245,37 +247,61 @@ def _ensure_schema(conn: sqlite3.Connection) -> str:
                 'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
                 '(observation_id UNINDEXED, content, subject, summary, tags, project)'
             )
-        # Backfill obs_fts from existing live rows (no-op when already populated).
-        conn.execute(
-            'INSERT OR IGNORE INTO obs_fts(observation_id, content, subject, summary, tags, project) '
-            "SELECT observation_id, COALESCE(json_extract(payload_json, '$.content'), ''), "
-            "COALESCE(subject, ''), COALESCE(summary, ''), "
-            "COALESCE(json_extract(payload_json, '$.tags'), ''), "
-            "COALESCE(project, '') "
-            'FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
-        )
+        _rebuild_fts_from_obs_index(conn)
     conn.execute('DELETE FROM schema_version')
     conn.execute('INSERT INTO schema_version(version) VALUES (?)', (SCHEMA_VERSION,))
     return fts_cap
 
 
+def _rebuild_fts_from_obs_index(conn: sqlite3.Connection) -> None:
+    """Rebuild ``obs_fts`` from live ``obs_index`` rows.
+
+    ``obs_fts`` is a derived cache. A full delete/insert is deliberately
+    idempotent and repairs old databases where the table is missing rows,
+    contains stale rows, or was created before content/tags/project were
+    populated correctly.
+    """
+    conn.execute('DELETE FROM obs_fts')
+    conn.execute(
+        'INSERT INTO obs_fts(observation_id, content, subject, summary, tags, project) '
+        "SELECT observation_id, COALESCE(json_extract(payload_json, '$.content'), ''), "
+        "COALESCE(subject, ''), COALESCE(summary, ''), "
+        "COALESCE(json_extract(payload_json, '$.tags'), ''), "
+        "COALESCE(project, '') "
+        'FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
+    )
+
+
 class LocalIndex:
     """SQLite-backed sidecar index. Thread-safe via a single lock per instance.
 
-    Construction is cheap (no I/O); ``connect`` opens the file, applies PRAGMA,
-    runs ``CREATE IF NOT EXISTS``, and stamps schema_version. A disabled
+    Prefer ``connect`` in application code. Direct construction with a
+    non-empty ``db_path`` also opens the file for compatibility with small
+    scripts that instantiate ``LocalIndex(db_path=...)`` directly. A disabled
     instance (``KIOKU_MESH_DISABLE_INDEX=1``) holds no connection and short-
     circuits every method.
     """
 
     def __init__(
         self,
-        db_path: str,
+        db_path: _PathLike,
         disabled: bool = False,
         conn: sqlite3.Connection | None = None,
         fts_cap: str = _FTS_CAP_LIKE,
     ) -> None:
-        self._db_path = db_path
+        path = str(db_path)
+        if not disabled and conn is None and path:
+            if _disabled_via_env():
+                log.info('LocalIndex disabled via KIOKU_MESH_DISABLE_INDEX=1')
+                disabled = True
+            else:
+                try:
+                    conn, fts_cap = _open_connection(path)
+                except (sqlite3.Error, OSError) as e:
+                    log.warning('LocalIndex open failed (%s); falling back to disabled: %s', path, e)
+                    disabled = True
+
+        self._db_path = path
         self._disabled = disabled
         self._conn: sqlite3.Connection | None = conn
         self._fts_cap = fts_cap

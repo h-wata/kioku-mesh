@@ -75,12 +75,12 @@ class CoverageReport:
 
     @property
     def covered(self) -> int:
-        """Return the number of opportunities matched to a save."""
+        """Number of opportunities matched to a save."""
         return len(self.matches)
 
     @property
     def coverage(self) -> float:
-        """Return covered/total in [0, 1]; 0.0 when there are no opportunities."""
+        """Covered/total in [0, 1]; 0.0 when there are no opportunities."""
         return self.covered / self.total if self.total else 0.0
 
 
