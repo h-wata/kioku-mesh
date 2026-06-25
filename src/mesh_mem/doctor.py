@@ -450,6 +450,55 @@ def check_tls_certs(config_path: Path | None = None) -> CheckResult:
     )
 
 
+# ADR-0021: FTS5 capability check.
+
+
+def check_fts5(index: object = None) -> CheckResult:
+    """Report FTS5 and trigram tokenizer availability in the local SQLite index.
+
+    A WARN (not FAIL) indicates LIKE fallback is in use — search still works,
+    but recall for Japanese queries and bm25 ranking are unavailable.
+    """
+    from .memory.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from .memory.local_index import _FTS_CAP_TRIGRAM  # noqa: PLC0415
+    from .memory.local_index import LocalIndex  # noqa: PLC0415
+
+    idx: object = index
+    if idx is None:
+        try:
+            idx = LocalIndex.connect()
+        except Exception:  # noqa: BLE001
+            return CheckResult(
+                name='fts5',
+                status=CheckStatus.WARN,
+                summary='FTS5 check skipped: could not open local index',
+                hint='Check MESH_MEM_INDEX_DB or run `kioku-mesh init`.',
+            )
+    fts_cap = getattr(idx, '_fts_cap', _FTS_CAP_LIKE)
+    if fts_cap == _FTS_CAP_TRIGRAM:
+        return CheckResult(
+            name='fts5',
+            status=CheckStatus.PASS,
+            summary='FTS5 trigram available',
+            details={'fts_cap': fts_cap},
+        )
+    if fts_cap != _FTS_CAP_LIKE:
+        return CheckResult(
+            name='fts5',
+            status=CheckStatus.PASS,
+            summary='FTS5 available (trigram not available, using standard FTS5)',
+            hint='Upgrade SQLite >= 3.38.0 to enable trigram tokenizer for Japanese substring search.',
+            details={'fts_cap': fts_cap},
+        )
+    return CheckResult(
+        name='fts5',
+        status=CheckStatus.WARN,
+        summary='FTS5 not available, using LIKE fallback',
+        hint='Upgrade SQLite to a build with FTS5 enabled for full-text search support.',
+        details={'fts_cap': fts_cap},
+    )
+
+
 # -- Orchestration & rendering -------------------------------------------------
 
 
@@ -467,6 +516,7 @@ def run_all_checks() -> list[CheckResult]:
         check_state_dir_hardlinks(),
         check_embedded_router(),
         check_tls_certs(),
+        check_fts5(),
     ]
 
 

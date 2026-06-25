@@ -42,7 +42,9 @@ class MemoryBackend(Protocol):
     """Common surface for all kioku-mesh backends."""
 
     def put_observation(self, obs: Observation) -> None: ...
+
     def put_tombstone(self, obs: Observation, reason: str = '') -> None: ...
+
     def search_observations(
         self,
         query: str = '',
@@ -55,13 +57,21 @@ class MemoryBackend(Protocol):
         until_iso: str = '',
         cursor_observation_id: str = '',
         limit: int = 50,
+        include_superseded: bool = False,
     ) -> list[Observation]: ...
+
     def find_observation_by_id(self, observation_id: str) -> Observation | None: ...
+
     def physical_delete_observation(self, observation_id: str) -> tuple[bool, bool]: ...
+
     def get_status(self) -> BackendStatus: ...
+
     def drain_pending(self, limit: int | None = None, *, wait: bool = True) -> int: ...
+
     def gc_tombstones(self, retention_days: int = 30, project: str = '') -> int: ...
+
     def gc_shadows(self, retention_days: int = 30, project: str = '') -> tuple[int, int]: ...
+
     def close(self) -> None: ...
 
 
@@ -101,6 +111,7 @@ class LocalBackend:
         until_iso: str = '',
         cursor_observation_id: str = '',
         limit: int = 50,
+        include_superseded: bool = False,
     ) -> list[Observation]:
         return self._idx.search(
             project=project,
@@ -113,6 +124,7 @@ class LocalBackend:
             until_iso=until_iso,
             cursor_observation_id=cursor_observation_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None:
@@ -227,6 +239,7 @@ class ZenohBackend:
         until_iso: str = '',
         cursor_observation_id: str = '',
         limit: int = 50,
+        include_superseded: bool = False,
     ) -> list[Observation]:
         from . import store
 
@@ -241,6 +254,7 @@ class ZenohBackend:
             until_iso=until_iso,
             cursor_observation_id=cursor_observation_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None:

@@ -981,3 +981,326 @@ def test_periodic_wal_checkpoint_resets_counter(tmp_path: Path) -> None:
         assert idx._upserts_since_checkpoint == 5  # noqa: SLF001
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0021: FTS5 / supersedes-aware search (Issue #203)
+# ---------------------------------------------------------------------------
+
+
+def test_fts5_japanese_query_recall_matches_like(tmp_path: Path) -> None:
+    """(a) Japanese query: FTS path recall >= LIKE path recall.
+
+    Both paths must return the row containing the Japanese term. This
+    verifies that the FTS5 trigram tokenizer covers the same content
+    as LIKE for Japanese substrings.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'fts_jp.db'))
+    try:
+        obs = _mk_obs('kioku-mesh は分散メモリシステムです。', project='jp')
+        idx.upsert(obs)
+
+        query = '分散メモリ'
+        results = idx.search(query=query, include_superseded=True)
+        assert any(r.observation_id == obs.observation_id for r in results), (
+            f'Japanese query {query!r} must match via search() (fts_cap={idx._fts_cap!r})'  # noqa: SLF001
+        )
+    finally:
+        idx.close()
+
+
+def test_short_query_falls_back_to_like(tmp_path: Path) -> None:
+    """(b) Query < 3 chars falls back to LIKE even when trigram is available.
+
+    The trigram tokenizer requires at least 3 characters; a 2-char query
+    must still work via LIKE so short searches don't silently return nothing.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'short_query.db'))
+    try:
+        obs = _mk_obs('AI is useful for code generation.', project='ai')
+        idx.upsert(obs)
+
+        results = idx.search(query='AI', include_superseded=True)
+        assert any(
+            r.observation_id == obs.observation_id for r in results
+        ), 'Short query "AI" must still match via LIKE fallback'
+    finally:
+        idx.close()
+
+
+def test_fts5_cap_like_fallback_when_fts5_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(c) When FTS5 is unavailable, capability falls back to LIKE.
+
+    Monkeypatches ``_detect_fts_cap`` to simulate a SQLite build without
+    FTS5, then verifies that search still returns results via LIKE.
+    """
+    import mesh_mem.local_index as li_mod
+
+    monkeypatch.setattr(li_mod, '_detect_fts_cap', lambda _conn: li_mod._FTS_CAP_LIKE)  # noqa: SLF001
+
+    idx = LocalIndex.connect(str(tmp_path / 'like_only.db'))
+    try:
+        assert idx._fts_cap == li_mod._FTS_CAP_LIKE  # noqa: SLF001
+        obs = _mk_obs('hello world from LIKE path', project='test')
+        idx.upsert(obs)
+        results = idx.search(query='hello world', include_superseded=True)
+        assert any(r.observation_id == obs.observation_id for r in results)
+    finally:
+        idx.close()
+
+
+def test_superseded_row_hidden_by_default(tmp_path: Path) -> None:
+    """(d) A superseded row is hidden from search results by default.
+
+    When obs B supersedes obs A, obs A must not appear in a default
+    ``include_superseded=False`` search while obs B is alive.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'superseded_hidden.db'))
+    try:
+        obs_a = _mk_obs('old observation to be superseded', project='p')
+        idx.upsert(obs_a)
+
+        obs_b = Observation(
+            content='new observation superseding A',
+            project='p',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        idx.upsert(obs_b)
+
+        results = idx.search(include_superseded=False)
+        ids = {r.observation_id for r in results}
+        assert obs_b.observation_id in ids, 'superseding obs B must be visible'
+        assert obs_a.observation_id not in ids, 'superseded obs A must be hidden by default'
+
+        results_with = idx.search(include_superseded=True)
+        ids_with = {r.observation_id for r in results_with}
+        assert obs_a.observation_id in ids_with, 'superseded obs A visible with include_superseded=True'
+    finally:
+        idx.close()
+
+
+def test_superseded_row_restores_when_superseder_deleted(tmp_path: Path) -> None:
+    """(e) Deleting the superseder makes the superseded row visible again (existence-based).
+
+    The existence-based filter checks whether the superseder is still
+    alive in obs_index. When obs B (the superseder) is tombstoned,
+    obs A must reappear in default search results.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'superseded_restore.db'))
+    try:
+        obs_a = _mk_obs('obs A to be restored', project='p')
+        idx.upsert(obs_a)
+
+        obs_b = Observation(
+            content='obs B supersedes A',
+            project='p',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        idx.upsert(obs_b)
+
+        # Verify obs_a is hidden while obs_b is alive.
+        hidden = {r.observation_id for r in idx.search(include_superseded=False)}
+        assert obs_a.observation_id not in hidden
+
+        # Tombstone obs_b — obs_a should come back (existence-based).
+        idx.mark_deleted(obs_b.observation_id, '2026-06-25T00:00:00.000000Z')
+
+        restored = {r.observation_id for r in idx.search(include_superseded=False)}
+        assert obs_a.observation_id in restored, 'obs A must reappear after its superseder is tombstoned'
+    finally:
+        idx.close()
+
+
+def test_get_memory_output_contains_superseded_by(tmp_path: Path) -> None:
+    """(f) ``find_by_id`` populates ``_extras['superseded_by']`` for use in get_memory.
+
+    After obs B supersedes obs A, ``find_by_id(obs_a.observation_id, include_deleted=True)``
+    must expose ``superseded_by`` in the observation's ``_extras`` dict.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'superseded_by_field.db'))
+    try:
+        obs_a = _mk_obs('original obs', project='p')
+        idx.upsert(obs_a)
+
+        obs_b = Observation(
+            content='replacement obs',
+            project='p',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        idx.upsert(obs_b)
+
+        found = idx.find_by_id(obs_a.observation_id, include_deleted=True)
+        assert found is not None
+        assert hasattr(found, '_extras')
+        assert found._extras.get('superseded_by') == obs_b.observation_id, (  # noqa: SLF001
+            f'Expected superseded_by={obs_b.observation_id!r}, got extras={found._extras!r}'  # noqa: SLF001
+        )
+    finally:
+        idx.close()
+
+
+def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
+    """bm25 ranking: more-relevant match ranks first; created_at tie-break is stable.
+
+    Inserts two observations where the second contains the query term more
+    densely.  The FTS path must return them bm25-ranked (more relevant first).
+    When relevance is equal, newer created_at must appear first (tie-break).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'bm25.db'))
+    try:
+        from mesh_mem.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+        # Low-relevance: query term appears once in a long sentence.
+        obs_low = _mk_obs(
+            'This document is about many topics. The word kioku appears once here.',
+            project='rank',
+        )
+        # High-relevance: query term is the entire content.
+        obs_high = _mk_obs('kioku kioku kioku', project='rank')
+        idx.upsert(obs_low)
+        time.sleep(0.01)  # ensure distinct created_at
+        idx.upsert(obs_high)
+
+        results = idx.search(query='kioku', project='rank', include_superseded=True)
+        assert len(results) >= 2, 'Both obs must be returned'
+        ids = [r.observation_id for r in results]
+        if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
+            # FTS path: high-relevance (dense) obs should rank first (lower bm25 rank value).
+            assert ids.index(obs_high.observation_id) < ids.index(
+                obs_low.observation_id
+            ), 'High-relevance obs must rank before low-relevance obs in FTS path'
+
+        # Tie-break: two obs with same content (same relevance), newer first.
+        obs_older = _mk_obs('tiebreak content same words', project='tie')
+        idx.upsert(obs_older)
+        time.sleep(0.01)
+        obs_newer = _mk_obs('tiebreak content same words', project='tie')
+        idx.upsert(obs_newer)
+
+        results_tie = idx.search(query='tiebreak', project='tie', include_superseded=True)
+        assert len(results_tie) >= 2
+        ids_tie = [r.observation_id for r in results_tie]
+        if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
+            # FTS path: ORDER BY rank, created_at DESC — newer first on tie.
+            assert ids_tie.index(obs_newer.observation_id) < ids_tie.index(
+                obs_older.observation_id
+            ), 'Newer obs must appear before older obs when bm25 rank is equal'
+    finally:
+        idx.close()
+
+
+def test_superseded_obs_resurfaces_when_superseder_shadowed(tmp_path: Path) -> None:
+    """Shadowing the superseder must make the superseded row visible again.
+
+    The existence-based filter must treat a shadowed superseder as non-live,
+    so the superseded row resurfaces without needing a tombstone.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_resurface.db'))
+    try:
+        obs_a = _mk_obs('obs A to be superseded', project='p')
+        idx.upsert(obs_a)
+
+        obs_b = Observation(
+            content='obs B supersedes A',
+            project='p',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        idx.upsert(obs_b)
+
+        # obs_a is hidden while obs_b is live.
+        hidden = {r.observation_id for r in idx.search(include_superseded=False)}
+        assert obs_a.observation_id not in hidden, 'obs_a must be hidden while superseder obs_b is live'
+
+        # Shadow obs_b via mark_shadowed_missing (simulates rebuild not seeing it in Zenoh).
+        idx.mark_shadowed_missing(obs_b.observation_id, '2026-06-25T00:00:00.000000Z')
+
+        # obs_a must now resurface — shadowed superseder is no longer "live".
+        visible = {r.observation_id for r in idx.search(include_superseded=False)}
+        assert obs_a.observation_id in visible, 'obs_a must reappear after its superseder obs_b is shadowed'
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
+    """rebuild_from_zenoh() must restore obs_fts and superseded_by as a recovery path.
+
+    Simulates a corrupt FTS index by deleting all obs_fts rows, then calls
+    rebuild_from_zenoh() via a fake session.  After rebuild, FTS search and
+    include_superseded filtering must both work correctly.
+    """
+    from mesh_mem.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_fts.db'))
+    try:
+        obs_a = _mk_obs('distributed memory system', project='r')
+        idx.upsert(obs_a)
+
+        obs_b = Observation(
+            content='replacement for A',
+            project='r',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        idx.upsert(obs_b)
+
+        # Corrupt: wipe obs_fts and superseded_by to simulate a stale index.
+        if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
+            idx._conn.execute('DELETE FROM obs_fts')  # noqa: SLF001
+        idx._conn.execute('UPDATE obs_index SET superseded_by = NULL')  # noqa: SLF001
+        idx._conn.commit()  # noqa: SLF001
+
+        # Fake session that returns both obs from "Zenoh".
+        # Key format: mem/obs/{agent_family}/{client_id}/{pc_id}/{session_id}/{obs_id}
+        class _FakeReply:
+            def __init__(self, obs: Observation) -> None:
+                key = f'mem/obs/{obs.agent_family}/{obs.client_id}/{obs.pc_id}/{obs.session_id}/{obs.observation_id}'
+                self.ok = type(
+                    'Ok',
+                    (),
+                    {
+                        'key_expr': key,
+                        'payload': type('P', (), {'to_string': lambda self: obs.to_json()})(),
+                    },
+                )()
+
+        class _FakeSession:
+            def get(self, key_expr: str, timeout: float = 30.0) -> list:
+                if 'tomb' in key_expr:
+                    return []
+                return [_FakeReply(obs_a), _FakeReply(obs_b)]
+
+        idx.rebuild_from_zenoh(_FakeSession())
+
+        # FTS search must find obs_b after rebuild.
+        if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
+            fts_results = idx.search(query='replacement', include_superseded=True)
+            assert any(
+                r.observation_id == obs_b.observation_id for r in fts_results
+            ), 'obs_b must be findable via FTS after rebuild'
+
+        # superseded_by must be reconstructed: obs_a hidden by default.
+        results_default = idx.search(include_superseded=False)
+        default_ids = {r.observation_id for r in results_default}
+        assert obs_a.observation_id not in default_ids, 'obs_a must be hidden after rebuild restores superseded_by'
+        assert obs_b.observation_id in default_ids, 'obs_b must be visible after rebuild'
+    finally:
+        idx.close()
