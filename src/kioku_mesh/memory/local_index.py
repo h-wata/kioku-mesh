@@ -32,7 +32,6 @@ import logging
 from pathlib import Path
 import sqlite3
 import threading
-from typing import Union
 
 from kioku_mesh.core._env_compat import get_env
 
@@ -122,7 +121,7 @@ _FTS_UPSERT_SQL = (
     'VALUES (?, ?, ?, ?, ?, ?)'
 )
 _FTS_DELETE_SQL = 'DELETE FROM obs_fts WHERE observation_id = ?'
-_PathLike = Union[str, Path]
+_PathLike = str | Path
 
 
 def _disabled_via_env() -> bool:
@@ -266,7 +265,7 @@ def _rebuild_fts_from_obs_index(conn: sqlite3.Connection) -> None:
         'INSERT INTO obs_fts(observation_id, content, subject, summary, tags, project) '
         "SELECT observation_id, COALESCE(json_extract(payload_json, '$.content'), ''), "
         "COALESCE(subject, ''), COALESCE(summary, ''), "
-        "COALESCE(json_extract(payload_json, '$.tags'), ''), "
+        "COALESCE((SELECT group_concat(value, ' ') FROM json_each(obs_index.payload_json, '$.tags')), ''), "
         "COALESCE(project, '') "
         'FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
     )
