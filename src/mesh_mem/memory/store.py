@@ -258,6 +258,7 @@ def search_observations(
     until_iso: str = '',
     cursor_observation_id: str = '',
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> list[Observation]:
     """Search observations via the SQLite local index, falling back to Zenoh.
 
@@ -287,6 +288,7 @@ def search_observations(
             until_iso=until_iso,
             cursor_observation_id=cursor_observation_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
     return _search_via_zenoh(
         query=query,

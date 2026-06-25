@@ -43,7 +43,12 @@ from ..core.models import Tombstone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# ADR-0021: FTS5 capability levels (detected once per connection).
+_FTS_CAP_TRIGRAM = 'trigram'  # FTS5 with trigram tokenizer (supports Japanese substring match)
+_FTS_CAP_FTS5 = 'fts5'  # FTS5 without trigram
+_FTS_CAP_LIKE = 'like'  # LIKE fallback (no FTS5)
 
 # Issue #32: long-running processes (kioku-mesh-mcp) keep the index connection
 # open indefinitely, which blocks SQLite's automatic WAL checkpoint from
@@ -109,6 +114,10 @@ _MARK_SHADOWED_SQL = (
     'UPDATE obs_index SET shadowed_at = COALESCE(shadowed_at, ?) WHERE observation_id = ? AND deleted_at IS NULL'
 )
 
+# ADR-0021: FTS5 lockstep sync SQL.
+_FTS_UPSERT_SQL = 'INSERT OR REPLACE INTO obs_fts(observation_id, content, subject, summary) VALUES (?, ?, ?, ?)'
+_FTS_DELETE_SQL = 'DELETE FROM obs_fts WHERE observation_id = ?'
+
 
 def _disabled_via_env() -> bool:
     return os.environ.get('MESH_MEM_DISABLE_INDEX', '').strip() == '1'
@@ -120,6 +129,26 @@ def _shadow_now_iso() -> str:
     from datetime import timezone
 
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+def _detect_fts_cap(conn: sqlite3.Connection) -> str:
+    """Detect FTS5 and trigram tokenizer availability on ``conn``.
+
+    Probes by attempting to create/drop a temporary virtual table.
+    Returns one of _FTS_CAP_TRIGRAM / _FTS_CAP_FTS5 / _FTS_CAP_LIKE.
+    """
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_cap_probe USING fts5(x, tokenize='trigram')")
+        conn.execute('DROP TABLE IF EXISTS _fts_cap_probe')
+        return _FTS_CAP_TRIGRAM
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute('CREATE VIRTUAL TABLE IF NOT EXISTS _fts_cap_probe USING fts5(x)')
+        conn.execute('DROP TABLE IF EXISTS _fts_cap_probe')
+        return _FTS_CAP_FTS5
+    except sqlite3.OperationalError:
+        return _FTS_CAP_LIKE
 
 
 def _resolve_db_path() -> str:
@@ -134,13 +163,16 @@ def _resolve_db_path() -> str:
     return str(state_dir() / 'index.db')
 
 
-def _open_connection(path: str) -> sqlite3.Connection:
+def _open_connection(path: str) -> tuple[sqlite3.Connection, str]:
     """Open a SQLite connection at ``path``, applying PRAGMA + schema.
 
     ``check_same_thread=False`` because put_observation may run on a
     different thread than the MCP stdio handler (and a future Phase 4
     subscriber thread). Method-level locking in :class:`LocalIndex`
     serializes access.
+
+    Returns ``(conn, fts_cap)`` where ``fts_cap`` is one of the ``_FTS_CAP_*``
+    constants detected during ``_ensure_schema``.
     """
     if path != ':memory:':
         parent = Path(path).parent
@@ -150,19 +182,50 @@ def _open_connection(path: str) -> sqlite3.Connection:
     conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA synchronous=NORMAL')
     conn.execute('PRAGMA busy_timeout=5000')
-    _ensure_schema(conn)
+    fts_cap = _ensure_schema(conn)
     conn.commit()
-    return conn
+    return conn, fts_cap
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Apply schema creation and forward-only migrations."""
+def _ensure_schema(conn: sqlite3.Connection) -> str:
+    """Apply schema creation and forward-only migrations.
+
+    Returns the detected FTS capability (one of ``_FTS_CAP_*``) so callers
+    can store it without a second probe.
+
+    ADR-0019 (visibility) 実装後は visibility scope と search filter の
+    合成が必要。LocalIndex.search の filter 合成ロジックを参照のこと。
+    """
     conn.executescript(_SCHEMA_SQL)
     cols = {row[1] for row in conn.execute('PRAGMA table_info(obs_index)').fetchall()}
     if 'shadowed_at' not in cols:
         conn.execute('ALTER TABLE obs_index ADD COLUMN shadowed_at TEXT')
+    # ADR-0021: superseded_by tracks which observation superseded this row.
+    if 'superseded_by' not in cols:
+        conn.execute('ALTER TABLE obs_index ADD COLUMN superseded_by TEXT')
+    # ADR-0021: FTS5 virtual table for full-text search.
+    fts_cap = _detect_fts_cap(conn)
+    if fts_cap == _FTS_CAP_TRIGRAM:
+        conn.execute(
+            'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
+            "(observation_id UNINDEXED, content, subject, summary, tokenize='trigram')"
+        )
+    elif fts_cap == _FTS_CAP_FTS5:
+        conn.execute(
+            'CREATE VIRTUAL TABLE IF NOT EXISTS obs_fts USING fts5'
+            '(observation_id UNINDEXED, content, subject, summary)'
+        )
+    # Backfill obs_fts from existing live rows (no-op when obs_fts is already populated).
+    if fts_cap != _FTS_CAP_LIKE:
+        conn.execute(
+            'INSERT OR IGNORE INTO obs_fts(observation_id, content, subject, summary) '
+            "SELECT observation_id, COALESCE(json_extract(payload_json, '$.content'), ''), "
+            "COALESCE(subject, ''), COALESCE(summary, '') "
+            'FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
+        )
     conn.execute('DELETE FROM schema_version')
     conn.execute('INSERT INTO schema_version(version) VALUES (?)', (SCHEMA_VERSION,))
+    return fts_cap
 
 
 class LocalIndex:
@@ -179,10 +242,12 @@ class LocalIndex:
         db_path: str,
         disabled: bool = False,
         conn: sqlite3.Connection | None = None,
+        fts_cap: str = _FTS_CAP_LIKE,
     ) -> None:
         self._db_path = db_path
         self._disabled = disabled
         self._conn: sqlite3.Connection | None = conn
+        self._fts_cap = fts_cap
         self._lock = threading.Lock()
         # Counter for the periodic ``PRAGMA wal_checkpoint(TRUNCATE)`` (#32).
         # Reset every checkpoint and on close.
@@ -211,11 +276,11 @@ class LocalIndex:
             return cls(db_path='', disabled=True)
         path = db_path if db_path is not None else _resolve_db_path()
         try:
-            conn = _open_connection(path)
+            conn, fts_cap = _open_connection(path)
         except (sqlite3.Error, OSError) as e:
             log.warning('LocalIndex open failed (%s); falling back to disabled: %s', path, e)
             return cls(db_path=path, disabled=True)
-        return cls(db_path=path, disabled=False, conn=conn)
+        return cls(db_path=path, disabled=False, conn=conn, fts_cap=fts_cap)
 
     def _maybe_checkpoint_locked(self) -> None:
         """Issue ``PRAGMA wal_checkpoint(TRUNCATE)`` every N upserts (#32).
@@ -252,6 +317,24 @@ class LocalIndex:
         with self._lock:
             try:
                 self._conn.execute(_UPSERT_SQL, row)
+                # ADR-0021: update superseded_by on obs this one supersedes.
+                if obs.supersedes:
+                    placeholders = ','.join('?' for _ in obs.supersedes)
+                    self._conn.execute(
+                        f'UPDATE obs_index SET superseded_by = ? WHERE observation_id IN ({placeholders})',
+                        [obs.observation_id, *obs.supersedes],
+                    )
+                # ADR-0021: FTS5 lockstep sync.
+                if self._fts_cap != _FTS_CAP_LIKE:
+                    self._conn.execute(
+                        _FTS_UPSERT_SQL,
+                        (
+                            obs.observation_id,
+                            obs.content,
+                            obs.subject or '',
+                            obs.summary or '',
+                        ),
+                    )
                 self._conn.commit()
                 self._maybe_checkpoint_locked()
             except sqlite3.Error as e:
@@ -269,6 +352,9 @@ class LocalIndex:
         with self._lock:
             try:
                 self._conn.execute(_MARK_DELETED_SQL, (deleted_at, observation_id))
+                # ADR-0021: remove from FTS so deleted rows don't appear in FTS results.
+                if self._fts_cap != _FTS_CAP_LIKE:
+                    self._conn.execute(_FTS_DELETE_SQL, (observation_id,))
                 self._conn.commit()
             except sqlite3.Error as e:
                 log.warning('LocalIndex.mark_deleted failed for %s: %s', observation_id, e)
@@ -311,20 +397,24 @@ class LocalIndex:
         cursor_observation_id: str = '',
         limit: int = 50,
         include_deleted: bool = False,
+        include_superseded: bool = False,
     ) -> list[Observation]:
         """SQL-side search returning Observations ordered by created_at DESC.
 
         Filters compose with AND. Empty-string filters are skipped (matches
-        ``store.search_observations`` semantics). ``query`` is a case-
-        insensitive substring match against ``payload_json`` — this covers
-        content / project / tags / subject / summary uniformly. False
-        positives on identity-field substrings are accepted for PoC; the
-        existing Zenoh-side semantic was content/project/tags only, so this
-        is a slight broadening that no current test depends on negatively.
+        ``store.search_observations`` semantics). ``query`` runs through a
+        3-stage fallback (ADR-0021):
+          1. FTS5 trigram (if available, query >= 3 chars)
+          2. FTS5 standard (if available, any query length)
+          3. LIKE against ``payload_json`` (always available)
 
         ``include_deleted=True`` returns both tombstoned and rebuild-shadowed
         rows. The name is historical but the behavior is intentionally "show
         hidden rows" rather than only "show tombstoned rows".
+
+        ``include_superseded=False`` (default) hides rows whose superseder is
+        still live in the index (existence-based, ADR-0021). Set to ``True``
+        to include superseded rows.
 
         ``since_iso`` / ``until_iso`` are compared lexicographically against
         ``created_at``; both are produced as 'Z'-suffixed UTC ISO 8601
@@ -339,6 +429,9 @@ class LocalIndex:
         Rows whose created_at cannot be lex-compared (legacy bad writes)
         will sort, possibly incorrectly — same caveat as the existing
         Zenoh path.
+
+        ADR-0019 (visibility) 実装後は visibility scope と search filter の
+        合成が必要。LocalIndex.search の filter 合成ロジックを参照のこと。
         """
         if self._disabled or self._conn is None:
             return []
@@ -347,6 +440,12 @@ class LocalIndex:
         if not include_deleted:
             where.append('deleted_at IS NULL')
             where.append('shadowed_at IS NULL')
+        # ADR-0021: existence-based supersedes filter.
+        if not include_superseded:
+            where.append(
+                '(superseded_by IS NULL OR superseded_by NOT IN '
+                '(SELECT observation_id FROM obs_index WHERE deleted_at IS NULL))'
+            )
         if project:
             where.append('project = ?')
             params.append(project)
@@ -374,28 +473,60 @@ class LocalIndex:
         elif until_iso:
             where.append('created_at <= ?')
             params.append(until_iso)
-        if query:
-            # Case-insensitive substring against the full payload (content /
-            # project / tags / subject / summary). LIKE is fast enough at PoC
-            # scale; FTS5 is the natural upgrade if profiling demands it.
-            where.append('LOWER(payload_json) LIKE ?')
-            params.append(f'%{query.lower()}%')
 
-        sql = 'SELECT payload_json FROM obs_index'
-        if where:
-            sql += ' WHERE ' + ' AND '.join(where)
-        # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
-        # sort key gives a total, stable order for cursor pagination over
-        # rows that share the same ``created_at`` (#66).
-        sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
-        params.append(max(1, limit))
+        # ADR-0021: 3-stage query fallback.
+        use_fts = bool(query) and self._fts_cap != _FTS_CAP_LIKE
+        if use_fts and self._fts_cap == _FTS_CAP_TRIGRAM and len(query) < 3:
+            use_fts = False  # trigram requires >= 3 chars; fall through to LIKE
+
+        if use_fts:
+            # FTS5 path: CTE join for bm25 ranking.
+            fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
+            sql = (
+                'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
+                'SELECT o.payload_json '
+                'FROM obs_index o '
+                'JOIN fts_match f ON f.observation_id = o.observation_id'
+                f'{fts_where} '
+                'ORDER BY f.rank LIMIT ?'
+            )
+            rows_params: list[object] = [query, *params, max(1, limit)]
+        else:
+            if query:
+                where.append('LOWER(payload_json) LIKE ?')
+                params.append(f'%{query.lower()}%')
+            sql = 'SELECT payload_json FROM obs_index'
+            if where:
+                sql += ' WHERE ' + ' AND '.join(where)
+            # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
+            # sort key gives a total, stable order for cursor pagination over
+            # rows that share the same ``created_at`` (#66).
+            sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+            rows_params = [*params, max(1, limit)]
 
         with self._lock:
             try:
-                rows = self._conn.execute(sql, params).fetchall()
+                rows = self._conn.execute(sql, rows_params).fetchall()
             except sqlite3.Error as e:
-                log.warning('LocalIndex.search failed: %s', e)
-                return []
+                if use_fts:
+                    # FTS query failed (e.g. unsupported syntax); fall back to LIKE.
+                    log.debug('LocalIndex.search FTS failed, falling back to LIKE: %s', e)
+                    like_where = [*where, 'LOWER(payload_json) LIKE ?'] if query else where
+                    like_sql = 'SELECT payload_json FROM obs_index'
+                    if like_where:
+                        like_sql += ' WHERE ' + ' AND '.join(like_where)
+                    like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                    like_params: list[object] = (
+                        [*params, f'%{query.lower()}%', max(1, limit)] if query else [*params, max(1, limit)]
+                    )
+                    try:
+                        rows = self._conn.execute(like_sql, like_params).fetchall()
+                    except sqlite3.Error as e2:
+                        log.warning('LocalIndex.search LIKE fallback failed: %s', e2)
+                        return []
+                else:
+                    log.warning('LocalIndex.search failed: %s', e)
+                    return []
         out: list[Observation] = []
         for (payload,) in rows:
             try:
@@ -416,6 +547,13 @@ class LocalIndex:
         with self._lock:
             try:
                 self._conn.execute('DELETE FROM obs_index WHERE observation_id = ?', (observation_id,))
+                # ADR-0021: clear superseded_by on rows that pointed to this obs.
+                self._conn.execute(
+                    'UPDATE obs_index SET superseded_by = NULL WHERE superseded_by = ?',
+                    (observation_id,),
+                )
+                if self._fts_cap != _FTS_CAP_LIKE:
+                    self._conn.execute(_FTS_DELETE_SQL, (observation_id,))
                 self._conn.commit()
             except sqlite3.Error as e:
                 log.warning('LocalIndex.physical_delete failed for %s: %s', observation_id, e)
@@ -490,7 +628,8 @@ class LocalIndex:
         """
         if self._disabled or self._conn is None:
             return None
-        sql = 'SELECT payload_json FROM obs_index WHERE observation_id = ?'
+        # ADR-0021: also fetch superseded_by so get_memory can expose it.
+        sql = 'SELECT payload_json, superseded_by FROM obs_index WHERE observation_id = ?'
         if not include_deleted:
             sql += ' AND deleted_at IS NULL AND shadowed_at IS NULL'
         with self._lock:
@@ -502,7 +641,11 @@ class LocalIndex:
         if row is None:
             return None
         try:
-            return Observation.from_json(row[0])
+            obs = Observation.from_json(row[0])
+            # Stash superseded_by in _extras so callers (e.g. get_memory) can surface it.
+            if row[1]:
+                obs._extras['superseded_by'] = row[1]  # noqa: SLF001
+            return obs
         except Exception as e:  # noqa: BLE001
             log.warning('LocalIndex.find_by_id malformed payload for %s: %s', observation_id, e)
             return None

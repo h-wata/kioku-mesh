@@ -303,6 +303,7 @@ def search_memory(
     project: str = '',
     since_iso: str = '',
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> str:
     """Search the shared kioku-mesh memory, narrowing by key_expr and filtering in Python.
 
@@ -313,6 +314,8 @@ def search_memory(
     ``limit`` defaults to 50 and is internally clamped to ``MAX_SEARCH``.
     Returned observation ids are full 32-char strings so ``delete_memory``
     can be called directly.
+    Set ``include_superseded=True`` to also return observations that have been
+    superseded by a newer one (hidden by default, ADR-0021).
     """
     results = get_backend().search_observations(
         query=query,
@@ -323,6 +326,7 @@ def search_memory(
         project=project,
         since_iso=since_iso,
         limit=limit,
+        include_superseded=include_superseded,
     )
     if not results:
         return 'No matching memories.'
@@ -354,6 +358,7 @@ def get_memory(observation_id: str) -> str:
     obs = get_backend().find_observation_by_id(observation_id)
     if obs is None:
         return f'observation_id {observation_id} not found.'
+    superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
     lines = [
         f'id: {obs.observation_id}',
         f'memory_type: {obs.memory_type}',
@@ -367,6 +372,7 @@ def get_memory(observation_id: str) -> str:
         f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
         f'references: {", ".join(obs.references) if obs.references else "-"}',
         f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
+        f'superseded_by: {superseded_by or "-"}',
         '---',
         obs.content,
     ]
