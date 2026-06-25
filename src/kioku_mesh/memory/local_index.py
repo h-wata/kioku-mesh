@@ -259,7 +259,29 @@ def _rebuild_fts_from_obs_index(conn: sqlite3.Connection) -> None:
     idempotent and repairs old databases where the table is missing rows,
     contains stale rows, or was created before content/tags/project were
     populated correctly.
+
+    Skip-guard: compares the current ``obs_fts`` row count with the live
+    ``obs_index`` row count (``deleted_at IS NULL AND shadowed_at IS NULL``).
+    If they match and ``obs_fts`` is non-empty, the rebuild is skipped to
+    avoid unnecessary I/O on every open. Legacy databases (``obs_fts``
+    absent), empty ``obs_fts``, count mismatch, or any exception all fall
+    through to a full rebuild, preserving the PR #207 recovery guarantee.
+
+    Note on ``group_concat`` ordering: SQLite's ``json_each`` iterates array
+    elements in index order, so ``group_concat(value, ' ')`` over
+    ``json_each(payload_json, '$.tags')`` produces the same string as
+    Python's ``' '.join(obs.tags)``. This relies on the current SQLite
+    implementation; verify when upgrading SQLite major versions.
     """
+    try:
+        fts_count = conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()[0]
+        live_count = conn.execute(
+            'SELECT COUNT(*) FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
+        ).fetchone()[0]
+        if fts_count == live_count and fts_count > 0:
+            return
+    except Exception:  # noqa: BLE001
+        pass
     conn.execute('DELETE FROM obs_fts')
     conn.execute(
         'INSERT INTO obs_fts(observation_id, content, subject, summary, tags, project) '

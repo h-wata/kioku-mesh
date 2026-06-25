@@ -1520,3 +1520,184 @@ def test_supersedes_aware_include_superseded_after_fts_full_rebuild(tmp_path: Pa
         )
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# R1 / C1: FTS rebuild skip-guard and tags edge cases (PR #207/#208 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_fts_skip_guard_skips_when_in_sync(tmp_path: Path) -> None:
+    """R1: _rebuild_fts_from_obs_index skips full rebuild when obs_fts is in sync.
+
+    Verifies that when obs_fts and obs_index live-row counts match, a
+    deliberately corrupted obs_fts.tags value is preserved (proving that
+    the skip-guard fired and the DELETE+INSERT did not run).
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _rebuild_fts_from_obs_index  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'skip_guard_skip.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts is unavailable without FTS5 support')
+
+        obs = _mk_obs('skip guard check', project='skipguard', tags=['zenoh', 'test'])
+        idx.upsert(obs)
+
+        # Corrupt obs_fts to prove skip leaves it untouched.
+        idx._conn.execute(  # noqa: SLF001
+            'UPDATE obs_fts SET tags = ? WHERE observation_id = ?',
+            ('corrupted', obs.observation_id),
+        )
+        idx._conn.commit()  # noqa: SLF001
+
+        # Counts: 1 (obs_fts) == 1 (live obs_index) and > 0 → skip fires.
+        _rebuild_fts_from_obs_index(idx._conn)  # noqa: SLF001
+
+        (tags_after,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert tags_after == 'corrupted', 'skip-guard must leave obs_fts untouched when counts match'
+    finally:
+        idx.close()
+
+
+def test_rebuild_fts_skip_guard_rebuilds_when_stale(tmp_path: Path) -> None:
+    """R1: _rebuild_fts_from_obs_index rebuilds when obs_fts count is stale.
+
+    Simulates a stale obs_fts (fewer rows than live obs_index) and
+    verifies the full rebuild restores the missing row.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _rebuild_fts_from_obs_index  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'skip_guard_rebuild.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts is unavailable without FTS5 support')
+
+        obs1 = _mk_obs('first', project='stale', tags=['a'])
+        obs2 = _mk_obs('second', project='stale', tags=['b'])
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+
+        # Drop one obs_fts row so fts_count (1) != live_count (2).
+        idx._conn.execute(  # noqa: SLF001
+            'DELETE FROM obs_fts WHERE observation_id = ?',
+            (obs1.observation_id,),
+        )
+        idx._conn.commit()  # noqa: SLF001
+
+        _rebuild_fts_from_obs_index(idx._conn)  # noqa: SLF001
+
+        (count_after,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts'
+        ).fetchone()
+        assert count_after == 2, 'rebuild must restore all live rows to obs_fts when counts are stale'
+    finally:
+        idx.close()
+
+
+def test_rebuild_fts_tags_edge_cases(tmp_path: Path) -> None:
+    """C1: rebuild and lockstep upsert agree on obs_fts.tags for three edge cases.
+
+    - tags=[] (empty array) → obs_fts.tags == ''
+    - tags=['zenoh'] (single element) → obs_fts.tags == 'zenoh'
+    - $.tags key absent in payload_json (legacy row) → obs_fts.tags == ''
+    """
+    import json  # noqa: PLC0415
+
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _FTS_UPSERT_SQL  # noqa: PLC0415
+    from kioku_mesh.local_index import _rebuild_fts_from_obs_index  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'fts_tags_edge.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts is unavailable without FTS5 support')
+
+        # Case 1: tags=[]
+        obs_empty = _mk_obs('empty tags case', project='edge', tags=[])
+        idx.upsert(obs_empty)
+        (lockstep_empty,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs_empty.observation_id,),
+        ).fetchone()
+
+        # Case 2: tags=['zenoh']
+        obs_single = _mk_obs('single tag case', project='edge', tags=['zenoh'])
+        idx.upsert(obs_single)
+        (lockstep_single,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs_single.observation_id,),
+        ).fetchone()
+
+        # Case 3: $.tags key absent in payload_json (legacy row).
+        # Simulate lockstep behavior: lockstep produces '' for missing/empty tags.
+        obs_notags = _mk_obs('no tags key case', project='edge', tags=[])
+        payload_no_key = json.loads(obs_notags.to_json())
+        payload_no_key.pop('tags', None)
+        idx._conn.execute(  # noqa: SLF001
+            'INSERT INTO obs_index '
+            '(observation_id, project, created_at, memory_type, importance, subject, summary, payload_json) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                obs_notags.observation_id,
+                obs_notags.project,
+                obs_notags.created_at,
+                obs_notags.memory_type,
+                obs_notags.importance,
+                obs_notags.subject,
+                obs_notags.summary,
+                json.dumps(payload_no_key),
+            ),
+        )
+        idx._conn.execute(  # noqa: SLF001
+            _FTS_UPSERT_SQL,
+            (
+                obs_notags.observation_id,
+                obs_notags.content,
+                obs_notags.subject or '',
+                obs_notags.summary or '',
+                '',  # lockstep produces '' for obs.tags == []
+                obs_notags.project or '',
+            ),
+        )
+        idx._conn.commit()  # noqa: SLF001
+        (lockstep_notags,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs_notags.observation_id,),
+        ).fetchone()
+
+        # Delete all obs_fts rows to force a full rebuild (bypass R1 skip-guard).
+        idx._conn.execute('DELETE FROM obs_fts')  # noqa: SLF001
+        idx._conn.commit()  # noqa: SLF001
+
+        _rebuild_fts_from_obs_index(idx._conn)  # noqa: SLF001
+
+        (rebuilt_empty,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs_empty.observation_id,),
+        ).fetchone()
+        (rebuilt_single,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs_single.observation_id,),
+        ).fetchone()
+        (rebuilt_notags,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs_notags.observation_id,),
+        ).fetchone()
+
+        assert lockstep_empty == ''
+        assert rebuilt_empty == lockstep_empty
+
+        assert lockstep_single == 'zenoh'
+        assert rebuilt_single == lockstep_single
+
+        assert lockstep_notags == ''
+        assert rebuilt_notags == lockstep_notags
+
+    finally:
+        idx.close()
