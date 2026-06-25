@@ -1,6 +1,6 @@
 # ADR-0021: 検索品質 — FTS5 (trigram) 導入と supersedes-aware search
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-10
 - Supersedes: なし（ADR-0007 の「今後: FTS5 は要件が見えたら段階導入」を具体化）
 - Related: ADR-0002, ADR-0007, ADR-0010, ADR-0011, Issue #167
