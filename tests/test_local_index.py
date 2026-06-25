@@ -1123,6 +1123,36 @@ def test_fts5_cap_like_fallback_when_fts5_unavailable(tmp_path: Path, monkeypatc
         idx.close()
 
 
+def test_rebuild_fts_normalizes_tags_like_lockstep_upsert(tmp_path: Path) -> None:
+    """The rebuild path must store tags with the same space-joined representation as upsert."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _rebuild_fts_from_obs_index  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'fts_tags.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts is unavailable without FTS5 support')
+
+        obs = _mk_obs('tag representation check', project='tags', tags=['zenoh', 'bug'])
+        idx.upsert(obs)
+
+        (lockstep_tags,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+
+        _rebuild_fts_from_obs_index(idx._conn)  # noqa: SLF001
+        (rebuilt_tags,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT tags FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+
+        assert lockstep_tags == 'zenoh bug'
+        assert rebuilt_tags == lockstep_tags
+    finally:
+        idx.close()
+
+
 def test_superseded_row_hidden_by_default(tmp_path: Path) -> None:
     """(d) A superseded row is hidden from search results by default.
 
