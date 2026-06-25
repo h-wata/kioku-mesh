@@ -5,10 +5,10 @@ from __future__ import annotations
 from unittest.mock import call
 from unittest.mock import patch
 
-from mesh_mem.core.config import MessagingTmuxAdapterConfig
-from mesh_mem.messaging.models import Message
-from mesh_mem.messaging.tmux_adapter import try_inject
-import mesh_mem.messaging.tmux_adapter as _adapter_module
+from kioku_mesh.core.config import MessagingTmuxAdapterConfig
+from kioku_mesh.messaging.models import Message
+from kioku_mesh.messaging.tmux_adapter import try_inject
+import kioku_mesh.messaging.tmux_adapter as _adapter_module
 
 _PANE = 'ros-agents:0.1'
 _SENDER = 'test-sender'
@@ -43,7 +43,7 @@ class TestTmuxAdapterGuards:
     def test_default_off_no_inject(self) -> None:
         """config.enabled=False means no tmux send-keys call, ever."""
         cfg = _cfg(enabled=False)
-        with patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run:
+        with patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run:
             result = try_inject(_msg(), _PANE, cfg)
         assert result is False
         mock_run.assert_not_called()
@@ -51,7 +51,7 @@ class TestTmuxAdapterGuards:
     def test_pane_not_in_allowlist_no_inject(self) -> None:
         """pane_id not in pane_allowlist → silent drop, no injection."""
         cfg = _cfg(pane_allowlist=['other-session:0.0'])
-        with patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run:
+        with patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run:
             result = try_inject(_msg(), _PANE, cfg)
         assert result is False
         mock_run.assert_not_called()
@@ -59,7 +59,7 @@ class TestTmuxAdapterGuards:
     def test_sender_not_in_allowlist_no_inject(self) -> None:
         """sender_id not in sender_allowlist → silent drop, no injection."""
         cfg = _cfg(sender_allowlist=['other-agent'])
-        with patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run:
+        with patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run:
             result = try_inject(_msg(sender_id='unknown-sender'), _PANE, cfg)
         assert result is False
         mock_run.assert_not_called()
@@ -67,7 +67,7 @@ class TestTmuxAdapterGuards:
     def test_scope_mismatch_no_inject(self) -> None:
         """message.scope not in scope_allowlist → silent drop, no injection."""
         cfg = _cfg(scope_allowlist=['team/kioku-mesh'])
-        with patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run:
+        with patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run:
             result = try_inject(_msg(scope='mesh'), _PANE, cfg)
         assert result is False
         mock_run.assert_not_called()
@@ -76,7 +76,7 @@ class TestTmuxAdapterGuards:
         """Body exceeding max_body_bytes → silent drop (no exception raised)."""
         large_body = 'x' * 8193
         cfg = _cfg(max_body_bytes=8192)
-        with patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run:
+        with patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run:
             result = try_inject(_msg(body=large_body), _PANE, cfg)
         assert result is False
         mock_run.assert_not_called()
@@ -89,8 +89,8 @@ class TestTmuxAdapterGuards:
         boundary_body = 'x' * 8192
         cfg = _cfg(max_body_bytes=8192)
         with (
-            patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run,
-            patch('mesh_mem.messaging.tmux_adapter.time.sleep'),
+            patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run,
+            patch('kioku_mesh.messaging.tmux_adapter.time.sleep'),
         ):
             result = try_inject(_msg(body=boundary_body), _PANE, cfg)
         assert result is True
@@ -103,8 +103,8 @@ class TestTmuxAdapterInjection:
     def test_valid_message_injects_body_and_enter(self) -> None:
         """All guards pass → subprocess.run called twice (body then Enter)."""
         with (
-            patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run,
-            patch('mesh_mem.messaging.tmux_adapter.time.sleep') as mock_sleep,
+            patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run,
+            patch('kioku_mesh.messaging.tmux_adapter.time.sleep') as mock_sleep,
         ):
             result = try_inject(_msg(), _PANE, _cfg())
 
@@ -130,11 +130,11 @@ class TestTmuxAdapterInjection:
         """subprocess.run always fails → one retry, then drop + logging.error."""
         with (
             patch(
-                'mesh_mem.messaging.tmux_adapter.subprocess.run',
+                'kioku_mesh.messaging.tmux_adapter.subprocess.run',
                 side_effect=Exception('tmux error'),
             ),
-            patch('mesh_mem.messaging.tmux_adapter.time.sleep'),
-            patch('mesh_mem.messaging.tmux_adapter._LOG') as mock_log,
+            patch('kioku_mesh.messaging.tmux_adapter.time.sleep'),
+            patch('kioku_mesh.messaging.tmux_adapter._LOG') as mock_log,
         ):
             result = try_inject(_msg(), _PANE, _cfg())
 
@@ -150,8 +150,8 @@ class TestTmuxAdapterInjection:
         recipient agent's responsibility via MCP check_messages / ack_message.
         """
         with (
-            patch('mesh_mem.messaging.tmux_adapter.subprocess.run') as mock_run,
-            patch('mesh_mem.messaging.tmux_adapter.time.sleep'),
+            patch('kioku_mesh.messaging.tmux_adapter.subprocess.run') as mock_run,
+            patch('kioku_mesh.messaging.tmux_adapter.time.sleep'),
         ):
             result = try_inject(_msg(), _PANE, _cfg())
 

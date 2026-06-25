@@ -18,9 +18,9 @@ from unittest import mock
 
 import pytest
 
-import mesh_mem.__main__ as cli_module
-from mesh_mem.local_index import LocalIndex
-from mesh_mem.models import Observation
+import kioku_mesh.__main__ as cli_module
+from kioku_mesh.local_index import LocalIndex
+from kioku_mesh.models import Observation
 
 
 def _mk_obs(*, project: str, pc_id: str, content: str = 'x') -> Observation:
@@ -78,7 +78,7 @@ def test_distinct_projects_disabled_returns_empty(tmp_path: Path) -> None:
 def test_complete_project_filters_by_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db = tmp_path / 'index.db'
     _populate(db)
-    monkeypatch.setenv('MESH_MEM_INDEX_DB', str(db))
+    monkeypatch.setenv('KIOKU_MESH_INDEX_DB', str(db))
 
     assert cli_module._complete_project(prefix='') == ['alpha', 'beta', 'gamma']
     assert cli_module._complete_project(prefix='a') == ['alpha']
@@ -89,7 +89,7 @@ def test_complete_project_filters_by_prefix(tmp_path: Path, monkeypatch: pytest.
 def test_complete_pc_id_filters_by_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db = tmp_path / 'index.db'
     _populate(db)
-    monkeypatch.setenv('MESH_MEM_INDEX_DB', str(db))
+    monkeypatch.setenv('KIOKU_MESH_INDEX_DB', str(db))
 
     assert cli_module._complete_pc_id(prefix='pc-') == ['pc-aaa', 'pc-bbb', 'pc-ccc']
     assert cli_module._complete_pc_id(prefix='pc-a') == ['pc-aaa']
@@ -116,9 +116,9 @@ def test_completers_do_not_touch_zenoh(tmp_path: Path, monkeypatch: pytest.Monke
     """
     db = tmp_path / 'index.db'
     _populate(db)
-    monkeypatch.setenv('MESH_MEM_INDEX_DB', str(db))
+    monkeypatch.setenv('KIOKU_MESH_INDEX_DB', str(db))
 
-    with mock.patch('mesh_mem.store.get_session') as get_session:
+    with mock.patch('kioku_mesh.store.get_session') as get_session:
         cli_module._complete_project(prefix='')
         cli_module._complete_pc_id(prefix='')
         get_session.assert_not_called()

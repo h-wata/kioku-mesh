@@ -12,18 +12,18 @@ import subprocess
 
 import pytest
 
-from mesh_mem import mcp_install
-from mesh_mem.__main__ import main as cli_main
-from mesh_mem.mcp_install import _build_claude_add_command
-from mesh_mem.mcp_install import _render_codex_toml_block
-from mesh_mem.mcp_install import _replace_codex_block
-from mesh_mem.mcp_install import build_install_plan
-from mesh_mem.mcp_install import DEFAULT_REGISTRY_NAME
-from mesh_mem.mcp_install import install_claude_code
-from mesh_mem.mcp_install import install_codex_cli
-from mesh_mem.mcp_install import InstallPlan
-from mesh_mem.mcp_install import MCPClient
-from mesh_mem.mcp_install import parse_env_pairs
+from kioku_mesh import mcp_install
+from kioku_mesh.__main__ import main as cli_main
+from kioku_mesh.mcp_install import _build_claude_add_command
+from kioku_mesh.mcp_install import _render_codex_toml_block
+from kioku_mesh.mcp_install import _replace_codex_block
+from kioku_mesh.mcp_install import build_install_plan
+from kioku_mesh.mcp_install import DEFAULT_REGISTRY_NAME
+from kioku_mesh.mcp_install import install_claude_code
+from kioku_mesh.mcp_install import install_codex_cli
+from kioku_mesh.mcp_install import InstallPlan
+from kioku_mesh.mcp_install import MCPClient
+from kioku_mesh.mcp_install import parse_env_pairs
 
 # -- parse_env_pairs ------------------------------------------------------------
 
@@ -50,28 +50,28 @@ def test_parse_env_pairs_rejects_empty_key() -> None:
 
 
 def test_build_install_plan_defaults_per_client() -> None:
-    plan = build_install_plan(MCPClient.CODEX_CLI, mesh_mem_mcp_path='/x/mesh-mem-mcp')
+    plan = build_install_plan(MCPClient.CODEX_CLI, kioku_mesh_mcp_path='/x/mesh-mem-mcp')
     assert plan.client is MCPClient.CODEX_CLI
     assert plan.name == DEFAULT_REGISTRY_NAME
     assert plan.command == '/x/mesh-mem-mcp'
-    assert plan.env['MESH_MEM_AGENT_FAMILY'] == 'codex'
-    assert plan.env['MESH_MEM_CLIENT_ID'] == 'codex-cli'
+    assert plan.env['KIOKU_MESH_AGENT_FAMILY'] == 'codex'
+    assert plan.env['KIOKU_MESH_CLIENT_ID'] == 'codex-cli'
     assert plan.env['ZENOH_CONNECT'] == 'tcp/127.0.0.1:7447'
 
 
 def test_build_install_plan_claude_defaults() -> None:
-    plan = build_install_plan(MCPClient.CLAUDE_CODE, mesh_mem_mcp_path='/x/mesh-mem-mcp')
-    assert plan.env['MESH_MEM_AGENT_FAMILY'] == 'claude'
-    assert plan.env['MESH_MEM_CLIENT_ID'] == 'claude-code'
+    plan = build_install_plan(MCPClient.CLAUDE_CODE, kioku_mesh_mcp_path='/x/mesh-mem-mcp')
+    assert plan.env['KIOKU_MESH_AGENT_FAMILY'] == 'claude'
+    assert plan.env['KIOKU_MESH_CLIENT_ID'] == 'claude-code'
 
 
 def test_build_install_plan_extra_env_overrides_default() -> None:
     plan = build_install_plan(
         MCPClient.CODEX_CLI,
-        mesh_mem_mcp_path='/x/mesh-mem-mcp',
-        extra_env={'MESH_MEM_AGENT_FAMILY': 'custom', 'EXTRA': 'value'},
+        kioku_mesh_mcp_path='/x/mesh-mem-mcp',
+        extra_env={'KIOKU_MESH_AGENT_FAMILY': 'custom', 'EXTRA': 'value'},
     )
-    assert plan.env['MESH_MEM_AGENT_FAMILY'] == 'custom'
+    assert plan.env['KIOKU_MESH_AGENT_FAMILY'] == 'custom'
     assert plan.env['EXTRA'] == 'value'
 
 
@@ -95,13 +95,13 @@ def test_build_install_plan_raises_when_binary_missing() -> None:
 def test_build_install_plan_rejects_unsafe_registry_name(bad_name: str) -> None:
     """Codex review #97: TOML bare keys are [A-Za-z0-9_-]+. Anything else risks a silent rewrite."""
     with pytest.raises(ValueError, match='registry name'):
-        build_install_plan(MCPClient.CODEX_CLI, name=bad_name, mesh_mem_mcp_path='/x/mesh-mem-mcp')
+        build_install_plan(MCPClient.CODEX_CLI, name=bad_name, kioku_mesh_mcp_path='/x/mesh-mem-mcp')
 
 
 @pytest.mark.parametrize('good_name', ['kioku_mesh', 'mesh-mem', 'foo-bar', 'X42', 'a'])
 def test_build_install_plan_accepts_bare_key_names(good_name: str) -> None:
     """All TOML-spec bare keys must be accepted."""
-    plan = build_install_plan(MCPClient.CODEX_CLI, name=good_name, mesh_mem_mcp_path='/x/mesh-mem-mcp')
+    plan = build_install_plan(MCPClient.CODEX_CLI, name=good_name, kioku_mesh_mcp_path='/x/mesh-mem-mcp')
     assert plan.name == good_name
 
 

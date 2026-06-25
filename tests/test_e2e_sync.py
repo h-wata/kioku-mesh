@@ -29,8 +29,8 @@ from typing import Any
 
 import pytest
 
-from mesh_mem import store
-from mesh_mem.models import Observation
+from kioku_mesh import store
+from kioku_mesh.models import Observation
 
 REPLICATION_WAIT = 5.0
 

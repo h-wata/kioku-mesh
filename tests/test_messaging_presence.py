@@ -13,12 +13,12 @@ from unittest.mock import patch
 
 import pytest
 
-from mesh_mem.messaging.presence import _parse_presence
-from mesh_mem.messaging.presence import _presence_key
-from mesh_mem.messaging.presence import _publication_scopes
-from mesh_mem.messaging.presence import Presence
-from mesh_mem.messaging.presence import PRESENCE_TTL
-from mesh_mem.messaging.presence import PresenceManager
+from kioku_mesh.messaging.presence import _parse_presence
+from kioku_mesh.messaging.presence import _presence_key
+from kioku_mesh.messaging.presence import _publication_scopes
+from kioku_mesh.messaging.presence import Presence
+from kioku_mesh.messaging.presence import PRESENCE_TTL
+from kioku_mesh.messaging.presence import PresenceManager
 
 
 def _utc(dt: datetime) -> datetime:
@@ -83,10 +83,10 @@ class TestPresenceIsActive:
 
 class TestPresenceToDict:
     def test_required_fields_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('MESH_MEM_USER_ID', 'testuser')
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', 'testuser')
         with (
-            patch('mesh_mem.messaging.presence.get_agent_family', return_value='claude'),
-            patch('mesh_mem.messaging.presence.get_client_id', return_value='claude-code'),
+            patch('kioku_mesh.messaging.presence.get_agent_family', return_value='claude'),
+            patch('kioku_mesh.messaging.presence.get_client_id', return_value='claude-code'),
         ):
             p = Presence(
                 agent_id='claude-code',
@@ -108,8 +108,8 @@ class TestPresenceToDict:
         last = _now()
         p = Presence(agent_id='a', session_id='s', host='h', last_seen=last)
         with (
-            patch('mesh_mem.messaging.presence.get_agent_family', return_value='unknown'),
-            patch('mesh_mem.messaging.presence.get_client_id', return_value='a'),
+            patch('kioku_mesh.messaging.presence.get_agent_family', return_value='unknown'),
+            patch('kioku_mesh.messaging.presence.get_client_id', return_value='a'),
         ):
             d = p.to_dict()
         last_seen_dt = datetime.fromisoformat(d['last_seen'].replace('Z', '+00:00'))
@@ -141,40 +141,40 @@ class TestPresenceKey:
 
 class TestPublicationScopes:
     def test_no_config_no_scopes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_MESSAGING_PRESENCE_MESH', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', raising=False)
         scopes = _publication_scopes()
         assert scopes == []
 
     def test_user_scope_when_user_id_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
-        monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_MESSAGING_PRESENCE_MESH', raising=False)
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
+        monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', raising=False)
         assert 'user/hwata' in _publication_scopes()
 
     def test_team_scope_when_team_id_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('MESH_MEM_TEAM_ID', 'kioku-mesh')
-        monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_MESSAGING_PRESENCE_MESH', raising=False)
+        monkeypatch.setenv('KIOKU_MESH_TEAM_ID', 'kioku-mesh')
+        monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', raising=False)
         assert 'team/kioku-mesh' in _publication_scopes()
 
     def test_mesh_scope_requires_opt_in(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
-        monkeypatch.setenv('MESH_MEM_MESSAGING_PRESENCE_MESH', '1')
+        monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
+        monkeypatch.setenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', '1')
         assert 'mesh' in _publication_scopes()
 
     def test_mesh_scope_off_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_MESSAGING_PRESENCE_MESH', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', raising=False)
         assert 'mesh' not in _publication_scopes()
 
     def test_user_scope_not_visible_in_team_scope(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('MESH_MEM_USER_ID', 'alice')
-        monkeypatch.setenv('MESH_MEM_TEAM_ID', 'acme')
-        monkeypatch.delenv('MESH_MEM_MESSAGING_PRESENCE_MESH', raising=False)
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', 'alice')
+        monkeypatch.setenv('KIOKU_MESH_TEAM_ID', 'acme')
+        monkeypatch.delenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', raising=False)
         scopes = _publication_scopes()
         assert 'user/alice' in scopes
         assert 'team/acme' in scopes
@@ -217,7 +217,7 @@ class TestParsePresence:
 class TestPresenceManagerHeartbeat:
     def test_start_heartbeat_publishes_to_zenoh(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """start_heartbeat publishes at least one presence entry within 2 seconds."""
-        monkeypatch.setenv('MESH_MEM_USER_ID', 'testuser')
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', 'testuser')
         mock_session = MagicMock()
         published_keys: list[str] = []
 
@@ -226,7 +226,7 @@ class TestPresenceManagerHeartbeat:
 
         mock_session.put.side_effect = _capture_put
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             mgr.start_heartbeat()
             time.sleep(0.3)
@@ -235,9 +235,9 @@ class TestPresenceManagerHeartbeat:
         assert any('presence' in k for k in published_keys), f'no presence key published; got {published_keys}'
 
     def test_stop_terminates_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
-        monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=MagicMock()):
+        monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
+        monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=MagicMock()):
             mgr = PresenceManager()
             mgr.start_heartbeat()
             assert mgr._thread is not None and mgr._thread.is_alive()
@@ -246,8 +246,8 @@ class TestPresenceManagerHeartbeat:
 
     def test_start_heartbeat_idempotent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Calling start_heartbeat twice does not start a second thread."""
-        monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=MagicMock()):
+        monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=MagicMock()):
             mgr = PresenceManager()
             mgr.start_heartbeat()
             thread1 = mgr._thread
@@ -256,13 +256,13 @@ class TestPresenceManagerHeartbeat:
             mgr.stop()
 
     def test_publish_once_puts_per_scope(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('MESH_MEM_USER_ID', 'u1')
-        monkeypatch.setenv('MESH_MEM_TEAM_ID', 't1')
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', 'u1')
+        monkeypatch.setenv('KIOKU_MESH_TEAM_ID', 't1')
         mock_session = MagicMock()
         put_calls: list[str] = []
         mock_session.put.side_effect = lambda k, _: put_calls.append(k)
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             mgr._publish_once()
 
@@ -298,7 +298,7 @@ class TestListActivePeers:
         mock_session = MagicMock()
         mock_session.get.return_value = [self._make_reply(self._active_peer_data())]
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             peers = mgr.list_active_peers('team/kioku-mesh')
 
@@ -311,7 +311,7 @@ class TestListActivePeers:
         mock_session = MagicMock()
         mock_session.get.return_value = []
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             mgr.list_active_peers('user/hwata')
 
@@ -329,7 +329,7 @@ class TestListActivePeers:
         mock_session = MagicMock()
         mock_session.get.return_value = [self._make_reply(expired_data)]
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             peers = mgr.list_active_peers('mesh')
 
@@ -339,7 +339,7 @@ class TestListActivePeers:
         mock_session = MagicMock()
         mock_session.get.side_effect = RuntimeError('zenoh down')
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             peers = mgr.list_active_peers('mesh')
 
@@ -355,16 +355,16 @@ class TestPresencePayloadScopes:
     def test_to_dict_includes_scopes_field(self) -> None:
         p = Presence(agent_id='a', session_id='s', host='h', last_seen=_now())
         with (
-            patch('mesh_mem.messaging.presence.get_agent_family', return_value='claude'),
-            patch('mesh_mem.messaging.presence.get_client_id', return_value='a'),
+            patch('kioku_mesh.messaging.presence.get_agent_family', return_value='claude'),
+            patch('kioku_mesh.messaging.presence.get_client_id', return_value='a'),
         ):
             d = p.to_dict()
         assert 'scopes' in d
         assert isinstance(d['scopes'], list)
 
     def test_scopes_field_reflects_assigned_scopes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
-        monkeypatch.setenv('MESH_MEM_TEAM_ID', 'kioku')
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
+        monkeypatch.setenv('KIOKU_MESH_TEAM_ID', 'kioku')
         put_calls: list[dict] = []
 
         mock_session = MagicMock()
@@ -374,7 +374,7 @@ class TestPresencePayloadScopes:
 
         mock_session.put.side_effect = _capture
 
-        with patch('mesh_mem.messaging.presence._get_zenoh_session', return_value=mock_session):
+        with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             mgr._publish_once()
 

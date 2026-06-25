@@ -7,14 +7,14 @@ from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 
-from mesh_mem.messaging.local_index import ack_message
-from mesh_mem.messaging.local_index import LocalMessageIndex
-from mesh_mem.messaging.models import Ack
-from mesh_mem.messaging.models import is_expired
-from mesh_mem.messaging.models import Message
-from mesh_mem.messaging.spool import check_inbox
-from mesh_mem.messaging.spool import MessageSpool
-from mesh_mem.messaging.spool import send_message
+from kioku_mesh.messaging.local_index import ack_message
+from kioku_mesh.messaging.local_index import LocalMessageIndex
+from kioku_mesh.messaging.models import Ack
+from kioku_mesh.messaging.models import is_expired
+from kioku_mesh.messaging.models import Message
+from kioku_mesh.messaging.spool import check_inbox
+from kioku_mesh.messaging.spool import MessageSpool
+from kioku_mesh.messaging.spool import send_message
 
 # ---------------------------------------------------------------------------
 # Helpers

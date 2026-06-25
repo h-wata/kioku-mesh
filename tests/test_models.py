@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from mesh_mem.models import Observation
-from mesh_mem.models import Tombstone
-from mesh_mem.models import VALID_MEMORY_TYPES
-import mesh_mem.models as models_module
+from kioku_mesh.models import Observation
+from kioku_mesh.models import Tombstone
+from kioku_mesh.models import VALID_MEMORY_TYPES
+import kioku_mesh.models as models_module
 
 
 def test_observation_key_expr_contains_all_identity_fragments() -> None:

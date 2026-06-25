@@ -18,10 +18,10 @@ from typing import Any
 
 import pytest
 
-from mesh_mem import config
-from mesh_mem import store
-from mesh_mem.models import Observation
-from mesh_mem.models import Tombstone
+from kioku_mesh import config
+from kioku_mesh import store
+from kioku_mesh.models import Observation
+from kioku_mesh.models import Tombstone
 
 _SETTLE = 0.4
 
@@ -32,39 +32,39 @@ _SETTLE = 0.4
 
 
 def test_resolve_defaults_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('MESH_MEM_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
     monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
     assert config.resolve_write_visibility('') == ('', '')
 
 
 def test_resolve_explicit_wins_over_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv('MESH_MEM_DEFAULT_VISIBILITY', 'mesh')
-    monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
+    monkeypatch.setenv('KIOKU_MESH_DEFAULT_VISIBILITY', 'mesh')
+    monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
     assert config.resolve_write_visibility('user') == ('user', 'hwata')
 
 
 def test_resolve_default_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv('MESH_MEM_DEFAULT_VISIBILITY', 'user')
-    monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
+    monkeypatch.setenv('KIOKU_MESH_DEFAULT_VISIBILITY', 'user')
+    monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
     assert config.resolve_write_visibility('') == ('user', 'hwata')
 
 
 def test_resolve_mesh_needs_no_scope(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
     assert config.resolve_write_visibility('mesh') == ('mesh', '')
 
 
 def test_resolve_user_without_id_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
     monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
-    with pytest.raises(ValueError, match='MESH_MEM_USER_ID'):
+    with pytest.raises(ValueError, match='KIOKU_MESH_USER_ID'):
         config.resolve_write_visibility('user')
 
 
 def test_resolve_team_without_id_is_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
     monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
-    with pytest.raises(ValueError, match='MESH_MEM_TEAM_ID'):
+    with pytest.raises(ValueError, match='KIOKU_MESH_TEAM_ID'):
         config.resolve_write_visibility('team')
 
 
@@ -123,9 +123,9 @@ def _isolate_visibility_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     ``monkeypatch.chdir`` keeps the upward ``.kioku-mesh.yaml`` search from
     escaping into the real filesystem above the test run.
     """
-    monkeypatch.delenv('MESH_MEM_DEFAULT_VISIBILITY', raising=False)
-    monkeypatch.delenv('MESH_MEM_TEAM_ID', raising=False)
-    monkeypatch.delenv('MESH_MEM_USER_ID', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
     xdg = tmp_path / 'xdg'
     (xdg / 'kioku-mesh').mkdir(parents=True)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(xdg))
@@ -169,8 +169,8 @@ def test_no_project_config_falls_back_to_global(monkeypatch: pytest.MonkeyPatch,
 def test_env_beats_project_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _isolate_visibility_config(monkeypatch, tmp_path)
     (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: proj-team\n')
-    monkeypatch.setenv('MESH_MEM_DEFAULT_VISIBILITY', 'mesh')
-    monkeypatch.setenv('MESH_MEM_TEAM_ID', 'env-team')
+    monkeypatch.setenv('KIOKU_MESH_DEFAULT_VISIBILITY', 'mesh')
+    monkeypatch.setenv('KIOKU_MESH_TEAM_ID', 'env-team')
     assert config.get_default_visibility() == 'mesh'
     assert config.get_team_id() == 'env-team'
 
@@ -189,7 +189,7 @@ def test_project_config_cannot_set_user_id(monkeypatch: pytest.MonkeyPatch, tmp_
     (tmp_path / '.kioku-mesh.yaml').write_text('user_id: mallory\ndefault_visibility: user\n')
     assert config.get_user_id() == ''
     # And the resolution fails actionably instead of writing as 'mallory'.
-    with pytest.raises(ValueError, match='MESH_MEM_USER_ID'):
+    with pytest.raises(ValueError, match='KIOKU_MESH_USER_ID'):
         config.resolve_write_visibility('')
 
 
@@ -212,12 +212,12 @@ def test_save_responses_show_effective_visibility(
     capsys: pytest.CaptureFixture,
 ) -> None:
     """CLI and MCP save responses echo the effective scope (ADR-0019 trust note)."""
-    from mesh_mem import mcp_server
-    from mesh_mem.__main__ import main as cli_main
-    from mesh_mem.backend import reset_backend
+    from kioku_mesh import mcp_server
+    from kioku_mesh.__main__ import main as cli_main
+    from kioku_mesh.backend import reset_backend
 
     _isolate_visibility_config(monkeypatch, tmp_path)
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
     msg = mcp_server.save_observation(content='legacy save', project='vis-resp')
@@ -226,7 +226,7 @@ def test_save_responses_show_effective_visibility(
     msg = mcp_server.save_observation(content='mesh save', project='vis-resp', visibility='mesh')
     assert '(visibility=mesh)' in msg
 
-    monkeypatch.setenv('MESH_MEM_USER_ID', 'hwata')
+    monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
     msg = mcp_server.save_observation(content='user save', project='vis-resp', visibility='user')
     assert '(visibility=user/hwata)' in msg
 
@@ -330,7 +330,7 @@ def test_resolve_rejects_malformed_scope_slug(monkeypatch: pytest.MonkeyPatch) -
     the MCP/CLI error handling around resolve_write_visibility.
     """
     for bad in ('a/b', 'a*', 'a$b', 'a b', '..', '-lead', 'x' * 65):
-        monkeypatch.setenv('MESH_MEM_USER_ID', bad)
+        monkeypatch.setenv('KIOKU_MESH_USER_ID', bad)
         with pytest.raises(ValueError, match='scope_id'):
             config.resolve_write_visibility('user')
 

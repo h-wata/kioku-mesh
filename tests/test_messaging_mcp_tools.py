@@ -22,9 +22,9 @@ pytest.importorskip('fastmcp')
 
 from fastmcp import Client  # noqa: E402
 
-from mesh_mem.mcp_server import mcp  # noqa: E402
-import mesh_mem.mcp_server as mcp_module  # noqa: E402
-from mesh_mem.messaging.models import Message  # noqa: E402
+from kioku_mesh.mcp_server import mcp  # noqa: E402
+import kioku_mesh.mcp_server as mcp_module  # noqa: E402
+from kioku_mesh.messaging.models import Message  # noqa: E402
 
 
 def _run(coro: Any) -> Any:
@@ -80,7 +80,7 @@ class TestToolSignatures:
         """check_messages must not expose user_id/team_id/session_id/pc_id."""
         import inspect
 
-        from mesh_mem.mcp_server import check_messages
+        from kioku_mesh.mcp_server import check_messages
 
         sig = inspect.signature(check_messages)
         forbidden = {'user_id', 'team_id', 'session_id', 'pc_id'}
@@ -90,7 +90,7 @@ class TestToolSignatures:
     def test_ack_message_not_in_forbidden_args(self) -> None:
         import inspect
 
-        from mesh_mem.mcp_server import ack_message
+        from kioku_mesh.mcp_server import ack_message
 
         sig = inspect.signature(ack_message)
         forbidden = {'user_id', 'team_id', 'session_id', 'pc_id', 'recipient_session_id'}
@@ -120,9 +120,9 @@ class TestCheckMessages:
         mock_session.get.return_value = [_make_reply(msg)]
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='fixed-sess'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='fixed-sess'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call()
 
@@ -138,9 +138,9 @@ class TestCheckMessages:
         mock_session.get.return_value = [_make_reply(msg)]
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='test-sess'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='test-sess'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call()
 
@@ -156,9 +156,9 @@ class TestCheckMessages:
         mock_session.get.return_value = [_make_reply(m) for m in msgs]
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='s'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='s'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call(limit=2)
 
@@ -175,9 +175,9 @@ class TestCheckMessages:
         mock_session.get.return_value = [_make_reply(expired_msg)]
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='s'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='s'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call()
 
@@ -193,9 +193,9 @@ class TestCheckMessages:
         mock_session.get.return_value = [_make_reply(expired_msg)]
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='s'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='s'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call(include_expired=True)
 
@@ -204,8 +204,8 @@ class TestCheckMessages:
     def test_zenoh_unavailable_returns_error_json(self, tmp_path: Path) -> None:
         _reset_index(tmp_path)
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', side_effect=RuntimeError('no zenoh')),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', side_effect=RuntimeError('no zenoh')),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call()
 
@@ -215,7 +215,7 @@ class TestCheckMessages:
         """check_messages must return a JSON error for unknown visibility values."""
         _reset_index(tmp_path)
         for bad_vis in ('teem', 'all', 'private', 'MESH', 'User'):
-            with patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path):
+            with patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path):
                 result = self._call(visibility=bad_vis)
             assert 'error' in result, f'Expected error key for visibility={bad_vis!r}, got {result!r}'
             assert (
@@ -249,7 +249,7 @@ class TestAckMessage:
 
     def test_invalid_msg_id_returns_error(self, tmp_path: Path) -> None:
         _reset_index(tmp_path)
-        with patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path):
+        with patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path):
             result = self._call(msg_id='short')
         assert 'msg_id' in result.lower() or '32' in result
 
@@ -259,7 +259,7 @@ class TestAckMessage:
         msg = _make_msg(session_id='server-sess-id')
 
         # Pre-register the message in the index using the server session id
-        from mesh_mem.messaging.local_index import LocalMessageIndex
+        from kioku_mesh.messaging.local_index import LocalMessageIndex
 
         db_path = tmp_path / 'messaging' / 'inbox.db'
         idx = LocalMessageIndex(db_path)
@@ -268,9 +268,9 @@ class TestAckMessage:
         mock_zenoh = MagicMock()
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_zenoh),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='server-sess-id'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_zenoh),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='server-sess-id'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call(msg_id=msg.msg_id)
 
@@ -281,7 +281,7 @@ class TestAckMessage:
         _reset_index(tmp_path)
         msg = _make_msg(session_id='sess-pub', scope='mesh')
 
-        from mesh_mem.messaging.local_index import LocalMessageIndex
+        from kioku_mesh.messaging.local_index import LocalMessageIndex
 
         db_path = tmp_path / 'messaging' / 'inbox.db'
         idx = LocalMessageIndex(db_path)
@@ -290,9 +290,9 @@ class TestAckMessage:
         mock_zenoh = MagicMock()
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_zenoh),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='sess-pub'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_zenoh),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='sess-pub'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             self._call(msg_id=msg.msg_id)
 
@@ -305,9 +305,9 @@ class TestAckMessage:
         unknown_id = 'f' * 32
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=MagicMock()),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='sess-x'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=MagicMock()),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='sess-x'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             result = self._call(msg_id=unknown_id)
 
@@ -318,7 +318,7 @@ class TestAckMessage:
         _reset_index(tmp_path)
         msg = _make_msg(session_id='sess-ack-check', scope='mesh')
 
-        from mesh_mem.messaging.local_index import LocalMessageIndex
+        from kioku_mesh.messaging.local_index import LocalMessageIndex
 
         db_path = tmp_path / 'messaging' / 'inbox.db'
         idx = LocalMessageIndex(db_path)
@@ -327,9 +327,9 @@ class TestAckMessage:
         mock_zenoh = MagicMock()
 
         with (
-            patch('mesh_mem.mcp_server._get_zenoh_session', return_value=mock_zenoh),
-            patch('mesh_mem.mcp_server.get_session_id', return_value='sess-ack-check'),
-            patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path),
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_zenoh),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='sess-ack-check'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
         ):
             self._call(msg_id=msg.msg_id)
 
@@ -342,7 +342,7 @@ class TestAckMessage:
         _reset_index(tmp_path)
         unknown_msg_id = 'a' * 32
         for bad_vis in ('teem', 'all', 'private', 'MESH', 'User'):
-            with patch('mesh_mem.mcp_server.state_dir', return_value=tmp_path):
+            with patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path):
                 result = self._call(msg_id=unknown_msg_id, visibility=bad_vis)
             assert (
                 'ack failed' in result or 'unknown' in result.lower()

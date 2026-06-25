@@ -23,11 +23,11 @@ from typing import Any
 
 import pytest
 
-from mesh_mem import pending_queue
-from mesh_mem import store
-from mesh_mem import transport
-from mesh_mem.models import Observation
-from mesh_mem.store import QueryErrorReply
+from kioku_mesh import pending_queue
+from kioku_mesh import store
+from kioku_mesh import transport
+from kioku_mesh.models import Observation
+from kioku_mesh.store import QueryErrorReply
 
 
 def _ok_reply(obs: Observation) -> SimpleNamespace:
@@ -73,7 +73,7 @@ def _install_fake_session(monkeypatch: pytest.MonkeyPatch, session: _FakeSession
     back to the legacy zenoh path being exercised by these tests, and resets
     the cached LocalIndex so the env var takes effect on the next call.
     """
-    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    monkeypatch.setenv('KIOKU_MESH_DISABLE_INDEX', '1')
     store._reset_index()
     monkeypatch.setattr(transport, '_open_session', lambda: session)
     store._reset_session()

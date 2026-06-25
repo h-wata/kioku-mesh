@@ -35,20 +35,20 @@ import time
 
 import pytest
 
-from mesh_mem import identity
-from mesh_mem import store
-from mesh_mem.backend import reset_backend
+from kioku_mesh import identity
+from kioku_mesh import store
+from kioku_mesh.backend import reset_backend
 
 
 @pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Redirect MESH_MEM_STATE_DIR per test and reset identity / store / index caches."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_STATE_DIR', str(tmp_path))
     # MESH_MEM_INDEX_DB normally resolves under state_dir(), but if the env var
     # points elsewhere the test would write into the real state_dir — clear it.
-    monkeypatch.delenv('MESH_MEM_INDEX_DB', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_INDEX_DB', raising=False)
     # Clear MESH_MEM_BACKEND so tests that don't set it use the default (zenoh).
-    monkeypatch.delenv('MESH_MEM_BACKEND', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_BACKEND', raising=False)
     identity.reset_caches()
     # store._session / _index may carry stale state from previous tests — clear explicitly.
     store._reset_session()

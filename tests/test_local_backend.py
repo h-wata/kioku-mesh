@@ -16,11 +16,11 @@ import shutil
 
 import pytest
 
-from mesh_mem.backend import get_backend
-from mesh_mem.backend import LocalBackend
-from mesh_mem.backend import reset_backend
-from mesh_mem.config import get_backend_mode
-from mesh_mem.models import Observation
+from kioku_mesh.backend import get_backend
+from kioku_mesh.backend import LocalBackend
+from kioku_mesh.backend import reset_backend
+from kioku_mesh.config import get_backend_mode
+from kioku_mesh.models import Observation
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,7 +37,7 @@ def _mk_obs(content: str, *, project: str = 'test') -> Observation:
 
 
 def test_get_backend_mode_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     assert get_backend_mode() == 'local'
 
 
@@ -46,18 +46,18 @@ def test_get_backend_mode_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     config_dir = tmp_path / 'xdg' / 'kioku-mesh'
     config_dir.mkdir(parents=True)
     (config_dir / 'config.yaml').write_text('backend: local\n')
-    monkeypatch.delenv('MESH_MEM_BACKEND', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_BACKEND', raising=False)
     assert get_backend_mode() == 'local'
 
 
 def test_get_backend_mode_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('MESH_MEM_BACKEND', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_BACKEND', raising=False)
     monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent_config_dir_xyz')
     assert get_backend_mode() == 'zenoh'
 
 
 def test_get_backend_returns_local_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
     backend = get_backend()
     assert isinstance(backend, LocalBackend)
@@ -71,7 +71,7 @@ def test_get_backend_returns_local_when_env_set(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.fixture
 def local_backend(monkeypatch: pytest.MonkeyPatch) -> LocalBackend:
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
     b = get_backend()
     assert isinstance(b, LocalBackend)
@@ -158,7 +158,7 @@ def test_local_search_project_filter(local_backend: LocalBackend) -> None:
 
 def test_cli_init_local_writes_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     rc = cli_main(['init', '--mode', 'local'])
     assert rc == 0
@@ -173,7 +173,7 @@ def test_cli_init_local_prints_mesh_upgrade_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     rc = cli_main(['init', '--mode', 'local'])
     assert rc == 0
@@ -186,7 +186,7 @@ def test_cli_init_local_to_stdout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     rc = cli_main(['init', '--mode', 'local', '--print'])
     assert rc == 0
@@ -196,7 +196,7 @@ def test_cli_init_local_to_stdout(
 
 def test_cli_init_local_force_overwrite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     cli_main(['init', '--mode', 'local'])
     rc = cli_main(['init', '--mode', 'local', '--force'])
@@ -205,7 +205,7 @@ def test_cli_init_local_force_overwrite(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_cli_init_local_refuses_if_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     cli_main(['init', '--mode', 'local'])
     rc = cli_main(['init', '--mode', 'local'])
@@ -219,9 +219,9 @@ def test_cli_init_local_refuses_if_exists(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_cli_save_search_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     rc = cli_main(['save', 'hello from local cli', '-p', 'cliproj'])
     assert rc == 0
@@ -234,7 +234,7 @@ def test_cli_save_search_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
 
 def test_cli_save_local_no_zenohd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify local mode works even when zenohd is not on PATH."""
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
     # Shadow PATH to hide zenohd (if present)
@@ -243,7 +243,7 @@ def test_cli_save_local_no_zenohd(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv('PATH', ':'.join(path_entries))
     assert shutil.which('zenohd') is None or True  # may still be present elsewhere; that's ok
 
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     rc = cli_main(['save', 'no zenohd test'])
     assert rc == 0
@@ -265,9 +265,9 @@ def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: 
     physically separate from the zenoh cache index (state_dir()/index.db).
     The rebuild never touches the local DB, so rows persist across the switch.
     """
-    from mesh_mem.local_index import LocalIndex
+    from kioku_mesh.local_index import LocalIndex
 
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
     # Step 1: save via local backend.
@@ -277,7 +277,7 @@ def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: 
     local_b.put_observation(obs)
 
     # Confirm the local index path is under state_dir()/local/.
-    from mesh_mem.identity import state_dir
+    from kioku_mesh.identity import state_dir
 
     expected_local_db = state_dir() / 'local' / 'index.db'
     assert expected_local_db.exists(), 'LocalBackend must write to state_dir()/local/index.db'
@@ -304,7 +304,7 @@ def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: 
 
     # Step 3: switch back to local backend and confirm the row is still visible.
     reset_backend()
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
     results = get_backend().search_observations(query='B2 regression', project='b2test')
     assert any(
@@ -334,7 +334,7 @@ def contract_backend(
 ) -> object:
     """Parametrized fixture that yields a LocalBackend or ZenohBackend."""
     mode = request.param
-    monkeypatch.setenv('MESH_MEM_BACKEND', mode)
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', mode)
     reset_backend()
     if mode == 'zenoh':
         # Ensure a live zenohd router is running for the session.
@@ -344,7 +344,7 @@ def contract_backend(
 
 def _settle(backend: object) -> None:
     """Brief sleep after a Zenoh put — storage ingestion is asynchronous."""
-    from mesh_mem.backend import ZenohBackend
+    from kioku_mesh.backend import ZenohBackend
 
     if isinstance(backend, ZenohBackend):
         import time
@@ -380,7 +380,7 @@ def test_contract_delete_tombstone(contract_backend: object) -> None:
 
 
 def test_contract_status_mode(contract_backend: object) -> None:
-    from mesh_mem.backend import BackendStatus
+    from kioku_mesh.backend import BackendStatus
 
     status = contract_backend.get_status()  # type: ignore[union-attr]
     assert isinstance(status, BackendStatus)

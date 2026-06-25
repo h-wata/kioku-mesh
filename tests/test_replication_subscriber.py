@@ -14,10 +14,10 @@ from typing import Any
 import pytest
 import zenoh
 
-from mesh_mem import replication
-from mesh_mem import store
-from mesh_mem.models import Observation
-from mesh_mem.models import Tombstone
+from kioku_mesh import replication
+from kioku_mesh import store
+from kioku_mesh.models import Observation
+from kioku_mesh.models import Tombstone
 
 _SETTLE = 0.4  # seconds to wait for async subscriber delivery
 
@@ -240,7 +240,7 @@ def test_subscriber_ignores_delete_with_invalid_obs_id(
 
 def test_obs_id_from_key_extracts_only_32_hex() -> None:
     """Unit test for the conservative obs_id extractor used by DELETE handlers."""
-    from mesh_mem.store import _obs_id_from_key
+    from kioku_mesh.store import _obs_id_from_key
 
     valid = 'a' * 32
     # Canonical 7-segment shape under each accepted prefix.
@@ -356,9 +356,9 @@ def test_startup_rebuild_skipped_when_env_set(
     monkeypatch: pytest.MonkeyPatch,
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
-    """MESH_MEM_SKIP_REBUILD=1 prevents rebuild_from_zenoh from running on init."""
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    """KIOKU_MESH_SKIP_REBUILD=1 prevents rebuild_from_zenoh from running on init."""
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
     orig = LocalIndex.rebuild_from_zenoh
@@ -368,12 +368,12 @@ def test_startup_rebuild_skipped_when_env_set(
         return orig(self, session)
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.setenv('MESH_MEM_SKIP_REBUILD', '1')
+    monkeypatch.setenv('KIOKU_MESH_SKIP_REBUILD', '1')
 
     store._reset_index()  # force re-init on next get_index() call
     store.get_index()  # triggers startup logic; session is available via single_zenohd
 
-    assert not rebuild_calls, 'rebuild_from_zenoh must not be called when MESH_MEM_SKIP_REBUILD=1'
+    assert not rebuild_calls, 'rebuild_from_zenoh must not be called when KIOKU_MESH_SKIP_REBUILD=1'
 
 
 # ---------------------------------------------------------------------------
@@ -391,8 +391,8 @@ def test_set_rebuild_on_init_default_false_skips_rebuild(
     flips the module default before the first ``get_index`` so a one-shot
     invocation does not pay the ~15s rebuild on a populated mesh (#38).
     """
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -402,8 +402,8 @@ def test_set_rebuild_on_init_default_false_skips_rebuild(
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
     # Ensure neither env var is set so the module default is the only signal.
-    monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
-    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
     # Seed a row directly (bypassing get_index's rebuild path) so the index is
     # NON-empty: the empty-index auto-rebuild override only backfills a fresh
@@ -424,8 +424,8 @@ def test_empty_index_rebuilds_despite_default_false(
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
     """Empty index backfills via rebuild even when the default policy is False (spoke-onboarding self-heal)."""
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
     orig = LocalIndex.rebuild_from_zenoh
@@ -435,8 +435,8 @@ def test_empty_index_rebuilds_despite_default_false(
         return orig(self, session)
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
-    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
     store._reset_index()
     store.set_rebuild_on_init_default(False)
@@ -449,13 +449,13 @@ def test_force_rebuild_env_overrides_module_default(
     monkeypatch: pytest.MonkeyPatch,
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
-    """MESH_MEM_FORCE_REBUILD=1 wins over set_rebuild_on_init_default(False).
+    """KIOKU_MESH_FORCE_REBUILD=1 wins over set_rebuild_on_init_default(False).
 
     Models the ``--rebuild`` (or env-level opt-in) escape hatch on top of
     the CLI's default-False policy.
     """
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -464,27 +464,27 @@ def test_force_rebuild_env_overrides_module_default(
         return RebuildStats()
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
-    monkeypatch.setenv('MESH_MEM_FORCE_REBUILD', '1')
+    monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
+    monkeypatch.setenv('KIOKU_MESH_FORCE_REBUILD', '1')
 
     store._reset_index()
     store.set_rebuild_on_init_default(False)  # CLI default
     store.get_index()
 
-    assert rebuild_calls, 'MESH_MEM_FORCE_REBUILD=1 must force rebuild even when default is False'
+    assert rebuild_calls, 'KIOKU_MESH_FORCE_REBUILD=1 must force rebuild even when default is False'
 
 
 def test_skip_rebuild_env_overrides_force_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
-    """MESH_MEM_FORCE_REBUILD=1 wins over MESH_MEM_SKIP_REBUILD=1 when both set.
+    """KIOKU_MESH_FORCE_REBUILD=1 wins over KIOKU_MESH_SKIP_REBUILD=1 when both set.
 
     Pin the precedence (FORCE > SKIP) so future readers do not have to
     reverse-engineer the resolution order from the implementation.
     """
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -493,8 +493,8 @@ def test_skip_rebuild_env_overrides_force_rebuild(
         return RebuildStats()
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.setenv('MESH_MEM_SKIP_REBUILD', '1')
-    monkeypatch.setenv('MESH_MEM_FORCE_REBUILD', '1')
+    monkeypatch.setenv('KIOKU_MESH_SKIP_REBUILD', '1')
+    monkeypatch.setenv('KIOKU_MESH_FORCE_REBUILD', '1')
 
     store._reset_index()
     store.get_index()
@@ -520,9 +520,9 @@ def test_cli_main_sets_rebuild_default_false(
     tmp_path: Any,  # noqa: ARG001
 ) -> None:
     """Invoking ``mesh-mem save ...`` without ``--rebuild`` skips rebuild_from_zenoh."""
-    from mesh_mem.__main__ import main as cli_main
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.__main__ import main as cli_main
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -531,8 +531,8 @@ def test_cli_main_sets_rebuild_default_false(
         return RebuildStats()
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
-    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
     # Seed a row so the index is non-empty: the CLI default-skip (#38) applies
     # to a populated index. (An empty index would intentionally rebuild once to
@@ -551,9 +551,9 @@ def test_cli_main_with_rebuild_flag_runs_rebuild(
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
     """``mesh-mem --rebuild save ...`` opts back into the startup rebuild scan."""
-    from mesh_mem.__main__ import main as cli_main
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.__main__ import main as cli_main
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -562,8 +562,8 @@ def test_cli_main_with_rebuild_flag_runs_rebuild(
         return RebuildStats()
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.delenv('MESH_MEM_SKIP_REBUILD', raising=False)
-    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
     rc = cli_main(['--rebuild', 'save', 'cli-rebuild-on-test', '-p', 'rebuild-policy'])
     assert rc == 0
@@ -574,16 +574,16 @@ def test_cli_rebuild_flag_overrides_skip_env(
     monkeypatch: pytest.MonkeyPatch,
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
-    """``mesh-mem --rebuild`` must win over ambient ``MESH_MEM_SKIP_REBUILD=1``.
+    """``mesh-mem --rebuild`` must win over ambient ``KIOKU_MESH_SKIP_REBUILD=1``.
 
     Codex review P2: a shell profile or wrapper script that exports
-    ``MESH_MEM_SKIP_REBUILD=1`` previously blocked ``--rebuild`` because
+    ``KIOKU_MESH_SKIP_REBUILD=1`` previously blocked ``--rebuild`` because
     the env var won the policy resolution. Direct user intent on this
     invocation (the typed flag) must outrank ambient env config.
     """
-    from mesh_mem.__main__ import main as cli_main
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.__main__ import main as cli_main
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -592,26 +592,26 @@ def test_cli_rebuild_flag_overrides_skip_env(
         return RebuildStats()
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.setenv('MESH_MEM_SKIP_REBUILD', '1')
-    monkeypatch.delenv('MESH_MEM_FORCE_REBUILD', raising=False)
+    monkeypatch.setenv('KIOKU_MESH_SKIP_REBUILD', '1')
+    monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
     rc = cli_main(['--rebuild', 'save', 'cli-rebuild-vs-skip', '-p', 'rebuild-policy'])
     assert rc == 0
-    assert rebuild_calls, '--rebuild must outrank MESH_MEM_SKIP_REBUILD=1 (codex P2)'
+    assert rebuild_calls, '--rebuild must outrank KIOKU_MESH_SKIP_REBUILD=1 (codex P2)'
 
 
 def test_explicit_override_outranks_force_env(
     monkeypatch: pytest.MonkeyPatch,
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
-    """An explicit ``set_rebuild_on_init_explicit(False)`` outranks ``MESH_MEM_FORCE_REBUILD=1``.
+    """An explicit ``set_rebuild_on_init_explicit(False)`` outranks ``KIOKU_MESH_FORCE_REBUILD=1``.
 
     Pin the highest-priority slot in the policy resolver: when a caller
     deliberately sets the explicit override, env vars must not flip it
     back. Symmetric to the ``--rebuild`` vs SKIP_REBUILD test above.
     """
-    from mesh_mem.local_index import LocalIndex
-    from mesh_mem.local_index import RebuildStats
+    from kioku_mesh.local_index import LocalIndex
+    from kioku_mesh.local_index import RebuildStats
 
     rebuild_calls: list[bool] = []
 
@@ -620,13 +620,13 @@ def test_explicit_override_outranks_force_env(
         return RebuildStats()
 
     monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
-    monkeypatch.setenv('MESH_MEM_FORCE_REBUILD', '1')
+    monkeypatch.setenv('KIOKU_MESH_FORCE_REBUILD', '1')
 
     store._reset_index()
     store.set_rebuild_on_init_explicit(False)
     store.get_index()
 
-    assert not rebuild_calls, 'explicit override(False) must beat MESH_MEM_FORCE_REBUILD=1'
+    assert not rebuild_calls, 'explicit override(False) must beat KIOKU_MESH_FORCE_REBUILD=1'
 
 
 def test_reset_index_clears_explicit_override() -> None:
