@@ -31,6 +31,8 @@ versions without a migration path until `1.0.0`.
 
 ### Fixed
 
+- search(): 複数語クエリを AND 検索に修正。スペース区切りの各語を個別に評価し、
+  3文字未満の語は LIKE フォールバックで補完 (Issue #210)
 - search_memory の語句検索が常に空を返すバグを修正。FTS5 テーブルを追加し、
   既存 index.db への冪等 rebuild を実装した。
 - bridge: `promote_hint` を strict bool (`is True`) 判定に変更、truthy 非 bool 値で昇格しない (R1) (#185)

@@ -1102,6 +1102,61 @@ def test_short_query_falls_back_to_like(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_multi_word_query_uses_and_semantics_for_non_contiguous_terms(tmp_path: Path) -> None:
+    """Space-separated query terms match even when they are not adjacent."""
+    idx = LocalIndex.connect(str(tmp_path / 'multi_word_and.db'))
+    try:
+        wanted = _mk_obs('branch cleanup notes describe a reusable パターン for rebases', project='and')
+        branch_only = _mk_obs('branch cleanup notes without the other term', project='and')
+        phrase_only = _mk_obs('a literal branch パターン phrase still works', project='and')
+        idx.upsert(wanted)
+        idx.upsert(branch_only)
+        idx.upsert(phrase_only)
+
+        results = idx.search(query='branch パターン', project='and', include_superseded=True)
+
+        ids = {r.observation_id for r in results}
+        assert wanted.observation_id in ids
+        assert phrase_only.observation_id in ids
+        assert branch_only.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_multi_word_query_mixes_fts_and_short_like_terms(tmp_path: Path) -> None:
+    """Terms shorter than trigram length are enforced with LIKE alongside FTS terms."""
+    idx = LocalIndex.connect(str(tmp_path / 'mixed_short_terms.db'))
+    try:
+        wanted = _mk_obs('db migration caused a tokenizer regression', project='mixed')
+        long_only = _mk_obs('migration without the short database abbreviation', project='mixed')
+        short_only = _mk_obs('db only mention', project='mixed')
+        idx.upsert(wanted)
+        idx.upsert(long_only)
+        idx.upsert(short_only)
+
+        results = idx.search(query='db migration', project='mixed', include_superseded=True)
+
+        assert [r.observation_id for r in results] == [wanted.observation_id]
+    finally:
+        idx.close()
+
+
+def test_multi_word_query_quotes_fts_special_characters(tmp_path: Path) -> None:
+    """FTS operators inside terms are treated as literal text."""
+    idx = LocalIndex.connect(str(tmp_path / 'special_chars.db'))
+    try:
+        wanted = _mk_obs('rebase| notation appears far away from the パターン label', project='special')
+        pattern_only = _mk_obs('this row has パターン but no operator token', project='special')
+        idx.upsert(wanted)
+        idx.upsert(pattern_only)
+
+        results = idx.search(query='rebase| パターン', project='special', include_superseded=True)
+
+        assert [r.observation_id for r in results] == [wanted.observation_id]
+    finally:
+        idx.close()
+
+
 def test_fts5_cap_like_fallback_when_fts5_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(c) When FTS5 is unavailable, capability falls back to LIKE.
 
