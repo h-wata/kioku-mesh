@@ -21,6 +21,7 @@
 import importlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import sys
 import warnings
 
@@ -83,6 +84,10 @@ class _MeshMemShimFinder(importlib.abc.MetaPathFinder):
         if not fullname.startswith('mesh_mem.'):
             return None
         new_name = 'kioku_mesh.' + fullname[len('mesh_mem.') :]
+        # Preflight: if kioku_mesh.<mapped> doesn't exist, return None so the
+        # normal import machinery raises ModuleNotFoundError (R3).
+        if importlib.util.find_spec(new_name) is None:
+            return None
         loader = _SubmoduleShimLoader(fullname, new_name)
         return importlib.machinery.ModuleSpec(fullname, loader)
 

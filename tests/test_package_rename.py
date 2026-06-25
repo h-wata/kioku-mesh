@@ -152,3 +152,11 @@ class TestMeshMemSubmoduleShim:
             from mesh_mem.core.models import Observation  # noqa: F401
 
         assert Observation is not None
+
+    def test_unknown_submodule_raises_module_not_found(self) -> None:
+        """R3 regression: non-existent mesh_mem.X raises ModuleNotFoundError."""
+        self._clear_mesh_mem_modules()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', DeprecationWarning)
+            with pytest.raises(ModuleNotFoundError):
+                importlib.import_module('mesh_mem.no_such_module')
