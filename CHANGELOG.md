@@ -12,6 +12,8 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- feat(search): ADR-0021 検索品質 — local index に FTS5 (trigram) 全文検索を追加。`query` 指定時は bm25 ランキング + `created_at DESC` tie-break。検索対象を content/subject/summary/tags/project の意味フィールドに限定し、identity フィールド (pc_id 等) への偶発一致を解消。3 文字未満クエリ・FTS5 非対応 SQLite (< 3.34) は従来の LIKE 経路へ自動フォールバック。Zenoh payload / key / replication は無変更 (#203)
+- feat(search): ADR-0021 supersedes-aware search — `superseded_by` 逆向きエッジを index 側に実体化し、デフォルト検索から superseded 行を existence-based で非表示。`search_memory` / `LocalIndex.search` に `include_superseded` 引数、`get_memory` 出力に `superseded_by` 前方リンクを追加 (#203)
 - feat(messaging): Phase 4 bridge 昇格 — MessageMemoryBridge で received message を save_observation に転送 (#185)
 - messaging Phase 3: tmux send-keys adapter (opt-in)。default off、exact pane/sender/scope allowlist、8 KiB size limit、retry+drop、注入 ≠ ack 契約 (#185)
 - messaging Phase 2: PresenceManager (30s heartbeat, 90s TTL, scope isolation) (#185)

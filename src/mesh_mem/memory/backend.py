@@ -55,6 +55,7 @@ class MemoryBackend(Protocol):
         until_iso: str = '',
         cursor_observation_id: str = '',
         limit: int = 50,
+        include_superseded: bool = False,
     ) -> list[Observation]: ...
     def find_observation_by_id(self, observation_id: str) -> Observation | None: ...
     def physical_delete_observation(self, observation_id: str) -> tuple[bool, bool]: ...
@@ -101,6 +102,7 @@ class LocalBackend:
         until_iso: str = '',
         cursor_observation_id: str = '',
         limit: int = 50,
+        include_superseded: bool = False,
     ) -> list[Observation]:
         return self._idx.search(
             project=project,
@@ -113,6 +115,7 @@ class LocalBackend:
             until_iso=until_iso,
             cursor_observation_id=cursor_observation_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None:

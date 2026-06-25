@@ -24,11 +24,22 @@ from mesh_mem.models import Observation
 from mesh_mem.models import Tombstone
 
 
-def _mk_obs(content: str, *, project: str = 'demo', tags: list[str] | None = None) -> Observation:
+def _mk_obs(
+    content: str,
+    *,
+    project: str = 'demo',
+    tags: list[str] | None = None,
+    supersedes: list[str] | None = None,
+    subject: str = '',
+    summary: str = '',
+) -> Observation:
     return Observation(
         content=content,
         project=project,
         tags=list(tags or []),
+        supersedes=list(supersedes or []),
+        subject=subject,
+        summary=summary,
         agent_family='claude',
         client_id='test',
         pc_id='testpc',
@@ -49,6 +60,12 @@ def test_local_index_creates_schema_on_first_open(tmp_path: Path) -> None:
             assert 'obs_index' in tables
             columns = {row[1] for row in raw.execute('PRAGMA table_info(obs_index)')}
             assert 'shadowed_at' in columns
+            assert 'superseded_by' in columns  # ADR-0021
+            fts_tables = {
+                row[0]
+                for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='obs_fts'")
+            }
+            assert 'obs_fts' in fts_tables, 'FTS5 table must exist on FTS-capable SQLite'
             indexes = {row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='index'")}
             assert 'idx_project_created' in indexes
             assert 'idx_created' in indexes
@@ -979,5 +996,373 @@ def test_periodic_wal_checkpoint_resets_counter(tmp_path: Path) -> None:
         # Counter resets to 0 at the checkpoint boundary, then increments
         # by the trailing upserts (5 here).
         assert idx._upserts_since_checkpoint == 5  # noqa: SLF001
+    finally:
+        idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0021 — FTS5 (trigram) full-text search + supersedes-aware filtering
+# ---------------------------------------------------------------------------
+
+
+def test_fts_capable_on_modern_sqlite(tmp_path: Path) -> None:
+    """The bundled CPython SQLite (≥3.34) supports FTS5 trigram; connect reports it."""
+    idx = LocalIndex.connect(str(tmp_path / 'fts_cap.db'))
+    try:
+        assert idx.fts_capable is True, 'CI SQLite is expected to support FTS5 trigram'
+    finally:
+        idx.close()
+
+
+def test_fts_search_excludes_identity_field_matches(tmp_path: Path) -> None:
+    """ADR-0021 headline win: FTS indexes semantic fields only, not identity hex.
+
+    The old LIKE path matched ``pc_id`` / ``session_id`` substrings inside
+    ``payload_json``. FTS restricts the index to content/subject/summary/
+    tags/project, so a query that only appears in an identity field returns
+    nothing — eliminating the known UUID false-positive source.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'fts_identity.db'))
+    if not idx.fts_capable:  # pragma: no cover
+        idx.close()
+        pytest.skip('FTS5 trigram not available in this SQLite build')
+    try:
+        # 'testpc' is the pc_id in _mk_obs; it must NOT leak into search.
+        idx.upsert(_mk_obs('completely unrelated body text', project='proj'))
+        hits = idx.search(query='testpc')
+        assert hits == [], 'identity-field substring must not match via FTS'
+    finally:
+        idx.close()
+
+
+def test_fts_search_multiword_and(tmp_path: Path) -> None:
+    """FTS trigram supports multi-word phrase matching that LIKE could only do as one substring."""
+    idx = LocalIndex.connect(str(tmp_path / 'fts_multiword.db'))
+    if not idx.fts_capable:  # pragma: no cover
+        idx.close()
+        pytest.skip('FTS5 trigram not available in this SQLite build')
+    try:
+        idx.upsert(_mk_obs('Replication digest mismatch', project='ops'))
+        idx.upsert(_mk_obs('zenoh hot era split brain', project='ops'))
+        hits = idx.search(query='hot era')
+        assert {r.content for r in hits} == {'zenoh hot era split brain'}
+    finally:
+        idx.close()
+
+
+def test_fts_search_ranks_by_relevance(tmp_path: Path) -> None:
+    """Queries route through bm25: the doc with the term in more fields ranks first.
+
+    A doc mentioning the query term in subject AND content should outrank a
+    doc that only mentions it once in a long unrelated body. We assert the
+    strong match is first rather than pinning exact scores (bm25 values are
+    implementation-defined).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'fts_rank.db'))
+    if not idx.fts_capable:  # pragma: no cover
+        idx.close()
+        pytest.skip('FTS5 trigram not available in this SQLite build')
+    try:
+        weak = _mk_obs(
+            'a long note about many things including a stray quorum mention near the end',
+            project='ops',
+        )
+        weak.created_at = '2020-01-01T00:00:00.000000Z'  # older, so created_at tiebreak would put it last anyway
+        strong = _mk_obs('quorum loss incident', project='ops', subject='quorum quorum quorum')
+        strong.created_at = '2019-01-01T00:00:00.000000Z'  # older than weak: only bm25 can float it up
+        idx.upsert(weak)
+        idx.upsert(strong)
+
+        hits = idx.search(query='quorum')
+        assert len(hits) == 2
+        assert hits[0].content == 'quorum loss incident', 'bm25 must rank the stronger match first'
+    finally:
+        idx.close()
+
+
+def test_short_query_falls_back_to_like(tmp_path: Path) -> None:
+    """Queries under 3 chars cannot use the trigram index and fall back to LIKE.
+
+    Under LIKE the match runs against the full payload, so even a 2-char
+    identity substring resolves — proving the fallback path is active rather
+    than the FTS path (which would return nothing for identity fields).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'short_q.db'))
+    try:
+        idx.upsert(_mk_obs('ab unique marker body', project='proj'))
+        # 2-char query against content substring works via LIKE.
+        hits = idx.search(query='ab')
+        assert {r.content for r in hits} == {'ab unique marker body'}
+    finally:
+        idx.close()
+
+
+def test_supersedes_hidden_by_default(tmp_path: Path) -> None:
+    """An observation superseded by a live newer one is hidden from default search."""
+    idx = LocalIndex.connect(str(tmp_path / 'supersede_hide.db'))
+    try:
+        old = _mk_obs('decision v1', project='dec')
+        idx.upsert(old)
+        new = _mk_obs('decision v2', project='dec', supersedes=[old.observation_id])
+        idx.upsert(new)
+
+        hits = idx.search(project='dec')
+        ids = {r.observation_id for r in hits}
+        assert new.observation_id in ids
+        assert old.observation_id not in ids, 'superseded entry must be hidden by default'
+    finally:
+        idx.close()
+
+
+def test_supersedes_visible_with_include_flag(tmp_path: Path) -> None:
+    """``include_superseded=True`` surfaces the older entry alongside the newer one."""
+    idx = LocalIndex.connect(str(tmp_path / 'supersede_show.db'))
+    try:
+        old = _mk_obs('decision v1', project='dec')
+        idx.upsert(old)
+        new = _mk_obs('decision v2', project='dec', supersedes=[old.observation_id])
+        idx.upsert(new)
+
+        hits = idx.search(project='dec', include_superseded=True)
+        ids = {r.observation_id for r in hits}
+        assert old.observation_id in ids
+        assert new.observation_id in ids
+    finally:
+        idx.close()
+
+
+def test_supersedes_existence_based_reappears_when_superseder_deleted(tmp_path: Path) -> None:
+    """Existence-based hiding: if the superseding obs is tombstoned, the old one returns.
+
+    ADR-0021 §B: hiding is keyed on the *existence* of a live superseder, not
+    a stored boolean, so deleting the newer version makes the older visible
+    again without rewriting the older row.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'supersede_reappear.db'))
+    try:
+        old = _mk_obs('decision v1', project='dec')
+        idx.upsert(old)
+        new = _mk_obs('decision v2', project='dec', supersedes=[old.observation_id])
+        idx.upsert(new)
+        assert {r.observation_id for r in idx.search(project='dec')} == {new.observation_id}
+
+        # Tombstone the superseder — the old decision should resurface.
+        idx.mark_deleted(new.observation_id, '2026-06-01T00:00:00.000000Z')
+        hits = idx.search(project='dec')
+        assert {r.observation_id for r in hits} == {old.observation_id}
+    finally:
+        idx.close()
+
+
+def test_supersedes_existence_based_reappears_when_superseder_shadowed(tmp_path: Path) -> None:
+    """A rebuild-shadowed superseder also un-hides the older entry."""
+    idx = LocalIndex.connect(str(tmp_path / 'supersede_shadow.db'))
+    try:
+        old = _mk_obs('decision v1', project='dec')
+        idx.upsert(old)
+        new = _mk_obs('decision v2', project='dec', supersedes=[old.observation_id])
+        idx.upsert(new)
+        idx.mark_shadowed_missing(new.observation_id, '2026-06-01T00:00:00.000000Z')
+
+        hits = idx.search(project='dec')
+        assert {r.observation_id for r in hits} == {old.observation_id}
+    finally:
+        idx.close()
+
+
+def test_supersedes_filter_applies_on_fts_path(tmp_path: Path) -> None:
+    """The supersedes filter must also apply when a ≥3-char query routes through FTS."""
+    idx = LocalIndex.connect(str(tmp_path / 'supersede_fts.db'))
+    if not idx.fts_capable:  # pragma: no cover
+        idx.close()
+        pytest.skip('FTS5 trigram not available in this SQLite build')
+    try:
+        old = _mk_obs('quorum strategy original', project='dec')
+        idx.upsert(old)
+        new = _mk_obs('quorum strategy revised', project='dec', supersedes=[old.observation_id])
+        idx.upsert(new)
+
+        hits = idx.search(query='quorum strategy')
+        ids = {r.observation_id for r in hits}
+        assert new.observation_id in ids
+        assert old.observation_id not in ids, 'FTS path must honor supersedes hiding'
+
+        hits_all = idx.search(query='quorum strategy', include_superseded=True)
+        assert {r.observation_id for r in hits_all} == {old.observation_id, new.observation_id}
+    finally:
+        idx.close()
+
+
+def test_find_superseded_by_returns_live_superseder(tmp_path: Path) -> None:
+    """``find_superseded_by`` returns the forward link for get_memory chain display."""
+    idx = LocalIndex.connect(str(tmp_path / 'find_super.db'))
+    try:
+        old = _mk_obs('v1', project='dec')
+        idx.upsert(old)
+        new = _mk_obs('v2', project='dec', supersedes=[old.observation_id])
+        idx.upsert(new)
+
+        assert idx.find_superseded_by(old.observation_id) == new.observation_id
+        # The newer one is not superseded by anything.
+        assert idx.find_superseded_by(new.observation_id) is None
+        # Unknown id → None, no error.
+        assert idx.find_superseded_by('00000000000000000000000000000000') is None
+    finally:
+        idx.close()
+
+
+def test_physical_delete_purges_fts_entry(tmp_path: Path) -> None:
+    """A hard delete must remove the obs_fts row so it stops matching searches."""
+    idx = LocalIndex.connect(str(tmp_path / 'fts_phys.db'))
+    if not idx.fts_capable:  # pragma: no cover
+        idx.close()
+        pytest.skip('FTS5 trigram not available in this SQLite build')
+    try:
+        obs = _mk_obs('searchable token alpha', project='p')
+        idx.upsert(obs)
+        assert {r.observation_id for r in idx.search(query='searchable token')} == {obs.observation_id}
+
+        idx.physical_delete(obs.observation_id)
+        assert idx.search(query='searchable token') == []
+        with sqlite3.connect(str(tmp_path / 'fts_phys.db')) as raw:
+            (fts_n,) = raw.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+            assert fts_n == 0
+    finally:
+        idx.close()
+
+
+def test_migration_v2_to_v3_backfills_supersedes_and_fts(tmp_path: Path) -> None:
+    """Opening a schema-v2 DB adds superseded_by + obs_fts and backfills both."""
+    db = tmp_path / 'v2.db'
+    # Build a v2-shaped DB with one row whose payload carries a supersedes edge.
+    old = _mk_obs('older decision', project='m')
+    newer = _mk_obs('newer decision', project='m', supersedes=[old.observation_id])
+    with sqlite3.connect(str(db)) as raw:
+        raw.executescript("""
+CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+INSERT INTO schema_version(version) VALUES (2);
+CREATE TABLE obs_index (
+  observation_id TEXT PRIMARY KEY,
+  project TEXT,
+  created_at TEXT,
+  memory_type TEXT,
+  importance INTEGER,
+  subject TEXT,
+  summary TEXT,
+  payload_json TEXT,
+  deleted_at TEXT,
+  shadowed_at TEXT
+);
+""")
+        for o in (old, newer):
+            raw.execute(
+                'INSERT INTO obs_index '
+                '(observation_id, project, created_at, memory_type, importance, subject, summary, payload_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (o.observation_id, o.project, o.created_at, o.memory_type, o.importance,
+                 o.subject, o.summary, o.to_json()),
+            )
+        raw.commit()
+
+    idx = LocalIndex.connect(str(db))
+    try:
+        with sqlite3.connect(str(db)) as raw:
+            cols = {row[1] for row in raw.execute('PRAGMA table_info(obs_index)')}
+            assert 'superseded_by' in cols
+            (version,) = raw.execute('SELECT version FROM schema_version').fetchone()
+            assert version == SCHEMA_VERSION
+            # Backward edge backfilled from payload supersedes list.
+            (sb,) = raw.execute(
+                'SELECT superseded_by FROM obs_index WHERE observation_id = ?',
+                (old.observation_id,),
+            ).fetchone()
+            assert sb == newer.observation_id
+            # FTS backfilled — one entry per obs_index row.
+            (fts_n,) = raw.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+            assert fts_n == 2
+
+        # Superseded entry hidden by default after migration.
+        hits = idx.search(project='m')
+        assert {r.observation_id for r in hits} == {newer.observation_id}
+        # And FTS query works on migrated data.
+        if idx.fts_capable:
+            assert {r.observation_id for r in idx.search(query='newer decision')} == {newer.observation_id}
+    finally:
+        idx.close()
+
+
+def test_fts_resync_on_downgrade_upgrade_gap(tmp_path: Path) -> None:
+    """obs_fts is rebuilt when it drifts from obs_index (old code wrote rows without FTS).
+
+    Simulates the downgrade→upgrade gap: a row exists in obs_index but is
+    missing from obs_fts. On the next connect, the count mismatch triggers a
+    full FTS rebuild so the row becomes searchable again.
+    """
+    db = tmp_path / 'resync.db'
+    idx = LocalIndex.connect(str(db))
+    obs = _mk_obs('orphaned from fts index', project='p')
+    idx.upsert(obs)
+    assert idx.fts_capable
+    idx.close()
+
+    # Simulate old code: delete the FTS entry but keep the obs_index row.
+    with sqlite3.connect(str(db)) as raw:
+        raw.execute('DELETE FROM obs_fts WHERE observation_id = ?', (obs.observation_id,))
+        raw.commit()
+        (fts_n,) = raw.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+        assert fts_n == 0
+
+    # Reconnect: the drift check should rebuild obs_fts.
+    idx2 = LocalIndex.connect(str(db))
+    try:
+        with sqlite3.connect(str(db)) as raw:
+            (fts_n,) = raw.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+            assert fts_n == 1, 'obs_fts must be rebuilt after drift'
+        assert {r.observation_id for r in idx2.search(query='orphaned from')} == {obs.observation_id}
+    finally:
+        idx2.close()
+
+
+def test_search_falls_back_to_like_when_fts_disabled(tmp_path: Path) -> None:
+    """When fts_capable is False, search uses LIKE and still returns matches.
+
+    Forces the non-FTS path by flipping the capability flag, mirroring an
+    older SQLite build without FTS5.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'no_fts.db'))
+    try:
+        idx._fts_capable = False  # noqa: SLF001 — simulate FTS-less SQLite
+        idx.upsert(_mk_obs('replication digest mismatch', project='ops'))
+        hits = idx.search(query='replication')
+        assert {r.content for r in hits} == {'replication digest mismatch'}
+        # LIKE path still honors supersedes filtering.
+        old = _mk_obs('legacy choice', project='ops')
+        idx.upsert(old)
+        new = _mk_obs('legacy choice updated', project='ops', supersedes=[old.observation_id])
+        idx.upsert(new)
+        hits2 = idx.search(query='legacy choice')
+        assert old.observation_id not in {r.observation_id for r in hits2}
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_populates_fts_and_supersedes(tmp_path: Path) -> None:
+    """rebuild_from_zenoh writes FTS entries and supersedes edges in its transaction."""
+    idx = LocalIndex.connect(str(tmp_path / 'rebuild_fts.db'))
+    try:
+        old = _mk_obs('rebuilt original', project='r')
+        new = _mk_obs('rebuilt revision', project='r', supersedes=[old.observation_id])
+        stats = idx.rebuild_from_zenoh(_FakeSession([old, new], []))
+        assert stats.added == 2
+
+        # Supersedes edge materialized → old hidden by default.
+        assert {r.observation_id for r in idx.search(project='r')} == {new.observation_id}
+        assert idx.find_superseded_by(old.observation_id) == new.observation_id
+        # FTS populated for both rows.
+        if idx.fts_capable:
+            with sqlite3.connect(str(tmp_path / 'rebuild_fts.db')) as raw:
+                (fts_n,) = raw.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+                assert fts_n == 2
+            assert {r.observation_id for r in idx.search(query='rebuilt revision')} == {new.observation_id}
     finally:
         idx.close()

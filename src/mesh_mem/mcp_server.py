@@ -36,6 +36,7 @@ from .messaging.models import is_expired
 from .messaging.models import Message
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
+from .store import find_superseded_by
 from .store import MAX_SEARCH
 from .store import search_observations
 from .store import start_pending_drain_background
@@ -303,6 +304,7 @@ def search_memory(
     project: str = '',
     since_iso: str = '',
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> str:
     """Search the shared kioku-mesh memory, narrowing by key_expr and filtering in Python.
 
@@ -313,6 +315,12 @@ def search_memory(
     ``limit`` defaults to 50 and is internally clamped to ``MAX_SEARCH``.
     Returned observation ids are full 32-char strings so ``delete_memory``
     can be called directly.
+
+    ``include_superseded=True`` surfaces older entries that have been replaced
+    by a newer observation (via the ``supersedes`` field). By default those
+    are hidden so only the latest version of each decision appears.
+    When using ``query``, results are ranked by relevance (bm25) when the
+    SQLite FTS5 trigram extension is available (SQLite ≥ 3.34).
     """
     results = get_backend().search_observations(
         query=query,
@@ -323,6 +331,7 @@ def search_memory(
         project=project,
         since_iso=since_iso,
         limit=limit,
+        include_superseded=include_superseded,
     )
     if not results:
         return 'No matching memories.'
@@ -354,6 +363,7 @@ def get_memory(observation_id: str) -> str:
     obs = get_backend().find_observation_by_id(observation_id)
     if obs is None:
         return f'observation_id {observation_id} not found.'
+    superseded_by = find_superseded_by(obs.observation_id)
     lines = [
         f'id: {obs.observation_id}',
         f'memory_type: {obs.memory_type}',
@@ -367,6 +377,7 @@ def get_memory(observation_id: str) -> str:
         f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
         f'references: {", ".join(obs.references) if obs.references else "-"}',
         f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
+        f'superseded_by: {superseded_by or "-"}',
         '---',
         obs.content,
     ]

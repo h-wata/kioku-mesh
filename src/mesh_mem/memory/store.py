@@ -258,6 +258,7 @@ def search_observations(
     until_iso: str = '',
     cursor_observation_id: str = '',
     limit: int = 50,
+    include_superseded: bool = False,
 ) -> list[Observation]:
     """Search observations via the SQLite local index, falling back to Zenoh.
 
@@ -272,6 +273,10 @@ def search_observations(
     ``(created_at, observation_id) < (until_iso, cursor_observation_id)``
     tuple comparison used by bulk-delete cursor pagination (#66).
     Tombstones hide the matching observation in both paths.
+
+    ADR-0021: ``include_superseded=False`` (default) hides observations that
+    have been replaced by a newer entry via the supersedes chain.
+    The Zenoh fallback path does not filter superseded entries.
     """
     limit = max(1, min(limit, MAX_SEARCH))
     idx = get_index()
@@ -287,6 +292,7 @@ def search_observations(
             until_iso=until_iso,
             cursor_observation_id=cursor_observation_id,
             limit=limit,
+            include_superseded=include_superseded,
         )
     return _search_via_zenoh(
         query=query,
@@ -421,6 +427,19 @@ def find_observation_by_id(observation_id: str) -> Observation | None:
         # Fall through: the index may legitimately not have the id (e.g.
         # an obs put on a peer before this PC's sidecar existed).
     return _find_by_id_via_zenoh(observation_id)
+
+
+def find_superseded_by(observation_id: str) -> str | None:
+    """Return the id of the live observation that supersedes ``observation_id``, or None.
+
+    ADR-0021: used by ``get_memory`` to show the forward chain link.
+    Only the SQLite index path is consulted; returns None when the index
+    is disabled or the obs has no live superseder.
+    """
+    idx = get_index()
+    if idx.disabled:
+        return None
+    return idx.find_superseded_by(observation_id)
 
 
 def _is_valid_observation_id(observation_id: str) -> bool:
