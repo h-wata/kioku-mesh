@@ -1032,9 +1032,9 @@ def test_close_runs_wal_checkpoint(tmp_path: Path) -> None:
     # before our manual close); the assertion that matters is post-close.
     idx.close()
     if wal_path.exists():
-        assert (
-            wal_path.stat().st_size == 0
-        ), f'WAL must be truncated to zero by close(), got {wal_path.stat().st_size} bytes'
+        assert wal_path.stat().st_size == 0, (
+            f'WAL must be truncated to zero by close(), got {wal_path.stat().st_size} bytes'
+        )
 
 
 def test_periodic_wal_checkpoint_resets_counter(tmp_path: Path) -> None:
@@ -1095,9 +1095,9 @@ def test_short_query_falls_back_to_like(tmp_path: Path) -> None:
         idx.upsert(obs)
 
         results = idx.search(query='AI', include_superseded=True)
-        assert any(
-            r.observation_id == obs.observation_id for r in results
-        ), 'Short query "AI" must still match via LIKE fallback'
+        assert any(r.observation_id == obs.observation_id for r in results), (
+            'Short query "AI" must still match via LIKE fallback'
+        )
     finally:
         idx.close()
 
@@ -1337,9 +1337,9 @@ def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
         ids = [r.observation_id for r in results]
         if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
             # FTS path: high-relevance (dense) obs should rank first (lower bm25 rank value).
-            assert ids.index(obs_high.observation_id) < ids.index(
-                obs_low.observation_id
-            ), 'High-relevance obs must rank before low-relevance obs in FTS path'
+            assert ids.index(obs_high.observation_id) < ids.index(obs_low.observation_id), (
+                'High-relevance obs must rank before low-relevance obs in FTS path'
+            )
 
         # Tie-break: two obs with same content (same relevance), newer first.
         obs_older = _mk_obs('tiebreak content same words', project='tie')
@@ -1353,9 +1353,9 @@ def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
         ids_tie = [r.observation_id for r in results_tie]
         if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
             # FTS path: ORDER BY rank, created_at DESC — newer first on tie.
-            assert ids_tie.index(obs_newer.observation_id) < ids_tie.index(
-                obs_older.observation_id
-            ), 'Newer obs must appear before older obs when bm25 rank is equal'
+            assert ids_tie.index(obs_newer.observation_id) < ids_tie.index(obs_older.observation_id), (
+                'Newer obs must appear before older obs when bm25 rank is equal'
+            )
     finally:
         idx.close()
 
@@ -1452,9 +1452,9 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
         # FTS search must find obs_b after rebuild.
         if idx._fts_cap != _FTS_CAP_LIKE:  # noqa: SLF001
             fts_results = idx.search(query='replacement', include_superseded=True)
-            assert any(
-                r.observation_id == obs_b.observation_id for r in fts_results
-            ), 'obs_b must be findable via FTS after rebuild'
+            assert any(r.observation_id == obs_b.observation_id for r in fts_results), (
+                'obs_b must be findable via FTS after rebuild'
+            )
 
         # superseded_by must be reconstructed: obs_a hidden by default.
         results_default = idx.search(include_superseded=False)
@@ -1681,5 +1681,105 @@ def test_rebuild_fts_tags_edge_cases(tmp_path: Path) -> None:
         assert lockstep_notags == ''
         assert rebuilt_notags == lockstep_notags
 
+    finally:
+        idx.close()
+
+
+# ---------------------------------------------------------------------------
+# R2 / R6: LIKE wildcard escape and query edge cases (PR #211 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_search_like_escape_wildcards(tmp_path: Path) -> None:
+    """R2: % and _ in short query terms are treated as literal chars via LIKE ESCAPE.
+
+    Short terms (< 3 chars) always route through LIKE regardless of FTS
+    capability, so using 2-char terms makes the escape behaviour deterministic.
+    Without the ESCAPE clause, '_b' would match any single char + b (over-match).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'like_escape.db'))
+    try:
+        obs_underscore = _mk_obs('key_bar underscore match', project='esc')
+        obs_no_underscore = _mk_obs('keyXbar no underscore here', project='esc')
+        obs_percent = _mk_obs('rate a% percent match', project='esc')
+        obs_no_percent = _mk_obs('rate ax no percent here', project='esc')
+        idx.upsert(obs_underscore)
+        idx.upsert(obs_no_underscore)
+        idx.upsert(obs_percent)
+        idx.upsert(obs_no_percent)
+
+        # '_b' is 2 chars → always LIKE; must match literal underscore, not any-char + b.
+        us_ids = {r.observation_id for r in idx.search(query='_b', project='esc', include_superseded=True)}
+        assert obs_underscore.observation_id in us_ids, '_b must match literal underscore'
+        assert obs_no_underscore.observation_id not in us_ids, '_b must not over-match Xb'
+
+        # 'a%' is 2 chars → always LIKE; must match literal percent, not a + wildcard.
+        pct_ids = {r.observation_id for r in idx.search(query='a%', project='esc', include_superseded=True)}
+        assert obs_percent.observation_id in pct_ids, 'a% must match literal percent'
+        assert obs_no_percent.observation_id not in pct_ids, 'a% must not over-match ax'
+    finally:
+        idx.close()
+
+
+def test_search_all_short_terms_uses_like_and(tmp_path: Path) -> None:
+    """R6: All terms shorter than the trigram threshold use LIKE AND semantics.
+
+    When every term in the query is < 3 chars, no FTS term is produced and
+    the query degrades to multiple LIKE conditions ANDed together.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'short_and.db'))
+    try:
+        wanted = _mk_obs('db migration: ab test result', project='short')
+        has_db_only = _mk_obs('db only without the other term', project='short')
+        has_ab_only = _mk_obs('ab only without the other term', project='short')
+        idx.upsert(wanted)
+        idx.upsert(has_db_only)
+        idx.upsert(has_ab_only)
+
+        # 'db' and 'ab' are both 2 chars → LIKE AND path regardless of FTS capability.
+        results = idx.search(query='db ab', project='short', include_superseded=True)
+        ids = {r.observation_id for r in results}
+        assert wanted.observation_id in ids, 'obs containing both db and ab must match'
+        assert has_db_only.observation_id not in ids, 'obs with only db must not match'
+        assert has_ab_only.observation_id not in ids, 'obs with only ab must not match'
+    finally:
+        idx.close()
+
+
+def test_search_term_with_double_quote_escape(tmp_path: Path) -> None:
+    """R6: A query term containing a double-quote is sanitised by _quote_fts_term.
+
+    _quote_fts_term replaces " with "" inside the FTS5 phrase literal so the
+    query is accepted without raising a syntax error.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'dquote.db'))
+    try:
+        obs = _mk_obs('say hello greeting phrase', project='dquote')
+        idx.upsert(obs)
+
+        # 'say "hi"' contains an embedded double-quote; must not raise.
+        results = idx.search(query='say "hi"', project='dquote', include_superseded=True)
+        assert isinstance(results, list), 'search with embedded " must return a list without error'
+    finally:
+        idx.close()
+
+
+def test_search_whitespace_only_returns_recency(tmp_path: Path) -> None:
+    """R6: A whitespace-only query produces no terms and returns all live rows.
+
+    str.split() on whitespace-only input yields an empty list, so no LIKE
+    or FTS filter is appended and the query falls through to recency order.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'whitespace.db'))
+    try:
+        obs1 = _mk_obs('alpha observation', project='ws')
+        obs2 = _mk_obs('beta observation', project='ws')
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+
+        results = idx.search(query='   ', project='ws', include_superseded=True)
+        ids = {r.observation_id for r in results}
+        assert obs1.observation_id in ids, 'whitespace-only query must return all live rows'
+        assert obs2.observation_id in ids
     finally:
         idx.close()

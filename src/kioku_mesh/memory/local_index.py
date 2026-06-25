@@ -129,6 +129,14 @@ def _quote_fts_term(term: str) -> str:
     return '"' + term.replace('"', '""') + '"'
 
 
+def _escape_like(term: str) -> str:
+    """Escape LIKE wildcard chars so term is treated as a literal substring."""
+    term = term.replace('\\', '\\\\')
+    term = term.replace('%', '\\%')
+    term = term.replace('_', '\\_')
+    return term
+
+
 def _disabled_via_env() -> bool:
     return get_env('KIOKU_MESH_DISABLE_INDEX', '').strip() == '1'
 
@@ -555,8 +563,8 @@ class LocalIndex:
             fts_terms = [term for term in query_terms if len(term) >= 3]
             like_terms = [term for term in query_terms if len(term) < 3]
         for term in like_terms:
-            where.append('LOWER(payload_json) LIKE ?')
-            params.append(f'%{term.lower()}%')
+            where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
+            params.append(f'%{_escape_like(term.lower())}%')
         use_fts = bool(fts_terms)
 
         if use_fts:
@@ -592,8 +600,8 @@ class LocalIndex:
                     like_where = [*where]
                     like_params = [*params]
                     for term in fts_terms:
-                        like_where.append('LOWER(payload_json) LIKE ?')
-                        like_params.append(f'%{term.lower()}%')
+                        like_where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
+                        like_params.append(f'%{_escape_like(term.lower())}%')
                     like_sql = 'SELECT payload_json FROM obs_index'
                     if like_where:
                         like_sql += ' WHERE ' + ' AND '.join(like_where)
