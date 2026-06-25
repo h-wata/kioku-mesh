@@ -11,9 +11,9 @@ import dataclasses
 import time
 from typing import Any
 
-from mesh_mem import store
-from mesh_mem import transport
-from mesh_mem.models import Observation
+from kioku_mesh import store
+from kioku_mesh import transport
+from kioku_mesh.models import Observation
 
 # Zenoh put / delete is asynchronous — ingestion by the storage plugin happens
 # on its own thread. We settle briefly after any write before querying so
@@ -177,7 +177,7 @@ def test_search_falls_back_to_zenoh_when_index_disabled(
     verifying it is still searchable. The flip side of the test above:
     when the index is unavailable, the legacy full-scan path remains.
     """
-    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    monkeypatch.setenv('KIOKU_MESH_DISABLE_INDEX', '1')
     store._reset_index()  # pick up the env change
 
     obs = _mk_obs('zenoh-fallback row', project='fallback')

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from mesh_mem.messaging.keyspace import ack_key
-from mesh_mem.messaging.keyspace import agent_inbox_key
-from mesh_mem.messaging.keyspace import mesh_broadcast_key
-from mesh_mem.messaging.keyspace import parse_scope_from_key
-from mesh_mem.messaging.keyspace import session_inbox_key
-from mesh_mem.messaging.keyspace import team_key
-from mesh_mem.messaging.keyspace import user_key
+from kioku_mesh.messaging.keyspace import ack_key
+from kioku_mesh.messaging.keyspace import agent_inbox_key
+from kioku_mesh.messaging.keyspace import mesh_broadcast_key
+from kioku_mesh.messaging.keyspace import parse_scope_from_key
+from kioku_mesh.messaging.keyspace import session_inbox_key
+from kioku_mesh.messaging.keyspace import team_key
+from kioku_mesh.messaging.keyspace import user_key
 
 
 class TestMeshBroadcastKey:

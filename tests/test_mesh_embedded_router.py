@@ -107,11 +107,11 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
     xdg_dir = str(tmp_path / 'xdg')
 
     router_proc = subprocess.Popen(
-        [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', listen],
+        [sys.executable, '-m', 'kioku_mesh', 'mesh', 'start', '--listen', listen],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=_subprocess_env(
-            MESH_MEM_STATE_DIR=router_state,
+            KIOKU_MESH_STATE_DIR=router_state,
             XDG_CONFIG_HOME=xdg_dir,
         ),
     )
@@ -129,12 +129,12 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
         # Peer save: DIFFERENT state_dir than router — proves mesh exchange
         peer_env = _subprocess_env(
             ZENOH_CONNECT=listen,
-            MESH_MEM_BACKEND='zenoh',
-            MESH_MEM_STATE_DIR=peer_state,
+            KIOKU_MESH_BACKEND='zenoh',
+            KIOKU_MESH_STATE_DIR=peer_state,
             XDG_CONFIG_HOME=xdg_dir,
         )
         save_result = subprocess.run(
-            [sys.executable, '-m', 'mesh_mem', 'save', unique_content],
+            [sys.executable, '-m', 'kioku_mesh', 'save', unique_content],
             env=peer_env,
             capture_output=True,
             text=True,
@@ -147,12 +147,12 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
         # Router search: uses ROUTER's state_dir — must hit via mesh replication
         router_search_env = _subprocess_env(
             ZENOH_CONNECT=listen,
-            MESH_MEM_BACKEND='zenoh',
-            MESH_MEM_STATE_DIR=router_state,
+            KIOKU_MESH_BACKEND='zenoh',
+            KIOKU_MESH_STATE_DIR=router_state,
             XDG_CONFIG_HOME=xdg_dir,
         )
         search_result = subprocess.run(
-            [sys.executable, '-m', 'mesh_mem', 'search', 'mesh-exchange'],
+            [sys.executable, '-m', 'kioku_mesh', 'search', 'mesh-exchange'],
             env=router_search_env,
             capture_output=True,
             text=True,
@@ -186,12 +186,12 @@ def test_mesh_start_peer_hint_not_loopback_only(tmp_path: Path) -> None:
     # PYTHONUNBUFFERED=1 ensures print() flushes immediately so startup lines
     # are not held in the buffer when SIGINT is delivered (CI flaky fix: B4).
     router_proc = subprocess.Popen(
-        [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', listen],
+        [sys.executable, '-m', 'kioku_mesh', 'mesh', 'start', '--listen', listen],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,  # merge stderr so all output is in stdout
         bufsize=1,
         text=True,
-        env=_subprocess_env(MESH_MEM_STATE_DIR=state_dir, PYTHONUNBUFFERED='1'),
+        env=_subprocess_env(KIOKU_MESH_STATE_DIR=state_dir, PYTHONUNBUFFERED='1'),
     )
 
     collected: list[str] = []
@@ -248,10 +248,10 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
     xdg_dir = str(tmp_path / 'xdg')
 
     router_proc = subprocess.Popen(
-        [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', router_listen],
+        [sys.executable, '-m', 'kioku_mesh', 'mesh', 'start', '--listen', router_listen],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_subprocess_env(MESH_MEM_STATE_DIR=router_state, XDG_CONFIG_HOME=xdg_dir),
+        env=_subprocess_env(KIOKU_MESH_STATE_DIR=router_state, XDG_CONFIG_HOME=xdg_dir),
     )
 
     reachable = _wait_for_tcp('127.0.0.1', router_port, timeout=10.0)
@@ -263,10 +263,10 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
     time.sleep(0.5)
 
     join_proc = subprocess.Popen(
-        [sys.executable, '-m', 'mesh_mem', 'mesh', 'join', router_listen],
+        [sys.executable, '-m', 'kioku_mesh', 'mesh', 'join', router_listen],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_subprocess_env(MESH_MEM_STATE_DIR=join_state, XDG_CONFIG_HOME=xdg_dir),
+        env=_subprocess_env(KIOKU_MESH_STATE_DIR=join_state, XDG_CONFIG_HOME=xdg_dir),
     )
 
     time.sleep(1.0)  # let join subscriber connect
@@ -283,12 +283,12 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
         # Save via router endpoint — join process subscriber should receive it
         save_env = _subprocess_env(
             ZENOH_CONNECT=router_listen,
-            MESH_MEM_BACKEND='zenoh',
-            MESH_MEM_STATE_DIR=str(tmp_path / 'save_state'),
+            KIOKU_MESH_BACKEND='zenoh',
+            KIOKU_MESH_STATE_DIR=str(tmp_path / 'save_state'),
             XDG_CONFIG_HOME=xdg_dir,
         )
         save_result = subprocess.run(
-            [sys.executable, '-m', 'mesh_mem', 'save', unique_content],
+            [sys.executable, '-m', 'kioku_mesh', 'save', unique_content],
             env=save_env,
             capture_output=True,
             text=True,
@@ -301,12 +301,12 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
         # join process's SQLite should now contain the save
         join_search_env = _subprocess_env(
             ZENOH_CONNECT=router_listen,
-            MESH_MEM_BACKEND='zenoh',
-            MESH_MEM_STATE_DIR=join_state,
+            KIOKU_MESH_BACKEND='zenoh',
+            KIOKU_MESH_STATE_DIR=join_state,
             XDG_CONFIG_HOME=xdg_dir,
         )
         search_result = subprocess.run(
-            [sys.executable, '-m', 'mesh_mem', 'search', 'join-roundtrip'],
+            [sys.executable, '-m', 'kioku_mesh', 'search', 'join-roundtrip'],
             env=join_search_env,
             capture_output=True,
             text=True,
@@ -335,10 +335,10 @@ def test_doctor_embedded_router_status(tmp_path: Path) -> None:
     state_dir = str(tmp_path / 'state')
 
     router_proc = subprocess.Popen(
-        [sys.executable, '-m', 'mesh_mem', 'mesh', 'start', '--listen', listen],
+        [sys.executable, '-m', 'kioku_mesh', 'mesh', 'start', '--listen', listen],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=_subprocess_env(MESH_MEM_STATE_DIR=state_dir),
+        env=_subprocess_env(KIOKU_MESH_STATE_DIR=state_dir),
     )
 
     reachable = _wait_for_tcp('127.0.0.1', port, timeout=10.0)
@@ -349,10 +349,10 @@ def test_doctor_embedded_router_status(tmp_path: Path) -> None:
 
     try:
         doctor_result = subprocess.run(
-            [sys.executable, '-m', 'mesh_mem', 'doctor', '--json'],
+            [sys.executable, '-m', 'kioku_mesh', 'doctor', '--json'],
             env=_subprocess_env(
                 MESH_MEM_ROUTER_ENDPOINT=listen,
-                MESH_MEM_STATE_DIR=state_dir,
+                KIOKU_MESH_STATE_DIR=state_dir,
             ),
             capture_output=True,
             text=True,

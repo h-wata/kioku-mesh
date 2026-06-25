@@ -9,12 +9,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-SRC_ROOT = Path(__file__).parent.parent / 'src' / 'mesh_mem'
+SRC_ROOT = Path(__file__).parent.parent / 'src' / 'kioku_mesh'
 
-CORE_PKG = 'mesh_mem.core'
-MEMORY_PKG = 'mesh_mem.memory'
-MESSAGING_PKG = 'mesh_mem.messaging'
-BRIDGE_PKG = 'mesh_mem.bridge'
+CORE_PKG = 'kioku_mesh.core'
+MEMORY_PKG = 'kioku_mesh.memory'
+MESSAGING_PKG = 'kioku_mesh.messaging'
+BRIDGE_PKG = 'kioku_mesh.bridge'
 
 
 def _collect_imports(pkg_dir: Path) -> dict[str, list[str]]:

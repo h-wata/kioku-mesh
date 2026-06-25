@@ -10,6 +10,14 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **Python パッケージ名を `mesh_mem` → `kioku_mesh` に rename (ADR-0024, #187).**
+  `import mesh_mem` は後方互換 shim として `v1.0.0` まで動作しますが `DeprecationWarning` を発行します。
+  `import kioku_mesh` に移行してください。
+  CLI コマンド (`kioku-mesh`, `kioku-mesh-mcp`) および環境変数プレフィックス (`KIOKU_MESH_*`) は変更ありません。
+  旧環境変数 `MESH_MEM_*` は `v1.0.0` まで fallback + `DeprecationWarning` で動作します。
+
 ### Added
 
 - **FTS5 trigram 全文検索 + supersedes-aware 検索 (ADR-0021, #203).** `LocalIndex` に FTS5 virtual table (`obs_fts`) を追加し、日本語部分一致を含む bm25 ランキング付き全文検索を実現。3-stage fallback: trigram → 標準 FTS5 → LIKE。`obs_index` に `superseded_by` カラムを追加し、supersedes チェーンを辿って obsolete な記憶を検索結果から自動除外する (`include_superseded=False` デフォルト)。`doctor` コマンドで FTS5 capability を表示。`SCHEMA_VERSION` 2 → 3 前方 migration 付き。

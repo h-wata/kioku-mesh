@@ -112,13 +112,13 @@ def _cli_save(peer_idx: int, content: str, project: str) -> str:
         **os.environ,
         'PYTHONPATH': str(pathlib.Path(__file__).parents[1] / 'src'),
         'ZENOH_CONNECT': f'tcp/localhost:{port}',
-        'MESH_MEM_STATE_DIR': state,
-        'MESH_MEM_DISABLE_INDEX': '1',
+        'KIOKU_MESH_STATE_DIR': state,
+        'KIOKU_MESH_DISABLE_INDEX': '1',
     }
     cmd = [
         sys.executable,
         '-m',
-        'mesh_mem',
+        'kioku_mesh',
         'save',
         content,
         '--project',
@@ -141,13 +141,13 @@ def _cli_search_count(peer_idx: int, project: str, limit: int = 500) -> int:
         **os.environ,
         'PYTHONPATH': str(pathlib.Path(__file__).parents[1] / 'src'),
         'ZENOH_CONNECT': f'tcp/localhost:{port}',
-        'MESH_MEM_STATE_DIR': state,
-        'MESH_MEM_DISABLE_INDEX': '1',
+        'KIOKU_MESH_STATE_DIR': state,
+        'KIOKU_MESH_DISABLE_INDEX': '1',
     }
     cmd = [
         sys.executable,
         '-m',
-        'mesh_mem',
+        'kioku_mesh',
         'search',
         '',
         '--project',

@@ -14,15 +14,15 @@ import subprocess
 
 import pytest
 
-from mesh_mem.__main__ import _dedupe_endpoints
-from mesh_mem.__main__ import _default_init_path
-from mesh_mem.__main__ import _default_systemd_user_unit_path
-from mesh_mem.__main__ import _detect_local_ipv4
-from mesh_mem.__main__ import _LOCAL_IPV4_PROBES
-from mesh_mem.__main__ import _normalize_endpoint
-from mesh_mem.__main__ import _prompt_listen_endpoints
-from mesh_mem.__main__ import _render_systemd_unit
-from mesh_mem.__main__ import main as cli_main
+from kioku_mesh.__main__ import _dedupe_endpoints
+from kioku_mesh.__main__ import _default_init_path
+from kioku_mesh.__main__ import _default_systemd_user_unit_path
+from kioku_mesh.__main__ import _detect_local_ipv4
+from kioku_mesh.__main__ import _LOCAL_IPV4_PROBES
+from kioku_mesh.__main__ import _normalize_endpoint
+from kioku_mesh.__main__ import _prompt_listen_endpoints
+from kioku_mesh.__main__ import _render_systemd_unit
+from kioku_mesh.__main__ import main as cli_main
 
 
 @pytest.fixture
@@ -259,7 +259,7 @@ def test_init_hub_export_hint_follows_legacy_state_dir(
     fake_home = tmp_path / 'home'
     (fake_home / '.local' / 'share' / 'mesh-mem').mkdir(parents=True)
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
-    import mesh_mem.paths as paths_mod
+    import kioku_mesh.paths as paths_mod
 
     paths_mod._warned.clear()
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(tmp_path / 'hub.json5')])
@@ -273,7 +273,7 @@ def test_init_hub_export_hint_uses_new_path_when_fresh(
     fake_home = tmp_path / 'home'
     (fake_home / '.local' / 'share').mkdir(parents=True)
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: fake_home))
-    import mesh_mem.paths as paths_mod
+    import kioku_mesh.paths as paths_mod
 
     paths_mod._warned.clear()
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--out', str(tmp_path / 'hub.json5')])
@@ -401,14 +401,14 @@ def _install_fake_socket(
         assert type_ == real_socket.SOCK_DGRAM
         return _FakeUDPSocket(routes)
 
-    monkeypatch.setattr('mesh_mem.__main__.socket.socket', fake_socket)
-    monkeypatch.setattr('mesh_mem.__main__.socket.gethostname', lambda: 'fake-host')
+    monkeypatch.setattr('kioku_mesh.__main__.socket.socket', fake_socket)
+    monkeypatch.setattr('kioku_mesh.__main__.socket.gethostname', lambda: 'fake-host')
 
     def fake_getaddrinfo(host: str, *_args: object, **_kw: object) -> list[tuple]:
         assert host == 'fake-host'
         return [(real_socket.AF_INET, 0, 0, '', (ip, 0)) for ip in (hostname_ips or [])]
 
-    monkeypatch.setattr('mesh_mem.__main__.socket.getaddrinfo', fake_getaddrinfo)
+    monkeypatch.setattr('kioku_mesh.__main__.socket.getaddrinfo', fake_getaddrinfo)
 
 
 def test_detect_local_ipv4_collects_one_ip_per_probe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -516,9 +516,9 @@ def force_systemd_supported(monkeypatch: pytest.MonkeyPatch) -> None:
     #95) sees a healthy user manager during tests.
     """
     monkeypatch.setattr('sys.platform', 'linux')
-    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
     monkeypatch.setattr(
-        'mesh_mem.__main__._default_systemctl_probe',
+        'kioku_mesh.__main__._default_systemctl_probe',
         lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
     )
 
@@ -665,10 +665,10 @@ def test_init_install_systemd_falls_back_when_zenohd_missing(
     def fake_which(name: str) -> str | None:
         return '/usr/bin/systemctl' if name == 'systemctl' else None
 
-    monkeypatch.setattr('mesh_mem.__main__.shutil.which', fake_which)
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', fake_which)
     # Probe success: even with zenohd missing, systemd-user itself is reachable.
     monkeypatch.setattr(
-        'mesh_mem.__main__._default_systemctl_probe',
+        'kioku_mesh.__main__._default_systemctl_probe',
         lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
     )
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
@@ -690,7 +690,7 @@ def test_init_install_systemd_rejects_macos(monkeypatch: pytest.MonkeyPatch, tmp
 
 def test_init_install_systemd_rejects_missing_systemctl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr('sys.platform', 'linux')
-    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda _name: None)
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', lambda _name: None)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 2
@@ -702,9 +702,9 @@ def test_init_install_systemd_rejects_unreachable_user_manager(
 ) -> None:
     """Handle the case where systemctl exists but the user manager is unreachable (WSL / non-systemd container)."""
     monkeypatch.setattr('sys.platform', 'linux')
-    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
     monkeypatch.setattr(
-        'mesh_mem.__main__._default_systemctl_probe',
+        'kioku_mesh.__main__._default_systemctl_probe',
         lambda _argv: subprocess.CompletedProcess([], 1, stdout='', stderr='Failed to connect to user bus'),
     )
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
@@ -722,12 +722,12 @@ def test_init_install_systemd_rejects_probe_timeout(
 ) -> None:
     """A subprocess timeout (hanging user manager) must surface as a clean refusal."""
     monkeypatch.setattr('sys.platform', 'linux')
-    monkeypatch.setattr('mesh_mem.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', lambda name: f'/usr/bin/{name}')
 
     def _timeout(_argv: list[str]) -> 'subprocess.CompletedProcess[str]':
         raise subprocess.TimeoutExpired(cmd=_argv, timeout=2.0)
 
-    monkeypatch.setattr('mesh_mem.__main__._default_systemctl_probe', _timeout)
+    monkeypatch.setattr('kioku_mesh.__main__._default_systemctl_probe', _timeout)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 2

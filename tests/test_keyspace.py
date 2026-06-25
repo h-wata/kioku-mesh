@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import zenoh
 
-from mesh_mem import keyspace
+from kioku_mesh import keyspace
 
 _ID = 'a' * 32
 

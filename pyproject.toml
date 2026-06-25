@@ -57,14 +57,14 @@ completion = [
 ]
 
 [project.scripts]
-kioku-mesh = "mesh_mem.__main__:main"
-kioku-mesh-mcp = "mesh_mem.mcp_server:main"
+kioku-mesh = "kioku_mesh.__main__:main"
+kioku-mesh-mcp = "kioku_mesh.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mesh_mem"]
+packages = ["src/kioku_mesh", "src/mesh_mem"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/mesh_mem", "tests", "config", "docs", "scripts", "README.md"]
+include = ["src/kioku_mesh", "src/mesh_mem", "tests", "config", "docs", "scripts", "README.md"]
 
 # Style: 親の ~/work/.github/pyproject.toml をベースに、本プロジェクトで CPY (copyright) を除外。
 # 他は google style / 119 桁 / single quotes / LF で揃える。

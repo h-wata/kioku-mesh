@@ -1,7 +1,7 @@
 """Tests for TTY misinvocation detection in kioku-mesh-mcp entry point.
 
 Verifies that ``kioku-mesh-mcp`` exits with code 2 when stdin is a TTY,
-passes through when stdin is redirected, and respects MESH_MEM_MCP_ALLOW_TTY.
+passes through when stdin is redirected, and respects KIOKU_MESH_MCP_ALLOW_TTY.
 Linux-only (pty module).
 """
 
@@ -106,9 +106,9 @@ def test_stdin_redirect_does_not_exit_2() -> None:
     reason='kioku-mesh-mcp console script not installed — run `pip install -e .[dev]` to enable',
 )
 def test_allow_tty_env_bypasses_check() -> None:
-    """MESH_MEM_MCP_ALLOW_TTY=1 with TTY stdin → stdio loop entered, no exit 2."""
-    result = _run_via_pty(extra_env={'MESH_MEM_MCP_ALLOW_TTY': '1'}, timeout=2.0)
+    """KIOKU_MESH_MCP_ALLOW_TTY=1 with TTY stdin → stdio loop entered, no exit 2."""
+    result = _run_via_pty(extra_env={'KIOKU_MESH_MCP_ALLOW_TTY': '1'}, timeout=2.0)
     assert result.returncode != 2, (
-        f'MESH_MEM_MCP_ALLOW_TTY=1 should bypass the TTY guard, got returncode={result.returncode}\n'
+        f'KIOKU_MESH_MCP_ALLOW_TTY=1 should bypass the TTY guard, got returncode={result.returncode}\n'
         f'stderr={result.stderr!r}'
     )

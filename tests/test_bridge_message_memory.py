@@ -8,9 +8,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mesh_mem.bridge import MessageMemoryBridge
-from mesh_mem.bridge.message_memory import MessageMemoryBridge as _BridgeDirect
-from mesh_mem.messaging.models import Message
+from kioku_mesh.bridge import MessageMemoryBridge
+from kioku_mesh.bridge.message_memory import MessageMemoryBridge as _BridgeDirect
+from kioku_mesh.messaging.models import Message
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -221,7 +221,7 @@ class TestIdempotency:
 
 class TestBridgeLayering:
     def test_bridge_imports_messaging_models(self) -> None:
-        from mesh_mem.messaging.models import Message  # noqa: F401 (import check)
+        from kioku_mesh.messaging.models import Message  # noqa: F401 (import check)
 
         assert Message is not None
 
@@ -229,12 +229,12 @@ class TestBridgeLayering:
         assert _BridgeDirect is MessageMemoryBridge
 
     def test_bridge_re_export_from_init(self) -> None:
-        import mesh_mem.bridge as _bridge_pkg
+        import kioku_mesh.bridge as _bridge_pkg
 
         assert _bridge_pkg.MessageMemoryBridge is MessageMemoryBridge
 
     def test_bridge_can_reference_save_observation_protocol(self) -> None:
-        from mesh_mem.bridge.message_memory import SaveObservationCallable
+        from kioku_mesh.bridge.message_memory import SaveObservationCallable
 
         save_fn = MagicMock(return_value='saved: id (visibility=team)')
         assert isinstance(save_fn, SaveObservationCallable)

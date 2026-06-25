@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 
-from mesh_mem import purge
-from mesh_mem import store
-from mesh_mem import transport
-from mesh_mem.models import Observation
-from mesh_mem.models import Tombstone
+from kioku_mesh import purge
+from kioku_mesh import store
+from kioku_mesh import transport
+from kioku_mesh.models import Observation
+from kioku_mesh.models import Tombstone
 
 # Zenoh ``put`` is asynchronous — the storage plugin ingests on its own thread.
 # We sleep briefly after any put sequence before querying via ``_list_tombstones``
@@ -423,7 +423,7 @@ def test_gc_project_filter_always_rebuilds_for_correctness(
     project-scoped query, dropping the previous ``row_count() == 0``
     short-circuit.
     """
-    from mesh_mem.local_index import LocalIndex
+    from kioku_mesh.local_index import LocalIndex
 
     pre = _mk_obs('pre-existing live row', project='proj-pre')
     store.put_observation(pre)
@@ -458,7 +458,7 @@ def test_gc_project_filter_falls_back_when_index_disabled(
     With ``MESH_MEM_DISABLE_INDEX=1`` the SQLite-fast path cannot run;
     correctness is preserved by the legacy ``_list_tombstones`` sweep.
     """
-    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    monkeypatch.setenv('KIOKU_MESH_DISABLE_INDEX', '1')
     store._reset_index()  # reopen as disabled
 
     obs = _mk_obs('disabled-index gc fallback', project='proj-fb')
@@ -688,7 +688,7 @@ def test_gc_expired_shadows_handles_mixed_revive_and_purge(single_zenohd: Any) -
 
 def test_cli_gc_retention_sweeps_both_tomb_and_shadow(single_zenohd: Any) -> None:  # noqa: ARG001
     """``mesh-mem gc --retention-days N`` sweeps tombstones AND shadows by default."""
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     aged_iso = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
@@ -714,7 +714,7 @@ def test_cli_gc_retention_sweeps_both_tomb_and_shadow(single_zenohd: Any) -> Non
 
 def test_cli_gc_no_shadow_prune_flag_skips_shadow_only(single_zenohd: Any) -> None:  # noqa: ARG001
     """``--no-shadow-prune`` keeps shadows untouched while still sweeping tombs."""
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     aged_iso = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
@@ -787,7 +787,7 @@ def test_cli_gc_runs_rebuild_then_sweep_for_stale_row(single_zenohd: Any) -> Non
     must discover it (via the in-driver rebuild) and purge it (via the
     re-verifying shadow sweep) in the same process.
     """
-    from mesh_mem.__main__ import main as cli_main
+    from kioku_mesh.__main__ import main as cli_main
 
     stale = _mk_obs('cli-discovery stale', project='cli-shadow-discovery')
     idx = store.get_index()

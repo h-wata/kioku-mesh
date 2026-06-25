@@ -11,21 +11,21 @@ from pathlib import Path
 
 import pytest
 
-from mesh_mem import doctor
-from mesh_mem.__main__ import main as cli_main
-from mesh_mem.doctor import _default_config_path
-from mesh_mem.doctor import _parse_zenoh_endpoint
-from mesh_mem.doctor import check_config_file
-from mesh_mem.doctor import check_state_dir_hardlinks
-from mesh_mem.doctor import check_tls_certs
-from mesh_mem.doctor import check_zenohd_binary
-from mesh_mem.doctor import check_zenohd_reachable
-from mesh_mem.doctor import CheckResult
-from mesh_mem.doctor import CheckStatus
-from mesh_mem.doctor import exit_code_for
-from mesh_mem.doctor import format_text
-from mesh_mem.doctor import to_json
-from mesh_mem.doctor import worst_status
+from kioku_mesh import doctor
+from kioku_mesh.__main__ import main as cli_main
+from kioku_mesh.doctor import _default_config_path
+from kioku_mesh.doctor import _parse_zenoh_endpoint
+from kioku_mesh.doctor import check_config_file
+from kioku_mesh.doctor import check_state_dir_hardlinks
+from kioku_mesh.doctor import check_tls_certs
+from kioku_mesh.doctor import check_zenohd_binary
+from kioku_mesh.doctor import check_zenohd_reachable
+from kioku_mesh.doctor import CheckResult
+from kioku_mesh.doctor import CheckStatus
+from kioku_mesh.doctor import exit_code_for
+from kioku_mesh.doctor import format_text
+from kioku_mesh.doctor import to_json
+from kioku_mesh.doctor import worst_status
 
 # -- Severity / aggregation ----------------------------------------------------
 
@@ -260,7 +260,7 @@ def test_check_tls_certs_plaintext_config_ignores_stale_certs(tmp_path: Path, mo
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     from datetime import timedelta
 
-    from mesh_mem import tls
+    from kioku_mesh import tls
 
     tls.create_ca()
     _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])
@@ -286,7 +286,7 @@ def test_check_tls_certs_configured_but_missing_fails(tmp_path: Path, monkeypatc
 
 def test_check_tls_certs_valid_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
-    from mesh_mem import tls
+    from kioku_mesh import tls
 
     tls.create_ca()
     _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])
@@ -302,7 +302,7 @@ def test_check_tls_certs_expired_fails(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'xdg'))
     from datetime import timedelta
 
-    from mesh_mem import tls
+    from kioku_mesh import tls
 
     tls.create_ca()
     _key, csr_pem = tls.generate_key_and_csr(['10.0.0.5'])

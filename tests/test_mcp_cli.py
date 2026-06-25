@@ -30,11 +30,11 @@ pytest.importorskip('fastmcp')
 from fastmcp import Client  # noqa: E402 — must follow importorskip
 from fastmcp.client.transports import StdioTransport  # noqa: E402
 
-from mesh_mem import store  # noqa: E402
-from mesh_mem import transport  # noqa: E402
-import mesh_mem.__main__ as cli_module  # noqa: E402
-from mesh_mem.backend import reset_backend  # noqa: E402
-from mesh_mem.models import Observation  # noqa: E402
+from kioku_mesh import store  # noqa: E402
+from kioku_mesh import transport  # noqa: E402
+import kioku_mesh.__main__ as cli_module  # noqa: E402
+from kioku_mesh.backend import reset_backend  # noqa: E402
+from kioku_mesh.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
 
@@ -130,7 +130,7 @@ def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None: 
 # Phase 3 CLI tests — exercise ``mesh_mem.__main__.main()`` directly
 # ---------------------------------------------------------------------------
 
-from mesh_mem.__main__ import main as cli_main  # noqa: E402
+from kioku_mesh.__main__ import main as cli_main  # noqa: E402
 
 
 def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
@@ -342,7 +342,7 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
 
 def test_cli_search_empty_format_variants(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     """Empty search results follow the per-format output contract."""
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
     assert cli_main(['search']) == 0
@@ -360,8 +360,8 @@ def test_cli_status_local_backend(
     capsys: pytest.CaptureFixture,
 ) -> None:
     # Use local backend so no zenohd is required.
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
-    from mesh_mem.backend import reset_backend
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import reset_backend
 
     reset_backend()
 
@@ -416,7 +416,7 @@ def test_cli_main_requests_background_drain_shutdown_on_exit(
 ) -> None:
     calls: list[str] = []
     # Use local backend so no zenohd is required — search_observations returns [] naturally.
-    monkeypatch.setenv('MESH_MEM_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
     monkeypatch.setattr(cli_module, 'stop_pending_drain_background', lambda: calls.append('stop'))
     monkeypatch.setattr(cli_module, '_reset_session', lambda: calls.append('reset'))
@@ -607,7 +607,7 @@ def test_cli_bulk_delete_continues_on_failure(
     time.sleep(_INGEST_SETTLE)
 
     failing_id = targets[1].observation_id
-    from mesh_mem.backend import get_backend
+    from kioku_mesh.backend import get_backend
 
     backend = get_backend()
     real_put_tombstone = backend.put_tombstone

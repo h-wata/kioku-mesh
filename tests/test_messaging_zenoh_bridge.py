@@ -9,13 +9,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mesh_mem.messaging.keyspace import ack_key
-from mesh_mem.messaging.keyspace import agent_inbox_key
-from mesh_mem.messaging.keyspace import session_inbox_key
-from mesh_mem.messaging.models import Message
-from mesh_mem.messaging.spool import MessageSpool
-from mesh_mem.messaging.zenoh_bridge import BODY_SIZE_LIMIT
-from mesh_mem.messaging.zenoh_bridge import ZenohBridge
+from kioku_mesh.messaging.keyspace import ack_key
+from kioku_mesh.messaging.keyspace import agent_inbox_key
+from kioku_mesh.messaging.keyspace import session_inbox_key
+from kioku_mesh.messaging.models import Message
+from kioku_mesh.messaging.spool import MessageSpool
+from kioku_mesh.messaging.zenoh_bridge import BODY_SIZE_LIMIT
+from kioku_mesh.messaging.zenoh_bridge import ZenohBridge
 
 
 def _make_msg(
@@ -175,8 +175,8 @@ class TestSetupSubscriber:
         bridge = ZenohBridge(mock_session, MessageSpool())
 
         with (
-            patch('mesh_mem.messaging.zenoh_bridge.get_session_id', return_value='test-sess'),
-            patch('mesh_mem.messaging.zenoh_bridge.get_client_id', return_value='test-agent'),
+            patch('kioku_mesh.messaging.zenoh_bridge.get_session_id', return_value='test-sess'),
+            patch('kioku_mesh.messaging.zenoh_bridge.get_client_id', return_value='test-agent'),
         ):
             bridge.setup_subscriber('team/acme')
 

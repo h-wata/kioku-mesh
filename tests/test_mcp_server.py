@@ -26,11 +26,11 @@ pytest.importorskip('fastmcp')
 
 from fastmcp import Client  # noqa: E402 — must follow importorskip
 
-from mesh_mem import store  # noqa: E402
-from mesh_mem import transport  # noqa: E402
-from mesh_mem.mcp_server import mcp  # noqa: E402
-import mesh_mem.mcp_server as mcp_server_module  # noqa: E402
-from mesh_mem.models import Observation  # noqa: E402
+from kioku_mesh import store  # noqa: E402
+from kioku_mesh import transport  # noqa: E402
+from kioku_mesh.mcp_server import mcp  # noqa: E402
+import kioku_mesh.mcp_server as mcp_server_module  # noqa: E402
+from kioku_mesh.models import Observation  # noqa: E402
 
 _INGEST_SETTLE = 0.25
 
@@ -258,8 +258,8 @@ def test_get_memory_status_reports_shadow_rows(single_zenohd: Any) -> None:  # n
 
 
 def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.MonkeyPatch) -> None:
-    from mesh_mem import backend as backend_module
-    from mesh_mem.backend import BackendStatus
+    from kioku_mesh import backend as backend_module
+    from kioku_mesh.backend import BackendStatus
 
     mock_status = BackendStatus(
         mode='zenoh',
@@ -595,10 +595,10 @@ def test_get_memory_status_reports_session_save_block(
     single_zenohd: Any,
 ) -> None:  # noqa: ARG001
     """`this_session_*` + `session_age` fields appear and reflect saves for the current session."""
-    from mesh_mem import identity
+    from kioku_mesh import identity
 
     identity.reset_caches()
-    monkeypatch.setenv('MESH_MEM_SESSION_ID', '20260604T000000Z-nudgetst')
+    monkeypatch.setenv('KIOKU_MESH_SESSION_ID', '20260604T000000Z-nudgetst')
     current_sid = identity.get_session_id()
     obs = Observation(
         content='session-scoped entry',
@@ -631,12 +631,12 @@ def test_get_memory_status_emits_nudge_for_stale_empty_session(
     single_zenohd: Any,
 ) -> None:  # noqa: ARG001
     """A long-running session with zero saves triggers the consider-saving nudge."""
-    from mesh_mem import identity
+    from kioku_mesh import identity
 
     identity.reset_caches()
     # Session id timestamp prefix maps to 2024 → session_age is enormous,
     # well past the 10-minute no-saves threshold.
-    monkeypatch.setenv('MESH_MEM_SESSION_ID', '20240101T000000Z-emptysess')
+    monkeypatch.setenv('KIOKU_MESH_SESSION_ID', '20240101T000000Z-emptysess')
     identity.get_session_id()
 
     async def _go() -> str:
@@ -657,10 +657,10 @@ def test_get_memory_status_session_age_dash_for_unparseable_id(
     single_zenohd: Any,
 ) -> None:  # noqa: ARG001
     """A custom session_id with no timestamp prefix shows session_age '-' and skips the nudge."""
-    from mesh_mem import identity
+    from kioku_mesh import identity
 
     identity.reset_caches()
-    monkeypatch.setenv('MESH_MEM_SESSION_ID', 'custom-handle-no-timestamp')
+    monkeypatch.setenv('KIOKU_MESH_SESSION_ID', 'custom-handle-no-timestamp')
     identity.get_session_id()
 
     async def _go() -> str:

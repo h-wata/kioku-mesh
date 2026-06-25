@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from mesh_mem import paths
-from mesh_mem.paths import resolve_app_dir
+from kioku_mesh import paths
+from kioku_mesh.paths import resolve_app_dir
 
 
 @pytest.fixture(autouse=True)

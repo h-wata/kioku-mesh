@@ -17,11 +17,11 @@ import time
 
 import pytest
 
-from mesh_mem.local_index import LocalIndex
-from mesh_mem.local_index import RebuildStats
-from mesh_mem.local_index import SCHEMA_VERSION
-from mesh_mem.models import Observation
-from mesh_mem.models import Tombstone
+from kioku_mesh.local_index import LocalIndex
+from kioku_mesh.local_index import RebuildStats
+from kioku_mesh.local_index import SCHEMA_VERSION
+from kioku_mesh.models import Observation
+from kioku_mesh.models import Tombstone
 
 
 def _mk_obs(content: str, *, project: str = 'demo', tags: list[str] | None = None) -> Observation:
@@ -181,7 +181,7 @@ def test_local_index_disable_env_var_makes_noop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv('MESH_MEM_DISABLE_INDEX', '1')
+    monkeypatch.setenv('KIOKU_MESH_DISABLE_INDEX', '1')
     db_path = tmp_path / 'disabled.db'
     idx = LocalIndex.connect(str(db_path))
     try:
@@ -970,7 +970,7 @@ def test_periodic_wal_checkpoint_resets_counter(tmp_path: Path) -> None:
     the counter wrapped — proves the periodic checkpoint path actually
     fired without depending on filesystem timing of WAL truncation.
     """
-    from mesh_mem.local_index import _CHECKPOINT_EVERY_N_UPSERTS
+    from kioku_mesh.local_index import _CHECKPOINT_EVERY_N_UPSERTS
 
     idx = LocalIndex.connect(str(tmp_path / 'wal_cadence.db'))
     try:
@@ -1034,7 +1034,7 @@ def test_fts5_cap_like_fallback_when_fts5_unavailable(tmp_path: Path, monkeypatc
     Monkeypatches ``_detect_fts_cap`` to simulate a SQLite build without
     FTS5, then verifies that search still returns results via LIKE.
     """
-    import mesh_mem.local_index as li_mod
+    import kioku_mesh.local_index as li_mod
 
     monkeypatch.setattr(li_mod, '_detect_fts_cap', lambda _conn: li_mod._FTS_CAP_LIKE)  # noqa: SLF001
 
@@ -1160,7 +1160,7 @@ def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
     """
     idx = LocalIndex.connect(str(tmp_path / 'bm25.db'))
     try:
-        from mesh_mem.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+        from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
 
         # Low-relevance: query term appears once in a long sentence.
         obs_low = _mk_obs(
@@ -1244,7 +1244,7 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
     rebuild_from_zenoh() via a fake session.  After rebuild, FTS search and
     include_superseded filtering must both work correctly.
     """
-    from mesh_mem.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
 
     idx = LocalIndex.connect(str(tmp_path / 'rebuild_fts.db'))
     try:

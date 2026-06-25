@@ -15,10 +15,10 @@ import stat
 from cryptography import x509
 import pytest
 
-from mesh_mem import tls
-from mesh_mem.__main__ import _render_mesh_config
-from mesh_mem.__main__ import _to_tls_endpoints
-from mesh_mem.__main__ import main as cli_main
+from kioku_mesh import tls
+from kioku_mesh.__main__ import _render_mesh_config
+from kioku_mesh.__main__ import _to_tls_endpoints
+from kioku_mesh.__main__ import main as cli_main
 
 
 @pytest.fixture
@@ -348,7 +348,7 @@ def test_cli_enroll_over_ssh(xdg: Path, capsys: pytest.CaptureFixture[str], monk
         bundle = tls.encode_cert_bundle(cert_pem, tls.ca_cert_path().read_bytes())
         return _sp.CompletedProcess(cmd, 0, stdout=bundle, stderr='')
 
-    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    monkeypatch.setattr('kioku_mesh.__main__.subprocess.run', fake_run)
     rc = cli_main(['tls', 'enroll', 'user@hub', '--san', '10.0.0.5', '--ssh-port', '2222'])
     assert rc == 0
     assert tls.peer_cert_path().is_file()
@@ -374,7 +374,7 @@ def test_cli_enroll_surfaces_remote_failure(
     ) -> _sp.CompletedProcess:
         return _sp.CompletedProcess(cmd, 127, stdout='', stderr='kioku-mesh: command not found\n')
 
-    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    monkeypatch.setattr('kioku_mesh.__main__.subprocess.run', fake_run)
     rc = cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.5'])
     assert rc == 2
     err = capsys.readouterr().err
@@ -405,7 +405,7 @@ def test_cli_enroll_failure_leaves_existing_peer_intact(xdg: Path, monkeypatch: 
     ) -> _sp.CompletedProcess:
         return _sp.CompletedProcess(cmd, 255, stdout='', stderr='ssh: connect: Connection refused\n')
 
-    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    monkeypatch.setattr('kioku_mesh.__main__.subprocess.run', fake_run)
     rc = cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.99'])
     assert rc == 2
     # Nothing committed: the still-valid key/cert/CSR are byte-for-byte unchanged.
@@ -435,7 +435,7 @@ def test_cli_enroll_malformed_bundle_leaves_existing_peer_intact(xdg: Path, monk
     ) -> _sp.CompletedProcess:
         return _sp.CompletedProcess(cmd, 0, stdout='not a bundle at all', stderr='')
 
-    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    monkeypatch.setattr('kioku_mesh.__main__.subprocess.run', fake_run)
     assert cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.99']) == 2
     assert tls.peer_key_path().read_bytes() == good_key
 
@@ -459,7 +459,7 @@ def test_cli_enroll_quotes_remote_mesh_with_spaces(xdg: Path, monkeypatch: pytes
         bundle = tls.encode_cert_bundle(cert_pem, tls.ca_cert_path().read_bytes())
         return _sp.CompletedProcess(cmd, 0, stdout=bundle, stderr='')
 
-    monkeypatch.setattr('mesh_mem.__main__.subprocess.run', fake_run)
+    monkeypatch.setattr('kioku_mesh.__main__.subprocess.run', fake_run)
     rc = cli_main(['tls', 'enroll', 'hub', '--san', '10.0.0.5', '--remote-mesh', '/opt/my tools/kioku-mesh'])
     assert rc == 0
     remote = captured['cmd'][-1]
