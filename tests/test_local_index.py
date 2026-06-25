@@ -1124,17 +1124,23 @@ def test_multi_word_query_uses_and_semantics_for_non_contiguous_terms(tmp_path: 
 
 
 def test_multi_word_query_mixes_fts_and_short_like_terms(tmp_path: Path) -> None:
-    """Terms shorter than trigram length are enforced with LIKE alongside FTS terms."""
+    """Terms shorter than trigram length are enforced with LIKE alongside FTS terms.
+
+    Uses non-hex short term ('qx') to avoid false-positive matches against
+    hex observation_id UUID strings stored in payload_json.
+    """
     idx = LocalIndex.connect(str(tmp_path / 'mixed_short_terms.db'))
     try:
-        wanted = _mk_obs('db migration caused a tokenizer regression', project='mixed')
-        long_only = _mk_obs('migration without the short database abbreviation', project='mixed')
-        short_only = _mk_obs('db only mention', project='mixed')
+        # 'qx' is 2 chars (non-hex: q, x ∉ [0-9a-f]) → LIKE path
+        # 'migration' is ≥3 chars → FTS path
+        wanted = _mk_obs('qx migration caused a tokenizer regression', project='mixed')
+        long_only = _mk_obs('migration without the short abbreviation', project='mixed')
+        short_only = _mk_obs('qx only mention', project='mixed')
         idx.upsert(wanted)
         idx.upsert(long_only)
         idx.upsert(short_only)
 
-        results = idx.search(query='db migration', project='mixed', include_superseded=True)
+        results = idx.search(query='qx migration', project='mixed', include_superseded=True)
 
         assert [r.observation_id for r in results] == [wanted.observation_id]
     finally:
