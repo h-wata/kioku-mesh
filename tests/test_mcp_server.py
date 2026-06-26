@@ -674,3 +674,61 @@ def test_get_memory_status_session_age_dash_for_unparseable_id(
     # Unparseable timestamp → cannot prove the session is "stale" → no nudge.
     assert 'nudge:' not in text
     identity.reset_caches()
+
+
+def test_search_memory_with_search_mode_or(single_zenohd: Any) -> None:  # noqa: ARG001
+    """search_memory accepts search_mode='or' and returns a valid result."""
+    obs = _mk_obs('modesmoke alpha observation', project='mcp-mode-smoke')
+    store.put_observation(obs)
+    import time
+
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'modesmoke', 'project': 'mcp-mode-smoke', 'search_mode': 'or'},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+
+
+def test_search_memory_with_search_mode_and_or(single_zenohd: Any) -> None:  # noqa: ARG001
+    """search_memory accepts search_mode='and_or' and returns a valid result."""
+    obs = _mk_obs('andorsmoke content', project='mcp-andor-smoke')
+    store.put_observation(obs)
+    import time
+
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'andorsmoke', 'project': 'mcp-andor-smoke', 'search_mode': 'and_or'},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+
+
+def test_search_memory_unknown_search_mode_returns_error(single_zenohd: Any) -> None:  # noqa: ARG001
+    """search_memory with an unknown search_mode returns a user-visible error string."""
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'anything', 'search_mode': 'fuzzy'},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'search_mode' in text.lower()

@@ -59,6 +59,9 @@ _FTS_CAP_LIKE = 'like'  # LIKE fallback (no FTS5)
 # the WAL stays bounded without introducing a checkpoint thread.
 _CHECKPOINT_EVERY_N_UPSERTS = 256
 
+# Issue #218: valid values for the search_mode parameter.
+SEARCH_MODES = frozenset({'and', 'or', 'and_or'})
+
 
 @dataclasses.dataclass
 class RebuildStats:
@@ -135,6 +138,12 @@ def _escape_like(term: str) -> str:
     term = term.replace('%', '\\%')
     term = term.replace('_', '\\_')
     return term
+
+
+def _validate_search_mode(search_mode: str) -> str:
+    if search_mode not in SEARCH_MODES:
+        raise ValueError(f"search_mode must be one of 'and', 'or', 'and_or', got {search_mode!r}")
+    return search_mode
 
 
 def _disabled_via_env() -> bool:
@@ -475,15 +484,23 @@ class LocalIndex:
         limit: int = 50,
         include_deleted: bool = False,
         include_superseded: bool = False,
+        search_mode: str = 'and',
     ) -> list[Observation]:
         """SQL-side search returning Observations ordered by created_at DESC.
 
         Filters compose with AND. Empty-string filters are skipped (matches
         ``store.search_observations`` semantics). ``query`` runs through a
         3-stage fallback (ADR-0021): space-separated terms use AND
-        semantics, terms with 3+ chars use FTS5 when available, and shorter
-        terms (or all terms when FTS5 is unavailable) use LIKE against
-        ``payload_json``.
+        semantics by default, terms with 3+ chars use FTS5 when available,
+        and shorter terms (or all terms when FTS5 is unavailable) use LIKE
+        against ``payload_json``.
+
+        ``search_mode`` controls how query terms are combined:
+          'and' (default): all terms must match (existing behaviour).
+          'or': any term matching is sufficient; base filters remain AND.
+          'and_or': AND phase first; OR phase fills remaining limit slots.
+        Base filters (deleted/shadowed/superseded/project/identity/since) are
+        AND-combined in every mode. Unknown values raise ValueError.
 
         ``include_deleted=True`` returns both tombstoned and rebuild-shadowed
         rows. The name is historical but the behavior is intentionally "show
@@ -512,6 +529,44 @@ class LocalIndex:
         """
         if self._disabled or self._conn is None:
             return []
+        search_mode = _validate_search_mode(search_mode)
+        if search_mode == 'and_or':
+            strict = self.search(
+                project=project,
+                agent_family=agent_family,
+                client_id=client_id,
+                pc_id=pc_id,
+                session_id=session_id,
+                query=query,
+                since_iso=since_iso,
+                until_iso=until_iso,
+                cursor_observation_id=cursor_observation_id,
+                limit=limit,
+                include_deleted=include_deleted,
+                include_superseded=include_superseded,
+                search_mode='and',
+            )
+            if len(strict) >= limit:
+                return strict[:limit]
+            internal_or_limit = min(10_000, max(limit * 2, limit + 20))
+            broad = self.search(
+                project=project,
+                agent_family=agent_family,
+                client_id=client_id,
+                pc_id=pc_id,
+                session_id=session_id,
+                query=query,
+                since_iso=since_iso,
+                until_iso=until_iso,
+                cursor_observation_id=cursor_observation_id,
+                limit=internal_or_limit,
+                include_deleted=include_deleted,
+                include_superseded=include_superseded,
+                search_mode='or',
+            )
+            seen = {obs.observation_id for obs in strict}
+            return [*strict, *(obs for obs in broad if obs.observation_id not in seen)][:limit]
+
         where: list[str] = []
         params: list[object] = []
         if not include_deleted:
@@ -562,33 +617,73 @@ class LocalIndex:
         else:
             fts_terms = [term for term in query_terms if len(term) >= 3]
             like_terms = [term for term in query_terms if len(term) < 3]
-        for term in like_terms:
-            where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
-            params.append(f'%{_escape_like(term.lower())}%')
         use_fts = bool(fts_terms)
 
-        if use_fts:
-            # FTS5 path: CTE join for bm25 ranking.
-            fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
-            match_expr = ' AND '.join(_quote_fts_term(term) for term in fts_terms)
-            sql = (
-                'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
-                'SELECT o.payload_json '
-                'FROM obs_index o '
-                'JOIN fts_match f ON f.observation_id = o.observation_id'
-                f'{fts_where} '
-                'ORDER BY f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
-            )
-            rows_params: list[object] = [match_expr, *params, max(1, limit)]
-        else:
-            sql = 'SELECT payload_json FROM obs_index'
-            if where:
-                sql += ' WHERE ' + ' AND '.join(where)
-            # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
-            # sort key gives a total, stable order for cursor pagination over
-            # rows that share the same ``created_at`` (#66).
-            sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
-            rows_params = [*params, max(1, limit)]
+        if search_mode == 'and':
+            for term in like_terms:
+                where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
+                params.append(f'%{_escape_like(term.lower())}%')
+
+            if use_fts:
+                # FTS5 path: CTE join for bm25 ranking.
+                fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
+                match_expr = ' AND '.join(_quote_fts_term(term) for term in fts_terms)
+                sql = (
+                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
+                    'SELECT o.payload_json '
+                    'FROM obs_index o '
+                    'JOIN fts_match f ON f.observation_id = o.observation_id'
+                    f'{fts_where} '
+                    'ORDER BY f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
+                )
+                rows_params: list[object] = [match_expr, *params, max(1, limit)]
+            else:
+                sql = 'SELECT payload_json FROM obs_index'
+                if where:
+                    sql += ' WHERE ' + ' AND '.join(where)
+                # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
+                # sort key gives a total, stable order for cursor pagination over
+                # rows that share the same ``created_at`` (#66).
+                sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                rows_params = [*params, max(1, limit)]
+
+        else:  # search_mode == 'or'
+            # OR behavior: query terms combined with OR; base filters remain AND.
+            like_or_preds: list[str] = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in like_terms]
+            like_or_params: list[object] = [f'%{_escape_like(t.lower())}%' for t in like_terms]
+
+            if use_fts:
+                match_expr = ' OR '.join(_quote_fts_term(term) for term in fts_terms)
+                # LEFT JOIN so LIKE-only rows (not in obs_fts) are also returned.
+                term_preds = ['f.observation_id IS NOT NULL', *like_or_preds]
+                term_or = '(' + ' OR '.join(term_preds) + ')'
+                if where:
+                    combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
+                else:
+                    combined_where = ' WHERE ' + term_or
+                sql = (
+                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
+                    'SELECT o.payload_json '
+                    'FROM obs_index o '
+                    'LEFT JOIN fts_match f ON f.observation_id = o.observation_id'
+                    f'{combined_where} '
+                    'ORDER BY (f.rank IS NULL), f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
+                )
+                rows_params = [match_expr, *params, *like_or_params, max(1, limit)]
+            else:
+                if like_or_preds:
+                    term_or = '(' + ' OR '.join(like_or_preds) + ')'
+                    if where:
+                        combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
+                    else:
+                        combined_where = ' WHERE ' + term_or
+                else:
+                    # No query terms: recency search (same as 'and' with empty query).
+                    combined_where = (' WHERE ' + ' AND '.join(where)) if where else ''
+                sql = 'SELECT payload_json FROM obs_index'
+                sql += combined_where
+                sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                rows_params = [*params, *like_or_params, max(1, limit)]
 
         with self._lock:
             try:
@@ -597,16 +692,33 @@ class LocalIndex:
                 if use_fts:
                     # FTS query failed (e.g. unsupported syntax); fall back to LIKE.
                     log.debug('LocalIndex.search FTS failed, falling back to LIKE: %s', e)
-                    like_where = [*where]
-                    like_params = [*params]
-                    for term in fts_terms:
-                        like_where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
-                        like_params.append(f'%{_escape_like(term.lower())}%')
-                    like_sql = 'SELECT payload_json FROM obs_index'
-                    if like_where:
-                        like_sql += ' WHERE ' + ' AND '.join(like_where)
-                    like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
-                    like_params.append(max(1, limit))
+                    if search_mode == 'and':
+                        # AND fallback: fts_terms become AND LIKE (where already has like_terms).
+                        like_where = [*where]
+                        like_params: list[object] = [*params]
+                        for term in fts_terms:
+                            like_where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
+                            like_params.append(f'%{_escape_like(term.lower())}%')
+                        like_sql = 'SELECT payload_json FROM obs_index'
+                        if like_where:
+                            like_sql += ' WHERE ' + ' AND '.join(like_where)
+                        like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                        like_params.append(max(1, limit))
+                    else:  # 'or' fallback: all terms become OR LIKE.
+                        all_or_terms = [*fts_terms, *like_terms]
+                        or_fallback_preds = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in all_or_terms]
+                        or_fallback_p: list[object] = [f'%{_escape_like(t.lower())}%' for t in all_or_terms]
+                        like_sql = 'SELECT payload_json FROM obs_index'
+                        if where and or_fallback_preds:
+                            like_sql += (
+                                ' WHERE ' + ' AND '.join(where) + ' AND (' + ' OR '.join(or_fallback_preds) + ')'
+                            )
+                        elif where:
+                            like_sql += ' WHERE ' + ' AND '.join(where)
+                        elif or_fallback_preds:
+                            like_sql += ' WHERE (' + ' OR '.join(or_fallback_preds) + ')'
+                        like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                        like_params = [*params, *or_fallback_p, max(1, limit)]
                     try:
                         rows = self._conn.execute(like_sql, like_params).fetchall()
                     except sqlite3.Error as e2:

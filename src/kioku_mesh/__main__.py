@@ -229,6 +229,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
         project=args.project or '',
         since_iso=args.since or '',
         limit=args.limit,
+        search_mode=args.search_mode,
     )
     if not results:
         if args.format == 'text':
@@ -1634,6 +1635,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_search.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
     p_search.add_argument('-n', '--limit', type=int, default=50, help='max results (default: 50)')
     p_search.add_argument('--format', choices=_SEARCH_FORMATS, default='text', help='output format (default: text)')
+    p_search.add_argument(
+        '--search-mode',
+        dest='search_mode',
+        choices=['and', 'or', 'and_or'],
+        default='and',
+        help='search mode: and (default) / or / and_or',
+    )
     p_search.set_defaults(func=_cmd_search)
 
     p_delete = sub.add_parser('delete', help='Soft-delete an observation (tombstone)')

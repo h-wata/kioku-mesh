@@ -1794,3 +1794,260 @@ def test_search_whitespace_only_returns_recency(tmp_path: Path) -> None:
         assert obs2.observation_id in ids
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #218: search_mode tests
+# ---------------------------------------------------------------------------
+
+
+def test_search_mode_backward_compat(tmp_path: Path) -> None:
+    """search_mode unspecified and search_mode='and' return identical results."""
+    from kioku_mesh.local_index import SEARCH_MODES  # noqa: PLC0415
+
+    assert 'and' in SEARCH_MODES
+    assert 'or' in SEARCH_MODES
+    assert 'and_or' in SEARCH_MODES
+
+    idx = LocalIndex.connect(str(tmp_path / 'compat.db'))
+    try:
+        both = _mk_obs('alpha beta content', project='compat')
+        alpha_only = _mk_obs('alpha content only', project='compat')
+        idx.upsert(both)
+        idx.upsert(alpha_only)
+
+        default_res = idx.search(query='alpha beta', project='compat', include_superseded=True)
+        and_res = idx.search(query='alpha beta', project='compat', include_superseded=True, search_mode='and')
+        assert [r.observation_id for r in default_res] == [r.observation_id for r in and_res]
+    finally:
+        idx.close()
+
+
+def test_search_mode_or_recall(tmp_path: Path) -> None:
+    """'or' mode returns rows containing alpha only, beta only, and both; unrelated excluded."""
+    idx = LocalIndex.connect(str(tmp_path / 'or_recall.db'))
+    try:
+        both = _mk_obs('alpha beta present', project='orre')
+        alpha_only = _mk_obs('alpha without the other word', project='orre')
+        beta_only = _mk_obs('beta without the other word', project='orre')
+        unrelated = _mk_obs('completely unrelated content', project='orre')
+        for obs in (both, alpha_only, beta_only, unrelated):
+            idx.upsert(obs)
+
+        results = idx.search(query='alpha beta', project='orre', include_superseded=True, search_mode='or')
+        ids = {r.observation_id for r in results}
+        assert both.observation_id in ids
+        assert alpha_only.observation_id in ids
+        assert beta_only.observation_id in ids
+        assert unrelated.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_and_excludes_partial(tmp_path: Path) -> None:
+    """'and' mode (default) excludes rows that only have one of the query terms."""
+    idx = LocalIndex.connect(str(tmp_path / 'and_excl.db'))
+    try:
+        both = _mk_obs('alpha beta present', project='andex')
+        alpha_only = _mk_obs('alpha without the other word', project='andex')
+        for obs in (both, alpha_only):
+            idx.upsert(obs)
+
+        results = idx.search(query='alpha beta', project='andex', include_superseded=True, search_mode='and')
+        ids = {r.observation_id for r in results}
+        assert both.observation_id in ids
+        assert alpha_only.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_and_or_ordering_and_dedupe(tmp_path: Path) -> None:
+    """'and_or' places AND hits before OR-only hits; no duplicate observation_ids; result <= limit."""
+    idx = LocalIndex.connect(str(tmp_path / 'andor.db'))
+    try:
+        both = _mk_obs('alpha beta present', project='andor')
+        alpha_only = _mk_obs('alpha without the other word', project='andor')
+        beta_only = _mk_obs('beta without the other word', project='andor')
+        for obs in (both, alpha_only, beta_only):
+            idx.upsert(obs)
+
+        results = idx.search(
+            query='alpha beta', project='andor', include_superseded=True, search_mode='and_or', limit=10
+        )
+        ids = [r.observation_id for r in results]
+        assert ids == list(dict.fromkeys(ids)), 'no duplicate observation_ids'
+        assert len(ids) <= 10
+        # AND hit (both) must come before OR-only hits
+        if both.observation_id in ids and alpha_only.observation_id in ids:
+            assert ids.index(both.observation_id) < ids.index(alpha_only.observation_id)
+        if both.observation_id in ids and beta_only.observation_id in ids:
+            assert ids.index(both.observation_id) < ids.index(beta_only.observation_id)
+    finally:
+        idx.close()
+
+
+def test_search_mode_and_or_fill_from_or(tmp_path: Path) -> None:
+    """'and_or' fills missing results from OR phase when AND returns fewer than limit."""
+    idx = LocalIndex.connect(str(tmp_path / 'andor_fill.db'))
+    try:
+        alpha_only = _mk_obs('alpha without other', project='fill')
+        beta_only = _mk_obs('beta without other', project='fill')
+        for obs in (alpha_only, beta_only):
+            idx.upsert(obs)
+
+        # AND phase yields 0 hits; OR phase should fill both
+        results = idx.search(query='alpha beta', project='fill', include_superseded=True, search_mode='and_or')
+        ids = {r.observation_id for r in results}
+        assert alpha_only.observation_id in ids
+        assert beta_only.observation_id in ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_or_short_like_terms(tmp_path: Path) -> None:
+    """All short terms (< 3 chars): 'or' uses LIKE OR, escaping %, _, backslash."""
+    idx = LocalIndex.connect(str(tmp_path / 'short_or.db'))
+    try:
+        has_qx = _mk_obs('content with qx marker', project='short')
+        has_zy = _mk_obs('content with zy marker', project='short')
+        has_both = _mk_obs('content with qx and zy markers', project='short')
+        unrelated = _mk_obs('no markers here', project='short')
+        for obs in (has_qx, has_zy, has_both, unrelated):
+            idx.upsert(obs)
+
+        results = idx.search(query='qx zy', project='short', include_superseded=True, search_mode='or')
+        ids = {r.observation_id for r in results}
+        assert has_qx.observation_id in ids
+        assert has_zy.observation_id in ids
+        assert has_both.observation_id in ids
+        assert unrelated.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_or_mixed_fts_and_like(tmp_path: Path) -> None:
+    """Mixed long+short terms: 'or' returns rows matching long-only, short-only, or both."""
+    idx = LocalIndex.connect(str(tmp_path / 'mixed_or.db'))
+    try:
+        long_only = _mk_obs('migration happened here', project='mixed')
+        short_only = _mk_obs('has qx short marker', project='mixed')
+        both_terms = _mk_obs('migration and qx together', project='mixed')
+        neither = _mk_obs('unrelated content entirely', project='mixed')
+        for obs in (long_only, short_only, both_terms, neither):
+            idx.upsert(obs)
+
+        or_results = idx.search(query='migration qx', project='mixed', include_superseded=True, search_mode='or')
+        or_ids = {r.observation_id for r in or_results}
+        assert long_only.observation_id in or_ids
+        assert short_only.observation_id in or_ids
+        assert both_terms.observation_id in or_ids
+        assert neither.observation_id not in or_ids
+
+        and_results = idx.search(query='migration qx', project='mixed', include_superseded=True, search_mode='and')
+        and_ids = {r.observation_id for r in and_results}
+        assert both_terms.observation_id in and_ids
+        assert long_only.observation_id not in and_ids
+        assert short_only.observation_id not in and_ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_base_filter_superseded_not_leaked(tmp_path: Path) -> None:
+    """include_superseded=False hides superseded rows in 'or' and 'and_or' modes."""
+    idx = LocalIndex.connect(str(tmp_path / 'superseded_or.db'))
+    try:
+        old = _mk_obs('alpha beta old observation', project='sup')
+        new = _mk_obs('alpha beta new observation supersedes old', project='sup')
+        new.supersedes = [old.observation_id]
+        idx.upsert(old)
+        idx.upsert(new)
+
+        for mode in ('or', 'and_or'):
+            results = idx.search(query='alpha', project='sup', include_superseded=False, search_mode=mode)
+            ids = {r.observation_id for r in results}
+            assert new.observation_id in ids, f'{mode}: live superseder must appear'
+            assert old.observation_id not in ids, f'{mode}: superseded row must be hidden'
+    finally:
+        idx.close()
+
+
+def test_search_mode_base_filter_project_not_leaked(tmp_path: Path) -> None:
+    """Project filter remains AND in 'or' mode — rows from other projects are excluded."""
+    idx = LocalIndex.connect(str(tmp_path / 'proj_or.db'))
+    try:
+        in_proj = _mk_obs('alpha content', project='target')
+        other_proj = _mk_obs('alpha content', project='other')
+        idx.upsert(in_proj)
+        idx.upsert(other_proj)
+
+        results = idx.search(query='alpha', project='target', include_superseded=True, search_mode='or')
+        ids = {r.observation_id for r in results}
+        assert in_proj.observation_id in ids
+        assert other_proj.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_unknown_raises(tmp_path: Path) -> None:
+    """Unknown search_mode raises ValueError."""
+    idx = LocalIndex.connect(str(tmp_path / 'unknown_mode.db'))
+    try:
+        with pytest.raises(ValueError, match='search_mode'):
+            idx.search(query='alpha', search_mode='fuzzy')
+    finally:
+        idx.close()
+
+
+def test_search_mode_and_or_limit_respected(tmp_path: Path) -> None:
+    """'and_or' final result length never exceeds limit."""
+    idx = LocalIndex.connect(str(tmp_path / 'andor_limit.db'))
+    try:
+        for i in range(20):
+            idx.upsert(_mk_obs(f'alpha content number {i}', project='lim'))
+        for i in range(20):
+            idx.upsert(_mk_obs(f'beta content number {i}', project='lim'))
+
+        limit = 5
+        results = idx.search(
+            query='alpha beta', project='lim', include_superseded=True, search_mode='and_or', limit=limit
+        )
+        assert len(results) <= limit
+    finally:
+        idx.close()
+
+
+def test_search_mode_or_multiword_no_and_hit(tmp_path: Path) -> None:
+    """'or' recovers hits that 'and' misses when no row contains all terms."""
+    idx = LocalIndex.connect(str(tmp_path / 'or_recall2.db'))
+    try:
+        has_foo = _mk_obs('foo is here', project='recall2')
+        has_bar = _mk_obs('bar is here', project='recall2')
+        idx.upsert(has_foo)
+        idx.upsert(has_bar)
+
+        and_results = idx.search(query='foo bar', project='recall2', include_superseded=True, search_mode='and')
+        assert len(and_results) == 0, 'and mode must return 0 when no row has both terms'
+
+        or_results = idx.search(query='foo bar', project='recall2', include_superseded=True, search_mode='or')
+        or_ids = {r.observation_id for r in or_results}
+        assert has_foo.observation_id in or_ids
+        assert has_bar.observation_id in or_ids
+    finally:
+        idx.close()
+
+
+def test_search_mode_or_whitespace_query_is_recency(tmp_path: Path) -> None:
+    """'or' mode with whitespace-only query still returns recency results."""
+    idx = LocalIndex.connect(str(tmp_path / 'or_ws.db'))
+    try:
+        obs1 = _mk_obs('alpha obs', project='orws')
+        obs2 = _mk_obs('beta obs', project='orws')
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+
+        results = idx.search(query='   ', project='orws', include_superseded=True, search_mode='or')
+        ids = {r.observation_id for r in results}
+        assert obs1.observation_id in ids
+        assert obs2.observation_id in ids
+    finally:
+        idx.close()
