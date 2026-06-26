@@ -499,6 +499,84 @@ def check_fts5(index: object = None) -> CheckResult:
     )
 
 
+# ADR-0026 §C: conflicting-latest check.
+
+
+def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResult:
+    """Flag subjects that carry more than one live decision/config entry.
+
+    The save-time supersede suggestion (ADR-0026 §A) cannot fire when two
+    hosts each save a new decision for the same subject before seeing each
+    other's write — locally, neither sees the other as a candidate. The
+    result is several live, non-superseded ``decision`` / ``config`` entries
+    that share a (project, normalized subject, memory_type, scope) key, with
+    no signal of which is current. This read-only sweep surfaces those
+    groups so an operator can supersede or delete the stale ones. It is
+    deliberately local (no global reorganization, per arXiv:2606.24775).
+
+    ``observations`` is injectable for tests; by default it pulls the live,
+    non-superseded set from the active backend.
+    """
+    from .memory.supersede import normalize_subject  # noqa: PLC0415
+    from .memory.supersede import SUPERSEDE_TYPES  # noqa: PLC0415
+
+    if observations is None:
+        try:
+            from .memory.backend import get_backend  # noqa: PLC0415
+
+            observations = get_backend().search_observations(limit=10_000, include_superseded=False)
+        except Exception as e:  # noqa: BLE001
+            return CheckResult(
+                name='conflicting_latest',
+                status=CheckStatus.WARN,
+                summary='conflicting-latest check skipped: could not read memory',
+                hint='Check the backend config / `kioku-mesh status`.',
+                details={'error': type(e).__name__},
+            )
+
+    groups: dict[tuple[str, str, str, str, str], list[Any]] = {}
+    for o in observations:
+        if o.memory_type not in SUPERSEDE_TYPES:
+            continue
+        subject_key = normalize_subject(o.subject)
+        if not subject_key:
+            continue
+        key = (o.project, o.memory_type, subject_key, o.visibility, o.scope_id)
+        groups.setdefault(key, []).append(o)
+
+    conflicts = {k: v for k, v in groups.items() if len(v) > 1}
+    if not conflicts:
+        return CheckResult(
+            name='conflicting_latest',
+            status=CheckStatus.PASS,
+            summary='no subject has multiple live decision/config entries',
+            details={'conflicts': 0},
+        )
+
+    examples = []
+    for (project, mtype, subject_key, _vis, _scope), obs_list in sorted(conflicts.items())[:5]:
+        ids = [o.observation_id for o in obs_list]
+        examples.append(
+            {
+                'project': project,
+                'memory_type': mtype,
+                'subject': subject_key,
+                'count': len(obs_list),
+                'observation_ids': ids,
+            }
+        )
+    return CheckResult(
+        name='conflicting_latest',
+        status=CheckStatus.WARN,
+        summary=f'{len(conflicts)} subject(s) have multiple live decision/config entries',
+        hint=(
+            'Resolve each by superseding (save the current one with supersedes=[old_ids]) '
+            'or deleting the stale entries (`kioku-mesh delete <id>`).'
+        ),
+        details={'conflicts': len(conflicts), 'examples': examples},
+    )
+
+
 # -- Orchestration & rendering -------------------------------------------------
 
 
@@ -517,6 +595,7 @@ def run_all_checks() -> list[CheckResult]:
         check_embedded_router(),
         check_tls_certs(),
         check_fts5(),
+        check_conflicting_latest(),
     ]
 
 

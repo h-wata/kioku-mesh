@@ -166,9 +166,43 @@ def _cmd_save(args: argparse.Namespace) -> int:
         visibility=visibility,
         scope_id=scope_id,
     )
-    get_backend().put_observation(obs)
+    backend = get_backend()
+    backend.put_observation(obs)
     print(f'saved: {obs.observation_id} (visibility={format_visibility(visibility, scope_id)})')
+    # ADR-0026 §A: suggest-first supersede detection. Only when the caller
+    # did not already declare what this entry replaces — if they passed
+    # --supersedes they have handled it explicitly.
+    if not supersedes:
+        try:
+            candidates = backend.find_supersede_candidates(obs)
+        except Exception:  # noqa: BLE001 — detection is best-effort, never fail a save
+            candidates = []
+        for line in _format_supersede_hint(candidates):
+            print(line)
     return 0
+
+
+def _format_supersede_hint(candidates: list[Observation]) -> list[str]:
+    """Render the ADR-0026 supersede-candidate hint, or [] when there are none.
+
+    Shared by the CLI ``save`` text output; the MCP tool builds an
+    equivalent structured payload instead.
+    """
+    if not candidates:
+        return []
+    lines = [
+        f'supersede candidates ({len(candidates)} live entr'
+        f'{"y" if len(candidates) == 1 else "ies"} with the same subject/type):'
+    ]
+    for c in candidates:
+        body = c.summary or _truncate_search_content(c.content, 60)
+        lines.append(f'  - {c.observation_id}  {c.created_at[:10]}  {body}')
+    ids = ','.join(c.observation_id for c in candidates)
+    lines.append(
+        '  hint: if this revises them, save with --supersedes '
+        f'{ids} so the older one is hidden, or `kioku-mesh delete <id>` to retire it.'
+    )
+    return lines
 
 
 def _truncate_search_content(content: str, limit: int = 80) -> str:

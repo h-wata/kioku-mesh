@@ -63,6 +63,8 @@ class MemoryBackend(Protocol):
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None: ...
 
+    def find_supersede_candidates(self, obs: Observation) -> list[Observation]: ...
+
     def physical_delete_observation(self, observation_id: str) -> tuple[bool, bool]: ...
 
     def get_status(self) -> BackendStatus: ...
@@ -132,6 +134,11 @@ class LocalBackend:
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None:
         return self._idx.find_by_id(observation_id, include_deleted=True)
+
+    def find_supersede_candidates(self, obs: Observation) -> list[Observation]:
+        from .supersede import find_candidates_in_index
+
+        return find_candidates_in_index(self._idx, obs)
 
     def physical_delete_observation(self, observation_id: str) -> tuple[bool, bool]:
         obs = self._idx.find_by_id(observation_id, include_deleted=True)
@@ -266,6 +273,12 @@ class ZenohBackend:
         from . import store
 
         return store.find_observation_by_id(observation_id)
+
+    def find_supersede_candidates(self, obs: Observation) -> list[Observation]:
+        from . import store
+        from .supersede import find_candidates_in_index
+
+        return find_candidates_in_index(store.get_index(), obs)
 
     def physical_delete_observation(self, observation_id: str) -> tuple[bool, bool]:
         from . import store
