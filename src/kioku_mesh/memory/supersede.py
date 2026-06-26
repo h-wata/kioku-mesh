@@ -23,6 +23,7 @@ default behavior is to suggest rather than silently supersede.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -42,6 +43,8 @@ DEFAULT_CANDIDATE_LIMIT = 5
 # a save (or a doctor sweep) pay an unbounded parse cost. Decisions per
 # project are few in practice; this is a backstop, not a tuning knob.
 _POOL_LIMIT = 10_000
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_subject(subject: str) -> str:
@@ -87,6 +90,12 @@ def find_candidates_in_index(
         include_superseded=False,
         limit=_POOL_LIMIT,
     )
+    if len(pool) >= _POOL_LIMIT:
+        logger.debug(
+            'supersede candidate pool reached _POOL_LIMIT=%d for project=%r; candidates may be truncated',
+            _POOL_LIMIT,
+            obs.project,
+        )
 
     out: list['Observation'] = []
     for cand in pool:

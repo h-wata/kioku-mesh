@@ -175,10 +175,10 @@ def _cmd_save(args: argparse.Namespace) -> int:
     if not supersedes:
         try:
             candidates = backend.find_supersede_candidates(obs)
+            for line in _format_supersede_hint(candidates):
+                print(line)
         except Exception:  # noqa: BLE001 — detection is best-effort, never fail a save
-            candidates = []
-        for line in _format_supersede_hint(candidates):
-            print(line)
+            pass
     return 0
 
 
