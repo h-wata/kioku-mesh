@@ -204,27 +204,40 @@ flowchart TB
 ```
 
 ```bash
+# 1. Install zenohd + zenoh-backend-rocksdb (default: ~/.local/share/kioku-mesh/bin/)
+kioku-mesh zenohd install
+
+# 2. Add to PATH (the command prints the exact export line after install)
+export PATH="$HOME/.local/share/kioku-mesh/bin:$PATH"
+# Persist: add the line above to ~/.bashrc or ~/.zshrc
+
+# 3. Generate config and, optionally, a systemd user unit for login auto-start
 # hub
 kioku-mesh init --mode hub \
   --listen 127.0.0.1 \
-  --listen 192.168.3.10
+  --listen 192.168.3.10 \
+  [--install-systemd]
 
 # spoke
 kioku-mesh init --mode spoke \
   --listen 127.0.0.1 \
-  --connect 192.168.3.10
-```
+  --connect 192.168.3.10 \
+  [--install-systemd]
 
-Mesh mode requires `zenohd` and `zenoh-backend-rocksdb` on `PATH`. The current
-target is Zenoh 1.9.0.
-
-```bash
+# Without --install-systemd, start zenohd manually:
 zenohd -c ~/.config/kioku-mesh/zenohd.json5
 ```
 
-For login auto-start on Linux systemd hosts, add `--install-systemd` to
-`kioku-mesh init --mode <hub|spoke> ...`; the wrapper writes a user unit pointing
-at the generated config.
+`kioku-mesh zenohd install` auto-detects your arch and OS, fetches the matching
+standalone zip from GitHub Releases, verifies the SHA-256 checksum via the GitHub
+Releases API, and extracts `zenohd` and the RocksDB plugin into the target directory.
+Options: `--version 1.9.0` (default), `--bin-dir DIR`, `--verbose`.
+
+For a smoke test without installing anything, `kioku-mesh mesh start` runs an
+in-process Zenoh router (no `zenohd` binary required).
+
+Advanced / offline: if you prefer to obtain the binaries yourself, place `zenohd`
+and the RocksDB plugin on `PATH` manually and then run `kioku-mesh init` as above.
 
 kioku-mesh is designed to run inside a closed, trusted network. Keep port
 `7447/tcp` reachable only between trusted peers. Do not expose it to the
