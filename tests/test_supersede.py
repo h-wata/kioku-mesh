@@ -14,6 +14,7 @@ These are pure SQLite / function tests — no zenohd, no backend wiring.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 
@@ -219,3 +220,68 @@ def test_format_supersede_hint_lists_ids_and_advice() -> None:
     assert old.observation_id in text
     assert '--supersedes' in text
     assert 'delete' in text
+
+
+# -- C2 / C3 regression tests --------------------------------------------------
+
+
+def test_c2_cmd_save_swallows_renderer_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_cmd_save must return 0 even when _format_supersede_hint raises (C2)."""
+    import argparse
+    from unittest.mock import MagicMock
+
+    import kioku_mesh.__main__ as cli_module
+
+    args = argparse.Namespace(
+        tags='',
+        source_files=None,
+        references=None,
+        supersedes=None,
+        visibility='',
+        content='use PostgreSQL',
+        project='demo',
+        memory_type='decision',
+        importance=3,
+        subject='db',
+        summary='',
+    )
+
+    mock_backend = MagicMock()
+    mock_backend.find_supersede_candidates.return_value = [_mk('old decision', subject='db')]
+    monkeypatch.setattr(cli_module, 'get_backend', lambda: mock_backend)
+    monkeypatch.setattr(cli_module, 'resolve_write_visibility', lambda _: ('', ''))
+    monkeypatch.setattr(cli_module, 'format_visibility', lambda v, s: 'local')
+
+    def _raiser(_: object) -> NoReturn:
+        raise RuntimeError('render boom')
+
+    monkeypatch.setattr(cli_module, '_format_supersede_hint', _raiser)
+
+    result = cli_module._cmd_save(args)
+
+    assert result == 0
+    mock_backend.put_observation.assert_called_once()
+
+
+def test_pool_limit_triggers_debug_log(
+    idx: LocalIndex,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """find_candidates_in_index emits a debug log when pool hits _POOL_LIMIT (C3)."""
+    from kioku_mesh.memory.supersede import _POOL_LIMIT
+    import kioku_mesh.memory.supersede as supersede_module
+
+    obs = _mk('use PostgreSQL', subject='db')
+    fake_pool = [_mk('old', subject='other')] * _POOL_LIMIT
+    monkeypatch.setattr(LocalIndex, 'search', lambda self, **kw: fake_pool)
+
+    debug_calls: list[str] = []
+    monkeypatch.setattr(
+        supersede_module.logger,
+        'debug',
+        lambda msg, *args: debug_calls.append(msg % args if args else msg),
+    )
+
+    find_candidates_in_index(idx, obs)
+
+    assert any('_POOL_LIMIT' in m for m in debug_calls)

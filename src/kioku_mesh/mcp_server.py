@@ -304,18 +304,18 @@ def save_observation(
     if not supersedes:
         try:
             candidates = backend.find_supersede_candidates(obs)
+            if candidates:
+                listed = '; '.join(
+                    f'{c.observation_id} ({c.created_at[:10]}: {c.summary or c.subject})' for c in candidates
+                )
+                msg += (
+                    f'\nsupersede_candidates: {len(candidates)} live entr'
+                    f'{"y" if len(candidates) == 1 else "ies"} share this subject/type: {listed}.'
+                    ' If this revises them, re-save with supersedes=[...] to hide the stale one,'
+                    ' or call delete_memory on it.'
+                )
         except Exception:  # noqa: BLE001 — detection must never fail a save
-            candidates = []
-        if candidates:
-            listed = '; '.join(
-                f'{c.observation_id} ({c.created_at[:10]}: {c.summary or c.subject})' for c in candidates
-            )
-            msg += (
-                f'\nsupersede_candidates: {len(candidates)} live entr'
-                f'{"y" if len(candidates) == 1 else "ies"} share this subject/type: {listed}.'
-                ' If this revises them, re-save with supersedes=[...] to hide the stale one,'
-                ' or call delete_memory on it.'
-            )
+            pass
     return msg
 
 
