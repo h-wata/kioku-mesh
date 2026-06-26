@@ -1605,6 +1605,37 @@ def test_rebuild_incremental_fts_unchanged_not_retokenized(tmp_path: Path) -> No
         idx.close()
 
 
+def test_rebuild_incremental_fts_net_delete(tmp_path: Path) -> None:
+    """Same observation_id in both obs scan and tombstone scan nets to delete in FTS (C1).
+
+    When a fresh reconcile sees an obs and its tombstone simultaneously, the
+    incremental path upserts into FTS then deletes (upsert->delete order),
+    so the row must not survive in obs_fts.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'incr_net_delete.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('net delete target', project='incr')
+        tomb = Tombstone(observation_id=obs.observation_id, deleted_at='2026-06-01T00:00:00.000000Z')
+        # Fresh index: obs is new (upsert_rows) and has a tombstone (mark_rows).
+        stats = idx.rebuild_from_zenoh(_FakeSession([obs], [tomb]))
+
+        assert stats.added == 1
+        assert stats.marked_deleted == 1
+        (fts_count,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert fts_count == 0, 'FTS must have zero rows for net-deleted observation'
+        assert idx.search(project='incr') == [], 'net-deleted obs must not appear in search'
+    finally:
+        idx.close()
+
+
 # ---------------------------------------------------------------------------
 # R9: supersedes-aware hide x FTS full rebuild (PR #207 cross-review)
 # ---------------------------------------------------------------------------
