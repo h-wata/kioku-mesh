@@ -30,9 +30,10 @@ versions without a migration path until `1.0.0`.
   デフォルト `'and'`(全語必須)、`'or'`(いずれか1語)、`'and_or'`(完全一致 AND を優先し OR で補完)の3モードを
   `search_memory` MCP ツールおよび `search_observations` API に追加。
 
-- **Incremental FTS rebuild + drift-detection guard** (ADR-0025, #228).
-  FTS インデックスの差分更新パスを追加し、フルリビルドを避けて低レイテンシを維持。
-  SQLite main table と FTS テーブルの乖離 (drift) をしきい値で検出し、超過時のみフルリビルドを実施する guard を追加。
+- **Incremental FTS rebuild + COUNT-mismatch guard** (ADR-0025, #228).
+  reconcile / 起動時の rebuild_from_zenoh の FTS 処理を差分適用に変更し、rebuild コストを削減。
+  差分適用後に COUNT(obs_fts) と live obs_index 件数(deleted_at IS NULL AND shadowed_at IS NULL)を比較し、
+  不一致時のみ full rebuild にフォールバックする guard を追加。threshold(しきい値)概念は無い。
 
 - **FTS5 trigram 全文検索 + supersedes-aware 検索** (ADR-0021, #204).
   `LocalIndex` に FTS5 virtual table (`obs_fts`) を追加し、日本語部分一致を含む bm25 ランキング付き全文検索を実現。
