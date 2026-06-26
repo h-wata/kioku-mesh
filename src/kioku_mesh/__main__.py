@@ -1541,6 +1541,94 @@ def _cmd_tls_info(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
+    from datetime import timezone
+
+    from .memory.visibility_migration import build_migration_plan
+    from .memory.visibility_migration import execute_migration
+    from .memory.visibility_migration import parse_migration_target
+    from .memory.visibility_migration import scan_legacy_visibility
+
+    status = get_backend().get_status()
+    if status.pending_puts > 0:
+        print(
+            f'error: pending_puts={status.pending_puts} > 0. '
+            'Run `kioku-mesh drain --pending` first to prevent legacy key recreation.',
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.from_source != 'legacy':
+        print(f'error: --from {args.from_source!r}: only "legacy" is supported in Phase C.', file=sys.stderr)
+        return 2
+
+    try:
+        target = parse_migration_target(args.to_visibility)
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+
+    scope = args.scope or ''
+    key_prefix = args.key_prefix or ''
+    batch_size = min(max(1, args.batch_size), 10_000)
+
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    run_id = now_dt.strftime('%Y%m%dT%H%M%SZ')
+
+    state_base = Path.home() / '.local' / 'share' / 'kioku-mesh' / 'migrations' / run_id
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else state_base / 'checkpoint.json'
+    backup_dir = Path(args.backup_dir) if args.backup_dir else state_base / 'backup'
+
+    if args.resume:
+        resume_path = Path(args.resume)
+        if not resume_path.is_file():
+            print(f'error: --resume {resume_path}: file not found.', file=sys.stderr)
+            return 2
+        checkpoint_path = resume_path
+
+    session = get_session()
+
+    print('Scanning legacy keys...', file=sys.stderr)
+    try:
+        records = scan_legacy_visibility(session, scope=scope, key_prefix=key_prefix)
+    except Exception as e:  # noqa: BLE001
+        print(f'error: scan failed: {e}', file=sys.stderr)
+        return 1
+
+    print(f'Found {len(records)} legacy records. Building migration plan...', file=sys.stderr)
+    try:
+        plan = build_migration_plan(records, target, session)
+    except Exception as e:  # noqa: BLE001
+        print(f'error: plan build failed: {e}', file=sys.stderr)
+        return 1
+
+    result = execute_migration(
+        plan,
+        session=session,
+        dry_run=args.dry_run,
+        yes=args.yes,
+        batch_size=batch_size,
+        checkpoint_path=checkpoint_path,
+        backup_dir=backup_dir,
+        now_iso=now_iso,
+    )
+
+    if not args.dry_run:
+        print(
+            f'migrate-visibility complete: '
+            f'planned={result.planned} copied={result.copied} verified={result.verified} '
+            f'deleted={result.deleted} repair_put={result.repair_put} '
+            f'conflicts={result.conflicts} failures={result.failures}'
+        )
+
+    if result.failures > 0:
+        return 1
+    if result.conflicts > 0:
+        return 1
+    return 0
+
+
 def _cmd_zenohd_install(args: argparse.Namespace) -> int:
     bin_dir = Path(args.bin_dir) if args.bin_dir else zenohd_install_module.default_bin_dir()
     try:
@@ -2075,6 +2163,54 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Print download progress',
     )
     p_zenohd_install.set_defaults(func=_cmd_zenohd_install)
+
+    p_migrate = sub.add_parser(
+        'migrate-visibility',
+        help='Migrate legacy obs/tomb keys into an explicit visibility namespace (ADR-0019 Phase C)',
+    )
+    p_migrate.add_argument(
+        '--from',
+        dest='from_source',
+        required=True,
+        choices=['legacy'],
+        help='source namespace (currently only "legacy" is supported)',
+    )
+    p_migrate.add_argument(
+        '--to',
+        dest='to_visibility',
+        required=True,
+        help='target visibility: mesh | user | team | team/<team_id>',
+    )
+    p_migrate.add_argument(
+        '--dry-run',
+        dest='dry_run',
+        action='store_true',
+        help='scan and print plan without any mutations',
+    )
+    p_migrate.add_argument('--yes', action='store_true', help='skip interactive confirmation')
+    _scope_group = p_migrate.add_mutually_exclusive_group()
+    _scope_group.add_argument(
+        '--scope',
+        default='',
+        help='identity scope: agent_family[/client_id[/pc_id[/session_id]]] (1-4 segments)',
+    )
+    _scope_group.add_argument(
+        '--key-prefix',
+        dest='key_prefix',
+        default='',
+        help='advanced: legacy obs key prefix (must start with mem/obs); appends /**',
+    )
+    p_migrate.add_argument(
+        '--batch-size',
+        dest='batch_size',
+        type=_positive_int,
+        default=500,
+        help='records processed per checkpoint flush (default 500, max 10000)',
+    )
+    p_migrate.add_argument('--resume', default='', help='resume from an existing checkpoint JSON path')
+    p_migrate.add_argument('--checkpoint', default='', help='checkpoint file path (auto-created if not given)')
+    p_migrate.add_argument('--backup-dir', dest='backup_dir', default='', help='backup directory (auto-created)')
+    p_migrate.set_defaults(func=_cmd_migrate_visibility)
 
     return parser
 
