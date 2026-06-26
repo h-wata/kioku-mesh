@@ -10,6 +10,7 @@ from contextlib import closing
 from datetime import datetime
 from datetime import timezone
 import json
+import logging
 import os
 import re
 import socket
@@ -43,6 +44,8 @@ from .store import MAX_SEARCH
 from .store import search_observations
 from .store import start_pending_drain_background
 from .store import stop_pending_drain_background
+
+log = logging.getLogger(__name__)
 
 _INSTRUCTIONS = """\
 kioku-mesh provides a Zenoh-backed shared memory across coding agents and hosts.
@@ -361,7 +364,8 @@ def get_memory(observation_id: str) -> str:
     obs = get_backend().find_observation_by_id(observation_id)
     if obs is None:
         return f'observation_id {observation_id} not found.'
-    superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
+    _obs_extras = obs._extras if hasattr(obs, '_extras') else {}  # noqa: SLF001
+    superseded_by = _obs_extras.get('superseded_by')
     lines = [
         f'id: {obs.observation_id}',
         f'memory_type: {obs.memory_type}',
@@ -627,13 +631,14 @@ def check_messages(
                     seen_ids.add(msg.msg_id)
                     # Storage-level TTL purge (Issue #215): delete expired entries
                     # from Zenoh so they do not accumulate indefinitely.
+                    # include_expired=True is read-only — skip delete so debug
+                    # inspection does not destroy storage.
                     if is_expired(msg):
-                        try:
-                            session.delete(msg_key)
-                        except Exception:  # noqa: BLE001 — best-effort; non-fatal
-                            pass
-                        # Still include when caller requests expired msgs for debugging.
                         if not include_expired:
+                            try:
+                                session.delete(msg_key)
+                            except Exception:  # noqa: BLE001 — best-effort; non-fatal
+                                pass
                             continue
                     # Override scope from key context if not set on message
                     if not msg.scope:
@@ -647,8 +652,8 @@ def check_messages(
     # Zenoh deletes issued above.
     try:
         index.purge_expired()
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _e:  # noqa: BLE001
+        log.debug('check_messages: inline purge_expired failed: %s', _e)
 
     # Apply filters
     filtered: list[Message] = []
@@ -784,9 +789,11 @@ def purge_expired_messages() -> str:
     except Exception as e:  # noqa: BLE001
         return f'purge failed: Zenoh session unavailable: {type(e).__name__}: {e}'
     try:
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
     except Exception as e:  # noqa: BLE001
         return f'purge failed: {type(e).__name__}: {e}'
+    if not scan_ok:
+        return 'purge incomplete: scan failed (0 messages purged)'
     return f'purged {count} expired message(s)'
 
 

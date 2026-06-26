@@ -49,7 +49,7 @@ def purge_expired_msgs(
     index: 'LocalMessageIndex',
     *,
     now: datetime | None = None,
-) -> int:
+) -> tuple[int, bool]:
     """Delete expired messages from Zenoh storage and the local SQLite index.
 
     Scans the ``msg/**`` key space in Zenoh storage, identifies entries whose
@@ -60,8 +60,8 @@ def purge_expired_msgs(
 
     Malformed payloads and individual delete failures are logged and skipped
     so one bad entry cannot abort the whole sweep.  A transport failure on
-    the initial scan returns 0 immediately (conservative: never delete on
-    ambiguity).
+    the initial scan skips purge entirely (conservative: never delete on
+    ambiguity) and is reported via the scan_ok flag.
 
     Args:
         session: An open Zenoh session.
@@ -69,7 +69,8 @@ def purge_expired_msgs(
         now: Reference time for expiry checks (default: :func:`datetime.now`).
 
     Returns:
-        Number of Zenoh keys deleted.
+        Tuple of (purged_count, scan_ok). scan_ok is False when the initial
+        Zenoh scan failed; in that case purged_count is always 0.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -92,7 +93,7 @@ def purge_expired_msgs(
                 expired_keys.append(key)
     except Exception as e:  # noqa: BLE001
         log.warning('purge_expired_msgs: scan failed — skipping purge: %s', e)
-        return 0
+        return 0, False
 
     purged = 0
     for key in expired_keys:
@@ -108,4 +109,4 @@ def purge_expired_msgs(
     except Exception as e:  # noqa: BLE001
         log.warning('purge_expired_msgs: local index purge failed: %s', e)
 
-    return purged
+    return purged, True

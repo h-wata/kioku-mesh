@@ -30,7 +30,6 @@ from kioku_mesh.messaging.local_index import LocalMessageIndex  # noqa: E402
 from kioku_mesh.messaging.models import Message  # noqa: E402
 from kioku_mesh.messaging.purge import purge_expired_msgs  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -60,13 +59,18 @@ def _make_msg(
         scope=scope,
         payload={'text': body},
         body=body,
-        recipient={'kind': 'session', 'session_id': session_id},
+        recipient={
+            'kind': 'session',
+            'session_id': session_id
+        },
         expires_at=expires_at or _future(ttl_sec or 900),
         ttl_sec=ttl_sec,
     )
 
 
-def _make_zenoh_reply(msg: Message, key: str = 'msg/mesh/inbox/session/test-sess/abc123') -> MagicMock:
+def _make_zenoh_reply(
+        msg: Message,
+        key: str = 'msg/mesh/inbox/session/test-sess/abc123') -> MagicMock:
     """Build a mock Zenoh reply carrying ``msg`` at ``key``."""
     reply = MagicMock()
     reply.ok = MagicMock()
@@ -89,6 +93,7 @@ def _run(coro: object) -> object:
 
 
 class TestPurgeExpiredMsgs:
+
     def _make_index(self, tmp_path: Path) -> LocalMessageIndex:
         return LocalMessageIndex(tmp_path / 'messaging' / 'inbox.db')
 
@@ -102,8 +107,9 @@ class TestPurgeExpiredMsgs:
         session.get.return_value = [reply]
         index = self._make_index(tmp_path)
 
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
 
+        assert scan_ok is True
         assert count == 1
         session.delete.assert_called_once_with(expired_key)
 
@@ -117,8 +123,9 @@ class TestPurgeExpiredMsgs:
         session.get.return_value = [reply]
         index = self._make_index(tmp_path)
 
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
 
+        assert scan_ok is True
         assert count == 0
         session.delete.assert_not_called()
 
@@ -137,19 +144,21 @@ class TestPurgeExpiredMsgs:
         ]
         index = self._make_index(tmp_path)
 
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
 
+        assert scan_ok is True
         assert count == 1
         session.delete.assert_called_once_with(expired_key)
 
     def test_purge_returns_zero_on_scan_failure(self, tmp_path: Path) -> None:
-        """Transport failure during scan returns 0 (conservative — no deletes)."""
+        """Transport failure during scan returns (0, False) — conservative, no deletes."""
         session = MagicMock()
         session.get.side_effect = RuntimeError('no zenoh')
         index = self._make_index(tmp_path)
 
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
 
+        assert scan_ok is False
         assert count == 0
         session.delete.assert_not_called()
 
@@ -162,7 +171,9 @@ class TestPurgeExpiredMsgs:
         index.register(expired_msg, 'idx-sess')
 
         session = MagicMock()
-        session.get.return_value = [_make_zenoh_reply(expired_msg, key=expired_key)]
+        session.get.return_value = [
+            _make_zenoh_reply(expired_msg, key=expired_key)
+        ]
 
         purge_expired_msgs(session, index, now=_utc_now())
 
@@ -180,8 +191,9 @@ class TestPurgeExpiredMsgs:
         session.get.return_value = [bad_reply]
         index = self._make_index(tmp_path)
 
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
 
+        assert scan_ok is True
         assert count == 0
         session.delete.assert_not_called()
 
@@ -197,7 +209,8 @@ class TestPurgeExpiredMsgs:
         index = self._make_index(tmp_path)
 
         # Must not raise
-        count = purge_expired_msgs(session, index)
+        count, scan_ok = purge_expired_msgs(session, index)
+        assert scan_ok is True
         assert count == 0  # delete failed, so count stays 0
 
 
@@ -207,7 +220,9 @@ class TestPurgeExpiredMsgs:
 
 
 class TestCheckMessagesLazyDelete:
+
     def _call(self, **kwargs) -> dict:
+
         async def _go() -> dict:
             async with Client(mcp) as client:
                 result = await client.call_tool('check_messages', kwargs)
@@ -215,7 +230,8 @@ class TestCheckMessagesLazyDelete:
 
         return _run(_go())
 
-    def test_check_messages_deletes_expired_from_zenoh(self, tmp_path: Path) -> None:
+    def test_check_messages_deletes_expired_from_zenoh(self,
+                                                       tmp_path: Path) -> None:
         """check_messages deletes expired messages from Zenoh storage (not just filters them)."""
         _reset_index(tmp_path)
         expired_key = 'msg/mesh/inbox/session/lazy-sess/expired123'
@@ -229,9 +245,12 @@ class TestCheckMessagesLazyDelete:
         mock_session.get.return_value = [reply]
 
         with (
-            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('kioku_mesh.mcp_server.get_session_id', return_value='lazy-sess'),
-            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+                patch('kioku_mesh.mcp_server._get_zenoh_session',
+                      return_value=mock_session),
+                patch('kioku_mesh.mcp_server.get_session_id',
+                      return_value='lazy-sess'),
+                patch('kioku_mesh.mcp_server.state_dir',
+                      return_value=tmp_path),
         ):
             result = self._call()
 
@@ -240,7 +259,8 @@ class TestCheckMessagesLazyDelete:
         # AND must be deleted from Zenoh storage
         mock_session.delete.assert_called_once_with(expired_key)
 
-    def test_check_messages_does_not_delete_live_messages(self, tmp_path: Path) -> None:
+    def test_check_messages_does_not_delete_live_messages(
+            self, tmp_path: Path) -> None:
         """check_messages does not delete non-expired messages from Zenoh."""
         _reset_index(tmp_path)
         live_key = 'msg/mesh/inbox/session/live-sess/live456'
@@ -254,17 +274,21 @@ class TestCheckMessagesLazyDelete:
         mock_session.get.return_value = [reply]
 
         with (
-            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('kioku_mesh.mcp_server.get_session_id', return_value='live-sess'),
-            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+                patch('kioku_mesh.mcp_server._get_zenoh_session',
+                      return_value=mock_session),
+                patch('kioku_mesh.mcp_server.get_session_id',
+                      return_value='live-sess'),
+                patch('kioku_mesh.mcp_server.state_dir',
+                      return_value=tmp_path),
         ):
             result = self._call()
 
         assert result['count'] == 1
         mock_session.delete.assert_not_called()
 
-    def test_check_messages_include_expired_still_deletes_from_zenoh(self, tmp_path: Path) -> None:
-        """With include_expired=True, expired messages are still deleted from Zenoh."""
+    def test_check_messages_include_expired_is_readonly(
+            self, tmp_path: Path) -> None:
+        """With include_expired=True, expired messages are returned but NOT deleted (read-only)."""
         _reset_index(tmp_path)
         expired_key = 'msg/mesh/inbox/session/dbg-sess/expdbg'
         expired_msg = _make_msg(
@@ -277,16 +301,19 @@ class TestCheckMessagesLazyDelete:
         mock_session.get.return_value = [reply]
 
         with (
-            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('kioku_mesh.mcp_server.get_session_id', return_value='dbg-sess'),
-            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+                patch('kioku_mesh.mcp_server._get_zenoh_session',
+                      return_value=mock_session),
+                patch('kioku_mesh.mcp_server.get_session_id',
+                      return_value='dbg-sess'),
+                patch('kioku_mesh.mcp_server.state_dir',
+                      return_value=tmp_path),
         ):
             result = self._call(include_expired=True)
 
-        # Returned for debugging even though expired
+        # Expired message is returned for debugging
         assert result['count'] == 1
-        # But still deleted from Zenoh storage
-        mock_session.delete.assert_called_once_with(expired_key)
+        # But NOT deleted — include_expired=True is read-only (C1 fix)
+        mock_session.delete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +322,9 @@ class TestCheckMessagesLazyDelete:
 
 
 class TestPurgeExpiredMessagesTool:
+
     def _call(self) -> str:
+
         async def _go() -> str:
             async with Client(mcp) as client:
                 result = await client.call_tool('purge_expired_messages', {})
@@ -304,6 +333,7 @@ class TestPurgeExpiredMessagesTool:
         return _run(_go())
 
     def test_tool_registered_in_mcp(self) -> None:
+
         async def _go() -> list[str]:
             async with Client(mcp) as client:
                 tools = await client.list_tools()
@@ -322,8 +352,10 @@ class TestPurgeExpiredMessagesTool:
         mock_session.get.return_value = [reply]
 
         with (
-            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
-            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+                patch('kioku_mesh.mcp_server._get_zenoh_session',
+                      return_value=mock_session),
+                patch('kioku_mesh.mcp_server.state_dir',
+                      return_value=tmp_path),
         ):
             result = self._call()
 
@@ -334,8 +366,10 @@ class TestPurgeExpiredMessagesTool:
     def test_purge_tool_zenoh_unavailable(self, tmp_path: Path) -> None:
         _reset_index(tmp_path)
         with (
-            patch('kioku_mesh.mcp_server._get_zenoh_session', side_effect=RuntimeError('no zenoh')),
-            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+                patch('kioku_mesh.mcp_server._get_zenoh_session',
+                      side_effect=RuntimeError('no zenoh')),
+                patch('kioku_mesh.mcp_server.state_dir',
+                      return_value=tmp_path),
         ):
             result = self._call()
 
