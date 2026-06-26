@@ -29,6 +29,7 @@ from . import __version__
 from . import doctor as doctor_module
 from . import mcp_install as mcp_install_module
 from . import tls as tls_module
+from . import zenohd_install as zenohd_install_module
 from .backend import get_backend
 from .backend import reset_backend
 from .config import format_visibility
@@ -602,7 +603,6 @@ def _default_init_path() -> Path:
 # PATH — resolve the binary to an absolute path at unit-generation time. Falls
 # back to the most common location only when ``which`` fails, with a warning.
 _SYSTEMD_ZENOHD_FALLBACK = '/usr/bin/zenohd'
-
 
 _SYSTEMD_UNIT_NAME = 'kioku-mesh-zenohd.service'
 
@@ -1541,6 +1541,26 @@ def _cmd_tls_info(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _cmd_zenohd_install(args: argparse.Namespace) -> int:
+    bin_dir = Path(args.bin_dir) if args.bin_dir else zenohd_install_module.default_bin_dir()
+    try:
+        installed = zenohd_install_module.install(
+            version=args.version,
+            bin_dir=bin_dir,
+            verbose=args.verbose,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f'error: {exc}', file=sys.stderr)
+        return 1
+    for name, path in installed.items():
+        print(f'installed {name}: {path}')
+    print()
+    print(f'add to PATH: export PATH="{bin_dir}:$PATH"')
+    if bin_dir.as_posix() not in os.environ.get('PATH', '').split(':'):
+        print('  (not yet on PATH — add the line above to your shell profile)')
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='kioku-mesh', description='kioku-mesh CLI')
     parser.add_argument('--version', action='version', version=f'kioku-mesh {__version__}')
@@ -2028,6 +2048,33 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_tls_info = p_tls_sub.add_parser('info', help='Show local CA / peer certificate details and expiry')
     p_tls_info.set_defaults(func=_cmd_tls_info)
+
+    p_zenohd = sub.add_parser(
+        'zenohd',
+        help='Manage zenohd and zenoh-backend-rocksdb binaries',
+    )
+    p_zenohd_sub = p_zenohd.add_subparsers(dest='zenohd_command', required=True)
+    p_zenohd_install = p_zenohd_sub.add_parser(
+        'install',
+        help='Download and install zenohd + zenoh-backend-rocksdb (version-matched)',
+    )
+    p_zenohd_install.add_argument(
+        '--version',
+        default='1.9.0',
+        help='Zenoh release version to install (default: 1.9.0)',
+    )
+    p_zenohd_install.add_argument(
+        '--bin-dir',
+        default=None,
+        metavar='DIR',
+        help='Destination directory (default: ~/.local/share/kioku-mesh/bin)',
+    )
+    p_zenohd_install.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Print download progress',
+    )
+    p_zenohd_install.set_defaults(func=_cmd_zenohd_install)
 
     return parser
 
