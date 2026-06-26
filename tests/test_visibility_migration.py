@@ -5,34 +5,32 @@ All Zenoh session interactions are mocked; no network access required.
 
 from __future__ import annotations
 
-import pathlib
-
 import json
-from unittest.mock import MagicMock
+import pathlib
 from unittest.mock import call
+from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
 
-from kioku_mesh.memory.visibility_migration import (
-    MigrationItem,
-    MigrationPlan,
-    MigrationTarget,
-    MigrationCheckpoint,
-    RawLegacyRecord,
-    build_migration_plan,
-    execute_migration,
-    legacy_obs_selector,
-    legacy_tomb_selector,
-    load_checkpoint,
-    parse_migration_target,
-    save_checkpoint_atomic,
-    scan_legacy_visibility,
-    verify_key_payload,
-    write_backup,
-)
 from kioku_mesh.core.models import Observation
-
+from kioku_mesh.memory.visibility_migration import build_migration_plan
+from kioku_mesh.memory.visibility_migration import compute_params_hash
+from kioku_mesh.memory.visibility_migration import execute_migration
+from kioku_mesh.memory.visibility_migration import legacy_obs_selector
+from kioku_mesh.memory.visibility_migration import legacy_tomb_selector
+from kioku_mesh.memory.visibility_migration import load_checkpoint
+from kioku_mesh.memory.visibility_migration import MigrationCheckpoint
+from kioku_mesh.memory.visibility_migration import MigrationItem
+from kioku_mesh.memory.visibility_migration import MigrationPlan
+from kioku_mesh.memory.visibility_migration import MigrationTarget
+from kioku_mesh.memory.visibility_migration import parse_migration_target
+from kioku_mesh.memory.visibility_migration import RawLegacyRecord
+from kioku_mesh.memory.visibility_migration import reconstruct_items_from_checkpoint
+from kioku_mesh.memory.visibility_migration import save_checkpoint_atomic
+from kioku_mesh.memory.visibility_migration import scan_legacy_visibility
+from kioku_mesh.memory.visibility_migration import verify_key_payload
+from kioku_mesh.memory.visibility_migration import write_backup
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -629,6 +627,7 @@ def test_checkpoint_resume_source_deleted_repair_pending(tmp_path: pathlib.Path)
 def test_cmd_migrate_visibility_blocks_on_pending_puts(monkeypatch: pytest.MonkeyPatch) -> None:
     """migrate-visibility must return 2 when pending_puts > 0."""
     import argparse
+
     from kioku_mesh.__main__ import _cmd_migrate_visibility
 
     args = argparse.Namespace(
@@ -734,3 +733,320 @@ def test_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
     assert loaded.run_id == 'run42'
     assert loaded.items['abc:obs']['target_put'] is True
     assert loaded.items['abc:obs']['repair_put'] is False
+
+
+# ---------------------------------------------------------------------------
+# B2: checkpoint flushed at verify/delete phase boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_execute_checkpoint_flushed_at_phase_boundaries(tmp_path: pathlib.Path) -> None:
+    """_execute_batch must save checkpoint after PUT, verify, delete, and repair phases."""
+    target = MigrationTarget(visibility='mesh', scope_id='', display='mesh')
+    obs = _make_obs()
+    obs.visibility = 'mesh'
+    new_payload = obs.to_json()
+    item = MigrationItem(
+        kind='obs',
+        observation_id=_OBS_ID,
+        old_key=_LEGACY_OBS_KEY,
+        new_key=_MESH_OBS_KEY,
+        original_payload=_make_obs().to_json(),
+        new_payload=new_payload,
+    )
+    plan = MigrationPlan(target=target, items=[item])
+
+    checkpoint_path = tmp_path / 'chk.json'
+    backup_dir = tmp_path / 'backup'
+    session = MagicMock()
+
+    save_calls: list[str] = []
+
+    def _track_save(chk: MigrationCheckpoint, path: pathlib.Path) -> None:
+        # Record which states are true at each save
+        state = chk.items.get(f'{_OBS_ID}:obs', {})
+        save_calls.append(
+            f'put={state.get("target_put")},ver={state.get("target_verified")},'
+            f'del={state.get("source_deleted")},rep={state.get("repair_put")}'
+        )
+
+    with (
+        patch(
+            'kioku_mesh.memory.visibility_migration.save_checkpoint_atomic',
+            side_effect=_track_save,
+        ),
+        patch('kioku_mesh.memory.visibility_migration.verify_key_payload', return_value=True),
+        patch('kioku_mesh.memory.store.get_index') as mock_index,
+    ):
+        mock_index.return_value.rebuild_from_zenoh = MagicMock()
+        execute_migration(
+            plan,
+            session=session,
+            dry_run=False,
+            yes=True,
+            batch_size=500,
+            checkpoint_path=checkpoint_path,
+            backup_dir=backup_dir,
+            now_iso=_NOW_ISO,
+        )
+
+    # Initial checkpoint creation (1) + 4 phase flushes per batch = 5 total saves
+    assert len(save_calls) >= 5, f'expected >=5 saves, got {len(save_calls)}: {save_calls}'
+    # Find the flush states corresponding to the 4 batch phases
+    # After PUT phase: target_put=True, target_verified=False
+    assert any('put=True,ver=False' in s for s in save_calls), 'no flush after PUT phase'
+    # After verify phase: target_put=True, target_verified=True, source_deleted=False
+    assert any('ver=True,del=False' in s for s in save_calls), 'no flush after verify phase'
+    # After delete phase: source_deleted=True, repair_put=False
+    assert any('del=True,rep=False' in s for s in save_calls), 'no flush after delete phase'
+    # After repair phase: repair_put=True
+    assert any('rep=True' in s for s in save_calls), 'no flush after repair phase'
+
+
+# ---------------------------------------------------------------------------
+# B3: params mismatch resume exits 2
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_migrate_resume_params_mismatch_exits_2(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--resume with different --to than checkpoint must exit 2."""
+    import argparse
+
+    from kioku_mesh.__main__ import _cmd_migrate_visibility
+    from kioku_mesh.memory.visibility_migration import compute_params_hash
+
+    # Build a checkpoint with params_hash for 'mesh' target
+    original_params = {
+        'from': 'legacy',
+        'to': 'mesh',
+        'scope': '',
+        'key_prefix': '',
+        'visibility': 'mesh',
+        'scope_id': '',
+    }
+    chk = MigrationCheckpoint(
+        version=1,
+        run_id='run1',
+        params={'from': 'legacy', 'to': 'mesh'},
+        target={'visibility': 'mesh', 'scope_id': ''},
+        started_at=_NOW_ISO,
+        updated_at=_NOW_ISO,
+        params_hash=compute_params_hash(original_params),
+    )
+    chk_path = tmp_path / 'checkpoint.json'
+    save_checkpoint_atomic(chk, chk_path)
+
+    # Now try to resume with --to user (different target)
+    monkeypatch.setattr('kioku_mesh.memory.visibility_migration.get_user_id', lambda: 'hwata')
+    args = argparse.Namespace(
+        from_source='legacy',
+        to_visibility='user',
+        dry_run=False,
+        yes=True,
+        scope='',
+        key_prefix='',
+        batch_size=500,
+        resume=str(chk_path),
+        checkpoint='',
+        backup_dir='',
+    )
+
+    status_mock = MagicMock()
+    status_mock.pending_puts = 0
+    backend_mock = MagicMock()
+    backend_mock.get_status.return_value = status_mock
+
+    with patch('kioku_mesh.__main__.get_backend', return_value=backend_mock):
+        rc = _cmd_migrate_visibility(args)
+
+    assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# B1: CLI resume reconstructs pending items from checkpoint + backup
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_migrate_resume_repairs_after_source_deleted(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--resume must repair PUT even when legacy source key is absent from scan.
+
+    Scenario: crash happened after source DELETE but before repair PUT.
+    The checkpoint records source_deleted=True, repair_put=False.
+    The fresh scan returns [] because the legacy key is gone.
+    Resume must load the item from checkpoint+backup and execute repair PUT.
+    """
+    import argparse
+
+    from kioku_mesh.__main__ import _cmd_migrate_visibility
+    from kioku_mesh.memory.visibility_migration import compute_params_hash
+
+    # --- Build checkpoint in a tmp migration run dir ---
+    run_dir = tmp_path / 'run1'
+    run_dir.mkdir()
+    backup_dir = run_dir / 'backup'
+    backup_dir.mkdir()
+
+    original_payload = _make_obs().to_json()
+
+    # Write backup payload file
+    (backup_dir / f'{_OBS_ID}.obs.json').write_text(original_payload, encoding='utf-8')
+
+    original_params = {
+        'from': 'legacy',
+        'to': 'mesh',
+        'scope': '',
+        'key_prefix': '',
+        'visibility': 'mesh',
+        'scope_id': '',
+    }
+    chk = MigrationCheckpoint(
+        version=1,
+        run_id='run1',
+        params={'from': 'legacy', 'to': 'mesh'},
+        target={'visibility': 'mesh', 'scope_id': ''},
+        started_at=_NOW_ISO,
+        updated_at=_NOW_ISO,
+        params_hash=compute_params_hash(original_params),
+    )
+    chk.items[f'{_OBS_ID}:obs'] = {
+        'old_key': _LEGACY_OBS_KEY,
+        'new_key': _MESH_OBS_KEY,
+        'backed_up': True,
+        'target_put': True,
+        'target_verified': True,
+        'source_deleted': True,
+        'repair_put': False,
+    }
+    chk_path = run_dir / 'checkpoint.json'
+    save_checkpoint_atomic(chk, chk_path)
+
+    # --- CLI args: --resume pointing to checkpoint ---
+    args = argparse.Namespace(
+        from_source='legacy',
+        to_visibility='mesh',
+        dry_run=False,
+        yes=True,
+        scope='',
+        key_prefix='',
+        batch_size=500,
+        resume=str(chk_path),
+        checkpoint='',
+        backup_dir='',
+    )
+
+    status_mock = MagicMock()
+    status_mock.pending_puts = 0
+    backend_mock = MagicMock()
+    backend_mock.get_status.return_value = status_mock
+
+    session = MagicMock()
+    # scan returns empty (legacy key already deleted)
+    # verify returns True so the item (from checkpoint) can proceed to repair
+    repair_put_calls: list[tuple[str, str]] = []
+    session.put.side_effect = lambda key, payload: repair_put_calls.append((key, payload))
+
+    with (
+        patch('kioku_mesh.__main__.get_backend', return_value=backend_mock),
+        patch('kioku_mesh.__main__.get_session', return_value=session),
+        patch(
+            'kioku_mesh.memory.visibility_migration._iter_ok_replies',
+            return_value=iter([]),
+        ),
+        patch('kioku_mesh.memory.visibility_migration._get_key_payload', return_value=None),
+        patch('kioku_mesh.memory.visibility_migration.verify_key_payload', return_value=True),
+        patch('kioku_mesh.memory.store.get_index') as mock_index,
+    ):
+        mock_index.return_value.rebuild_from_zenoh = MagicMock()
+        rc = _cmd_migrate_visibility(args)
+
+    assert rc == 0, f'expected exit 0, got {rc}'
+    # repair PUT must have been called for the mesh key
+    assert any(
+        key == _MESH_OBS_KEY for key, _ in repair_put_calls
+    ), f'repair PUT for {_MESH_OBS_KEY!r} not found in {repair_put_calls}'
+
+
+# ---------------------------------------------------------------------------
+# compute_params_hash and reconstruct_items_from_checkpoint unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_compute_params_hash_is_stable() -> None:
+    params = {'from': 'legacy', 'to': 'mesh', 'scope': '', 'key_prefix': '', 'visibility': 'mesh', 'scope_id': ''}
+    h1 = compute_params_hash(params)
+    h2 = compute_params_hash(params)
+    assert h1 == h2
+    assert len(h1) == 64  # SHA-256 hex
+
+
+def test_compute_params_hash_differs_on_change() -> None:
+    p1 = {'from': 'legacy', 'to': 'mesh', 'scope': '', 'key_prefix': '', 'visibility': 'mesh', 'scope_id': ''}
+    p2 = dict(p1)
+    p2['to'] = 'user/hwata'
+    assert compute_params_hash(p1) != compute_params_hash(p2)
+
+
+def test_reconstruct_items_skips_non_pending(tmp_path: pathlib.Path) -> None:
+    """Items with repair_put=True must be skipped by reconstruct_items_from_checkpoint."""
+    backup_dir = tmp_path / 'backup'
+    backup_dir.mkdir()
+    target = MigrationTarget(visibility='mesh', scope_id='', display='mesh')
+
+    chk = MigrationCheckpoint(
+        version=1,
+        run_id='r',
+        params={},
+        target={},
+        started_at=_NOW_ISO,
+        updated_at=_NOW_ISO,
+    )
+    chk.items[f'{_OBS_ID}:obs'] = {
+        'old_key': _LEGACY_OBS_KEY,
+        'new_key': _MESH_OBS_KEY,
+        'backed_up': True,
+        'target_put': True,
+        'target_verified': True,
+        'source_deleted': True,
+        'repair_put': True,  # already done
+    }
+
+    items = reconstruct_items_from_checkpoint(chk, backup_dir, target, set())
+    assert items == []
+
+
+def test_reconstruct_items_from_checkpoint_obs(tmp_path: pathlib.Path) -> None:
+    """reconstruct_items_from_checkpoint returns MigrationItem from backup when source gone."""
+    backup_dir = tmp_path / 'backup'
+    backup_dir.mkdir()
+    target = MigrationTarget(visibility='mesh', scope_id='', display='mesh')
+    original_payload = _make_obs().to_json()
+    (backup_dir / f'{_OBS_ID}.obs.json').write_text(original_payload, encoding='utf-8')
+
+    chk = MigrationCheckpoint(
+        version=1,
+        run_id='r',
+        params={},
+        target={},
+        started_at=_NOW_ISO,
+        updated_at=_NOW_ISO,
+    )
+    chk.items[f'{_OBS_ID}:obs'] = {
+        'old_key': _LEGACY_OBS_KEY,
+        'new_key': _MESH_OBS_KEY,
+        'backed_up': True,
+        'target_put': True,
+        'target_verified': True,
+        'source_deleted': True,
+        'repair_put': False,
+    }
+
+    items = reconstruct_items_from_checkpoint(chk, backup_dir, target, set())
+    assert len(items) == 1
+    item = items[0]
+    assert item.old_key == _LEGACY_OBS_KEY
+    assert item.new_key == _MESH_OBS_KEY
+    assert item.kind == 'obs'
+    new_obs = Observation.from_json(item.new_payload)
+    assert new_obs.visibility == 'mesh'

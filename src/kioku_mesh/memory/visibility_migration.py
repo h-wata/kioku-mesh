@@ -14,15 +14,14 @@ the source DELETE arrives. The post-delete repair PUT forces reindexing.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from dataclasses import field
 import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
-from dataclasses import field
 from pathlib import Path
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
 from ..core.config import get_team_id
 from ..core.config import get_user_id
@@ -88,6 +87,7 @@ class MigrationCheckpoint:
     started_at: str
     updated_at: str
     items: dict[str, dict[str, Any]] = field(default_factory=dict)
+    params_hash: str = field(default='')
 
 
 @dataclass
@@ -371,6 +371,7 @@ def save_checkpoint_atomic(checkpoint: MigrationCheckpoint, path: Path) -> None:
         'version': checkpoint.version,
         'run_id': checkpoint.run_id,
         'params': checkpoint.params,
+        'params_hash': checkpoint.params_hash,
         'target': checkpoint.target,
         'started_at': checkpoint.started_at,
         'updated_at': checkpoint.updated_at,
@@ -391,12 +392,88 @@ def load_checkpoint(path: Path) -> MigrationCheckpoint:
         started_at=str(data['started_at']),
         updated_at=str(data['updated_at']),
         items=dict(data.get('items', {})),
+        params_hash=str(data.get('params_hash', '')),
     )
 
 
 def verify_key_payload(session: Any, key: str, expected_payload: str) -> bool:
     """Return True iff the key exists in Zenoh and its payload matches."""
     return _get_key_payload(session, key) == expected_payload
+
+
+def compute_params_hash(params: dict[str, str]) -> str:
+    """SHA-256 of sorted canonical JSON; used to detect mismatched --resume invocations."""
+    canonical = json.dumps(params, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def reconstruct_items_from_checkpoint(
+    chk: MigrationCheckpoint,
+    backup_dir: Path,
+    target: MigrationTarget,
+    existing_old_keys: set[str],
+) -> list[MigrationItem]:
+    """Rebuild MigrationItems for checkpoint entries where source is already deleted.
+
+    Covers the case where repair PUT has not been performed and the legacy key is
+    gone from Zenoh. Called on --resume when the fresh scan misses items whose
+    source key was deleted in a prior interrupted run.
+    """
+    items: list[MigrationItem] = []
+    for item_key, state in chk.items.items():
+        if not state.get('source_deleted') or state.get('repair_put'):
+            continue
+        old_key = state.get('old_key', '')
+        new_key = state.get('new_key', '')
+        if not old_key or not new_key:
+            log.warning('reconstruct_items_from_checkpoint: missing key in entry %s', item_key)
+            continue
+        if old_key in existing_old_keys:
+            continue  # Source still present; handled by normal plan path
+        try:
+            obs_id, kind = item_key.rsplit(':', 1)
+        except ValueError:
+            log.warning('reconstruct_items_from_checkpoint: malformed item_key %s', item_key)
+            continue
+        if kind not in ('obs', 'tomb'):
+            log.warning('reconstruct_items_from_checkpoint: unknown kind %r in %s', kind, item_key)
+            continue
+        payload_file = backup_dir / f'{obs_id}.{kind}.json'
+        if not payload_file.exists():
+            log.error(
+                'reconstruct_items_from_checkpoint: backup not found for %s at %s; '
+                'repair PUT cannot be performed — data may require manual recovery',
+                item_key,
+                payload_file,
+            )
+            continue
+        original_payload = payload_file.read_text(encoding='utf-8')
+        if kind == 'tomb':
+            new_payload = original_payload
+        else:
+            try:
+                obs = Observation.from_json(original_payload)
+                obs.visibility = target.visibility
+                obs.scope_id = target.scope_id
+                new_payload = obs.to_json()
+            except Exception as e:  # noqa: BLE001
+                log.error(
+                    'reconstruct_items_from_checkpoint: cannot rebuild obs payload for %s: %s',
+                    item_key,
+                    e,
+                )
+                continue
+        items.append(
+            MigrationItem(
+                kind=kind,
+                observation_id=obs_id,
+                old_key=old_key,
+                new_key=new_key,
+                original_payload=original_payload,
+                new_payload=new_payload,
+            )
+        )
+    return items
 
 
 def _execute_batch(
@@ -451,6 +528,10 @@ def _execute_batch(
                 log.error('execute_migration: verify failed for %s', item.new_key)
                 result.failures += 1
 
+    # Flush after verify so crash recovery knows whether verification succeeded
+    chk.updated_at = now_iso
+    save_checkpoint_atomic(chk, checkpoint_path)
+
     # Phase: DELETE source exact keys (only when target verified)
     for item in batch:
         item_key = f'{item.observation_id}:{item.kind}'
@@ -463,6 +544,10 @@ def _execute_batch(
             except Exception as e:  # noqa: BLE001
                 log.error('execute_migration: DELETE failed for %s: %s', item.old_key, e)
                 result.failures += 1
+
+    # Flush after delete so source deletion is durably recorded before repair PUT
+    chk.updated_at = now_iso
+    save_checkpoint_atomic(chk, checkpoint_path)
 
     # Phase: repair PUT target (subscriber DELETE may have cleaned the new key)
     for item in batch:
@@ -491,6 +576,7 @@ def execute_migration(
     checkpoint_path: Path,
     backup_dir: Path,
     now_iso: str,
+    params_hash: str = '',
 ) -> MigrationResult:
     """Execute the migration plan.
 
@@ -568,6 +654,7 @@ def execute_migration(
             target={'visibility': plan.target.visibility, 'scope_id': plan.target.scope_id},
             started_at=now_iso,
             updated_at=now_iso,
+            params_hash=params_hash,
         )
         save_checkpoint_atomic(chk, checkpoint_path)
 

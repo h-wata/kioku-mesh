@@ -1545,8 +1545,11 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
     from datetime import timezone
 
     from .memory.visibility_migration import build_migration_plan
+    from .memory.visibility_migration import compute_params_hash
     from .memory.visibility_migration import execute_migration
+    from .memory.visibility_migration import load_checkpoint
     from .memory.visibility_migration import parse_migration_target
+    from .memory.visibility_migration import reconstruct_items_from_checkpoint
     from .memory.visibility_migration import scan_legacy_visibility
 
     status = get_backend().get_status()
@@ -1570,6 +1573,15 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
 
     scope = args.scope or ''
     key_prefix = args.key_prefix or ''
+
+    # C1: validate --key-prefix before scanning
+    if key_prefix and not (key_prefix.startswith('mem/obs') or key_prefix.startswith('mem/tomb')):
+        print(
+            f'error: --key-prefix {key_prefix!r} must start with mem/obs or mem/tomb.',
+            file=sys.stderr,
+        )
+        return 2
+
     batch_size = min(max(1, args.batch_size), 10_000)
 
     now_dt = datetime.now(timezone.utc)
@@ -1586,6 +1598,38 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
             print(f'error: --resume {resume_path}: file not found.', file=sys.stderr)
             return 2
         checkpoint_path = resume_path
+        # Derive backup_dir from checkpoint parent unless explicitly given
+        if not args.backup_dir:
+            backup_dir = resume_path.parent / 'backup'
+
+    # Compute params hash for this run (used to detect mismatched --resume)
+    run_params = {
+        'from': args.from_source,
+        'to': target.display,
+        'scope': scope,
+        'key_prefix': key_prefix,
+        'visibility': target.visibility,
+        'scope_id': target.scope_id,
+    }
+    current_params_hash = compute_params_hash(run_params)
+
+    # B3: On resume, load checkpoint and validate params before any mutation
+    chk_for_resume = None
+    if args.resume and checkpoint_path.is_file():
+        try:
+            chk_for_resume = load_checkpoint(checkpoint_path)
+        except Exception as e:  # noqa: BLE001
+            print(f'error: cannot load checkpoint {checkpoint_path}: {e}', file=sys.stderr)
+            return 2
+        if chk_for_resume.params_hash and chk_for_resume.params_hash != current_params_hash:
+            print(
+                f'error: --resume checkpoint params do not match current arguments.\n'
+                f'  checkpoint: {chk_for_resume.params}\n'
+                f'  current:    {run_params}\n'
+                f'Use the exact same --from/--to/--scope/--key-prefix as the original run.',
+                file=sys.stderr,
+            )
+            return 2
 
     session = get_session()
 
@@ -1603,6 +1647,17 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
         print(f'error: plan build failed: {e}', file=sys.stderr)
         return 1
 
+    # B1: On resume, merge checkpoint items whose source key is already deleted
+    if chk_for_resume is not None:
+        existing_old_keys = {item.old_key for item in plan.items}
+        extra_items = reconstruct_items_from_checkpoint(chk_for_resume, backup_dir, target, existing_old_keys)
+        if extra_items:
+            print(
+                f'--resume: adding {len(extra_items)} pending item(s) from checkpoint (source key already deleted).',
+                file=sys.stderr,
+            )
+            plan.items.extend(extra_items)
+
     result = execute_migration(
         plan,
         session=session,
@@ -1612,6 +1667,7 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
         checkpoint_path=checkpoint_path,
         backup_dir=backup_dir,
         now_iso=now_iso,
+        params_hash=current_params_hash,
     )
 
     if not args.dry_run:
