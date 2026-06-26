@@ -259,6 +259,7 @@ def search_observations(
     cursor_observation_id: str = '',
     limit: int = 50,
     include_superseded: bool = False,
+    search_mode: str = 'and',
 ) -> list[Observation]:
     """Search observations via the SQLite local index, falling back to Zenoh.
 
@@ -289,6 +290,7 @@ def search_observations(
             cursor_observation_id=cursor_observation_id,
             limit=limit,
             include_superseded=include_superseded,
+            search_mode=search_mode,
         )
     return _search_via_zenoh(
         query=query,
@@ -301,6 +303,7 @@ def search_observations(
         until_iso=until_iso,
         cursor_observation_id=cursor_observation_id,
         limit=limit,
+        search_mode=search_mode,
     )
 
 
@@ -317,6 +320,7 @@ def _search_via_zenoh(
     until_iso: str = '',
     cursor_observation_id: str = '',
     limit: int,
+    search_mode: str = 'and',
 ) -> list[Observation]:
     """Legacy Zenoh full-scan search path, retained as a fallback.
 
@@ -327,6 +331,8 @@ def _search_via_zenoh(
     triggers the same strict-tuple cursor semantics as
     :meth:`LocalIndex.search` so bulk-delete pagination keeps working
     on the fallback path too (#66).
+    ``search_mode`` is propagated: 'or'/'and_or' uses OR across content /
+    project / tags substrings; 'and' uses AND (existing behaviour).
     """
     since_dt = _parse_iso(since_iso)
     until_dt = _parse_iso(until_iso)
@@ -347,6 +353,7 @@ def _search_via_zenoh(
             tombs.add(tomb_id)
 
     q = query.lower()
+    use_or = search_mode in ('or', 'and_or')
     # Use a dict keyed by observation_id so multiple Zenoh storages replying
     # with the same observation (multi-router / replication overlap) do not
     # produce duplicates (#12). Last-writer-wins within a single GET scan.
@@ -383,13 +390,20 @@ def _search_via_zenoh(
                         continue
                 elif obs_dt > until_dt:
                     continue
-        if (
-            q
-            and q not in obs.content.lower()
-            and q not in obs.project.lower()
-            and not any(q in t.lower() for t in obs.tags)
-        ):
-            continue
+        if q:
+            if use_or:
+                terms = q.split()
+                if not any(
+                    t in obs.content.lower() or t in obs.project.lower() or any(t in tag.lower() for tag in obs.tags)
+                    for t in terms
+                ):
+                    continue
+            elif (
+                q not in obs.content.lower()
+                and q not in obs.project.lower()
+                and not any(q in t.lower() for t in obs.tags)
+            ):
+                continue
         results_by_id[obs.observation_id] = obs
 
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)

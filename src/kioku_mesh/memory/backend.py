@@ -58,6 +58,7 @@ class MemoryBackend(Protocol):
         cursor_observation_id: str = '',
         limit: int = 50,
         include_superseded: bool = False,
+        search_mode: str = 'and',
     ) -> list[Observation]: ...
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None: ...
@@ -112,6 +113,7 @@ class LocalBackend:
         cursor_observation_id: str = '',
         limit: int = 50,
         include_superseded: bool = False,
+        search_mode: str = 'and',
     ) -> list[Observation]:
         return self._idx.search(
             project=project,
@@ -125,6 +127,7 @@ class LocalBackend:
             cursor_observation_id=cursor_observation_id,
             limit=limit,
             include_superseded=include_superseded,
+            search_mode=search_mode,
         )
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None:
@@ -240,6 +243,7 @@ class ZenohBackend:
         cursor_observation_id: str = '',
         limit: int = 50,
         include_superseded: bool = False,
+        search_mode: str = 'and',
     ) -> list[Observation]:
         from . import store
 
@@ -255,6 +259,7 @@ class ZenohBackend:
             cursor_observation_id=cursor_observation_id,
             limit=limit,
             include_superseded=include_superseded,
+            search_mode=search_mode,
         )
 
     def find_observation_by_id(self, observation_id: str) -> Observation | None:

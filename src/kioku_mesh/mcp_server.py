@@ -310,6 +310,7 @@ def search_memory(
     since_iso: str = '',
     limit: int = 50,
     include_superseded: bool = False,
+    search_mode: str = 'and',
 ) -> str:
     """Search the shared kioku-mesh memory, narrowing by key_expr and filtering in Python.
 
@@ -322,7 +323,17 @@ def search_memory(
     can be called directly.
     Set ``include_superseded=True`` to also return observations that have been
     superseded by a newer one (hidden by default, ADR-0021).
+    ``search_mode`` accepts 'and' (default) | 'or' | 'and_or'.
+    'or': any query term matching is sufficient; base filters remain AND.
+    'and_or': AND hits first, then OR hits fill remaining limit slots (recall mode).
+    Unknown values return an error message.
     """
+    try:
+        from .memory.local_index import _validate_search_mode  # noqa: PLC0415
+
+        _validate_search_mode(search_mode)
+    except ValueError as exc:
+        return str(exc)
     results = get_backend().search_observations(
         query=query,
         agent_family=agent_family,
@@ -333,6 +344,7 @@ def search_memory(
         since_iso=since_iso,
         limit=limit,
         include_superseded=include_superseded,
+        search_mode=search_mode,
     )
     if not results:
         return 'No matching memories.'
