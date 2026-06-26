@@ -1,6 +1,6 @@
 # ADR-0026: supersede の半自動化 — save 時の候補提案と opt-in 自動置換
 
-- Status: Proposed
+- Status: Accepted（A=suggest と C=doctor を先行実装。B=auto は opt-in で後続）
 - Date: 2026-06-26
 - Supersedes: なし（ADR-0021 の supersedes-aware search を write 側へ拡張）
 - Related: ADR-0002, ADR-0010, ADR-0011, ADR-0019, ADR-0021,

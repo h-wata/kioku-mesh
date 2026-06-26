@@ -477,6 +477,7 @@ class LocalIndex:
         client_id: str = '',
         pc_id: str = '',
         session_id: str = '',
+        memory_type: str = '',
         query: str = '',
         since_iso: str = '',
         until_iso: str = '',
@@ -537,6 +538,7 @@ class LocalIndex:
                 client_id=client_id,
                 pc_id=pc_id,
                 session_id=session_id,
+                memory_type=memory_type,
                 query=query,
                 since_iso=since_iso,
                 until_iso=until_iso,
@@ -555,6 +557,7 @@ class LocalIndex:
                 client_id=client_id,
                 pc_id=pc_id,
                 session_id=session_id,
+                memory_type=memory_type,
                 query=query,
                 since_iso=since_iso,
                 until_iso=until_iso,
@@ -594,6 +597,12 @@ class LocalIndex:
         if session_id:
             where.append("json_extract(payload_json, '$.session_id') = ?")
             params.append(session_id)
+        if memory_type:
+            # ADR-0026: exact memory_type filter. ``memory_type`` is a real
+            # column on obs_index, so this composes with the secondary index
+            # cheaply (used by supersede-candidate detection).
+            where.append('memory_type = ?')
+            params.append(memory_type)
         if since_iso:
             where.append('created_at >= ?')
             params.append(since_iso)
