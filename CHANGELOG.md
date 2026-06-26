@@ -10,65 +10,94 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
-### Breaking Changes
+## [0.7.0] - 2026-06-26
 
-- **Python パッケージ名を `mesh_mem` → `kioku_mesh` に rename (ADR-0024, #187).**
+**Theme: Full-text search additions and stabilization**
+
+### Breaking Changes / Migration Required
+
+- **Python パッケージ名を `mesh_mem` → `kioku_mesh` に rename (ADR-0024, #206).**
   `import mesh_mem` は後方互換 shim として `v1.0.0` まで動作しますが `DeprecationWarning` を発行します。
   `import kioku_mesh` に移行してください。
   CLI コマンド (`kioku-mesh`, `kioku-mesh-mcp`) および環境変数プレフィックス (`KIOKU_MESH_*`) は変更ありません。
   旧環境変数 `MESH_MEM_*` は `v1.0.0` まで fallback + `DeprecationWarning` で動作します。
+  **移行手順**: `import mesh_mem` → `import kioku_mesh`、`from mesh_mem.xxx import yyy` → `from kioku_mesh.xxx import yyy`。
+  `mesh_mem` shim は `v1.0.0` で削除予定。
+
+### Added
+
+- **`search_mode` parameter for `search_memory`: `'and'` / `'or'` / `'and_or'`** (#225).
+  デフォルト `'and'`(全語必須)、`'or'`(いずれか1語)、`'and_or'`(完全一致 AND を優先し OR で補完)の3モードを
+  `search_memory` MCP ツールおよび `search_observations` API に追加。
+
+- **Incremental FTS rebuild + COUNT-mismatch guard** (ADR-0025, #228).
+  reconcile / 起動時の rebuild_from_zenoh の FTS 処理を差分適用に変更し、rebuild コストを削減。
+  差分適用後に COUNT(obs_fts) と live obs_index 件数(deleted_at IS NULL AND shadowed_at IS NULL)を比較し、
+  不一致時のみ full rebuild にフォールバックする guard を追加。threshold(しきい値)概念は無い。
+
+- **FTS5 trigram 全文検索 + supersedes-aware 検索** (ADR-0021, #204).
+  `LocalIndex` に FTS5 virtual table (`obs_fts`) を追加し、日本語部分一致を含む bm25 ランキング付き全文検索を実現。
+  3-stage fallback: trigram → 標準 FTS5 → LIKE。`obs_index` に `superseded_by` カラムを追加し、
+  supersedes チェーンを辿って obsolete な記憶を検索結果から自動除外 (`include_superseded=False` デフォルト)。
+  `doctor` コマンドで FTS5 capability を表示。`SCHEMA_VERSION` 2 → 3 前方 migration 付き。
+
+- **`storage-level TTL purge` for messaging store** (#222).
+  MCP tool `purge_expired_messages` と check_messages 経路での inline 自動 purge を追加。
+  TTL 期限切れメッセージを storage レベルで削除し inbox の肥大化を防ぐ。
+
+- **`migrate-visibility` subcommand**: safely move legacy `mem/obs/...` / `mem/tomb/...` keys into
+  explicit visibility namespaces (`user`/`team`/`mesh`) via copy-verify-delete-repair ordering
+  with mandatory backup/checkpoint (ADR-0019 Phase C, #226)
+
+- **`zenohd install` subcommand**: auto-download zenohd + zenoh-backend-rocksdb with SHA-256
+  checksum verification, arch/OS/libc detection, and PATH guidance (#221)
+
+- messaging Phase 4 — MessageMemoryBridge で received message を save_observation に転送 (#185, #199)
+- messaging Phase 3: tmux send-keys adapter (opt-in)。default off、exact pane/sender/scope allowlist、
+  8 KiB size limit、retry+drop、注入 ≠ ack 契約 (#185, #198)
+- messaging Phase 2: PresenceManager (30s heartbeat, 90s TTL, scope isolation) (#185, #196)
+- messaging Phase 2: ZenohBridge (spool ↔ Zenoh put/sub, 64 KiB body limit) (#185, #196)
+- messaging Phase 2: MCP tools `check_messages` / `ack_message` with server-side scope resolution (#185, #196)
+- messaging Phase 1: Message/Ack schema, keyspace builder, local inbox spool, local ack index (#185, #194)
+- Edge-case tests for short-term AND, double-quote escape, and whitespace-only query in `search()` (#213)
+- test: supersedes-aware 隠蔽 x FTS full rebuild の回帰テスト追加 (#209)
+- test: tmux adapter の 8 KiB boundary pass ケース追加 (#198)
 
 ### Fixed
+
+- **`and_or` two-phase ordering in `_search_via_zenoh` fallback** (#229).
+  Zenoh fallback 経路でも `and_or` モードの2フェーズ ordering (AND matches first、OR 補完を後方) を実装。
 
 - zenohd/rocksdb download URL を upstream 実在形式に修正
   (zenoh- prefix、-standalone suffix、全 OS で .zip) (#221)
 - SHA-256 検証を GitHub Releases API の digest フィールドを使う方式に変更
   (.sha256 companion は upstream に存在しないため) (#221)
-
-### Added
-
-- `migrate-visibility` subcommand: safely move legacy `mem/obs/...` / `mem/tomb/...` keys into explicit visibility namespaces (`user`/`team`/`mesh`) via copy-verify-delete-repair ordering with mandatory backup/checkpoint (ADR-0019 Phase C, #219)
-- `zenohd install` subcommand: auto-download zenohd + zenoh-backend-rocksdb with SHA-256 checksum verification, arch/OS/libc detection, and PATH guidance (#113)
-- Edge-case tests for short-term AND, double-quote escape, and whitespace-only query in `search()` (#211 follow-up)
-- test: supersedes-aware 隠蔽 x FTS full rebuild の回帰テスト追加 (PR #207 cross-review R9)
-- **FTS5 trigram 全文検索 + supersedes-aware 検索 (ADR-0021, #203).** `LocalIndex` に FTS5 virtual table (`obs_fts`) を追加し、日本語部分一致を含む bm25 ランキング付き全文検索を実現。3-stage fallback: trigram → 標準 FTS5 → LIKE。`obs_index` に `superseded_by` カラムを追加し、supersedes チェーンを辿って obsolete な記憶を検索結果から自動除外する (`include_superseded=False` デフォルト)。`doctor` コマンドで FTS5 capability を表示。`SCHEMA_VERSION` 2 → 3 前方 migration 付き。
-- feat(messaging): Phase 4 bridge 昇格 — MessageMemoryBridge で received message を save_observation に転送 (#185)
-- messaging Phase 3: tmux send-keys adapter (opt-in)。default off、exact pane/sender/scope allowlist、8 KiB size limit、retry+drop、注入 ≠ ack 契約 (#185)
-- messaging Phase 2: PresenceManager (30s heartbeat, 90s TTL, scope isolation) (#185)
-- messaging Phase 2: ZenohBridge (spool ↔ Zenoh put/sub, 64 KiB body limit) (#185)
-- messaging Phase 2: MCP tools `check_messages` / `ack_message` with server-side scope resolution (#185)
-- messaging Phase 1: Message/Ack schema, keyspace builder, local inbox spool, local ack index (#185)
-
-### Fixed
-
-- fix: `include_expired=True` でのデバッグ閲覧が storage を破壊しないよう、lazy-delete を
+- `include_expired=True` でのデバッグ閲覧が storage を破壊しないよう、lazy-delete を
   `if not include_expired:` の内側に移動。デバッグ閲覧は read-only になり、GC は
-  `purge_expired_messages` MCP ツール / 通常の `check_messages` 経路に委ねる (C1, PR #222)
-- fix: `purge_expired_msgs` のスキャン失敗を `(purged_count, scan_ok)` タプルで呼び出し側に
+  `purge_expired_messages` MCP ツール / 通常の `check_messages` 経路に委ねる (#222)
+- `purge_expired_msgs` のスキャン失敗を `(purged_count, scan_ok)` タプルで呼び出し側に
   伝達。MCP ツールはスキャン失敗時に `purge incomplete: scan failed (0 messages purged)` を返し、
-  0件成功と区別できる。`check_messages` の inline purge except に `log.debug` を追加 (C2, PR #222)
-- Escape LIKE wildcard chars (`%`, `_`, `\`) in `search()` to prevent over-matching (#211 follow-up)
+  0件成功と区別できる (#222)
+- Escape LIKE wildcard chars (`%`, `_`, `\`) in `search()` to prevent over-matching (#213)
 - search(): 複数語クエリを AND 検索に修正。スペース区切りの各語を個別に評価し、
-  3文字未満の語は LIKE フォールバックで補完 (Issue #210)
+  3文字未満の語は LIKE フォールバックで補完 (#211)
 - search_memory の語句検索が常に空を返すバグを修正。FTS5 テーブルを追加し、
-  既存 index.db への冪等 rebuild を実装した。
-- bridge: `promote_hint` を strict bool (`is True`) 判定に変更、truthy 非 bool 値で昇格しない (R1) (#185)
-- bridge: `save_fn` 例外時に `_promoted_ids` へ登録しない failure-path test 追加 (R2) (#185)
-- Fix `_messaging_scopes()` to reject unknown visibility values (B1: prevents silent scope widening) (#185)
-- Add defensive validation in `put_message()` for recipient kind and ID fields (C1) (#185)
-- Add `scopes` field to `Presence.to_dict()` payload for consumer clarity (C2) (#185)
-
-### Tests
-
-- test: tmux adapter の 8 KiB boundary pass ケース追加 (test_payload_8192_bytes_accepted)
+  既存 index.db への冪等 rebuild を実装 (#207)
+- FTS tags 表現の一貫化 + PEP604 型注釈統一 (#208)
+- FTS follow-up bundle: rebuild skip-guard (R1)、tags edge-case tests (C1)、docstring (C2) (#212)
+- bridge: `promote_hint` を strict bool (`is True`) 判定に変更、truthy 非 bool 値で昇格しない (#185)
+- bridge: `save_fn` 例外時に `_promoted_ids` へ登録しない failure-path test 追加 (#185)
+- Fix `_messaging_scopes()` to reject unknown visibility values (B1: prevents silent scope widening) (#195)
+- Add defensive validation in `put_message()` for recipient kind and ID fields (#195)
+- Add `scopes` field to `Presence.to_dict()` payload for consumer clarity (#195)
 
 ### Changed
 
-- test: pytest-xdist 並列化導入、全テスト実行時間 90秒 → 21秒に短縮（-n auto、16コア）
-- CI も pytest-xdist 並列実行に変更
-- messaging: keyspace key shape を設計 memo (0185) の inbox path に合わせた — `session_inbox_key` / `agent_inbox_key` に `scope` 引数を追加し、`msg/{scope}/inbox/{session|agent}/{id}/{msg_id}` を生成するよう変更 (B1)
-- messaging: `Message` dataclass に direct delivery schema の first-class フィールドを追加 — `schema_version`, `kind`, `sender`, `recipient`, `body`, `content_type`, `requires_ack`, `delivery_adapters`, `correlation_id`, `_extras` (B2)
-- messaging: local inbox index の Ack/dedup を recipient session 単位に変更 — `messages` table を `(msg_id, recipient_session_id)` 複合 PK に、`ack_message()` は未知 msg_id で `ValueError` を raise (B3)
+- test: pytest-xdist 並列化導入、全テスト実行時間 90秒 → 21秒に短縮（-n auto、16コア）(#197)
+- CI も pytest-xdist 並列実行に変更 (#197)
+- messaging: keyspace key shape を `msg/{scope}/inbox/{session|agent}/{id}/{msg_id}` に統一 (#195)
+- messaging: `Message` dataclass に direct delivery schema の first-class フィールドを追加 — `schema_version`, `kind`, `sender`, `recipient`, `body`, `content_type`, `requires_ack`, `delivery_adapters`, `correlation_id`, `_extras` (#195)
+- messaging: local inbox index の Ack/dedup を recipient session 単位に変更 — `messages` table を `(msg_id, recipient_session_id)` 複合 PK に、`ack_message()` は未知 msg_id で `ValueError` を raise (#195)
 
 ## [0.6.0] - 2026-06-24
 
