@@ -36,6 +36,7 @@ from .messaging.local_index import ack_message as _ack_message_internal
 from .messaging.local_index import LocalMessageIndex
 from .messaging.models import is_expired
 from .messaging.models import Message
+from .messaging.purge import purge_expired_msgs
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .store import MAX_SEARCH
@@ -614,14 +615,26 @@ def check_messages(
                 for reply in session.get(selector, timeout=3.0):
                     if not reply.ok:
                         continue
+                    msg_key = str(reply.ok.key_expr)
                     try:
                         json_str = reply.ok.payload.to_bytes().decode('utf-8')
                         msg = Message.from_json(json_str)
                     except Exception:  # noqa: BLE001
                         continue
+                    # Dedup by msg_id across multiple selectors before any action.
                     if msg.msg_id in seen_ids:
                         continue
                     seen_ids.add(msg.msg_id)
+                    # Storage-level TTL purge (Issue #215): delete expired entries
+                    # from Zenoh so they do not accumulate indefinitely.
+                    if is_expired(msg):
+                        try:
+                            session.delete(msg_key)
+                        except Exception:  # noqa: BLE001 — best-effort; non-fatal
+                            pass
+                        # Still include when caller requests expired msgs for debugging.
+                        if not include_expired:
+                            continue
                     # Override scope from key context if not set on message
                     if not msg.scope:
                         msg.scope = scope
@@ -629,6 +642,13 @@ def check_messages(
                     messages.append(msg)
             except Exception:  # noqa: BLE001
                 pass
+
+    # Purge expired entries from the local SQLite index in sync with the
+    # Zenoh deletes issued above.
+    try:
+        index.purge_expired()
+    except Exception:  # noqa: BLE001
+        pass
 
     # Apply filters
     filtered: list[Message] = []
@@ -742,6 +762,32 @@ def ack_message(
         return f'acked: {msg_id} (scope={scope}) [zenoh_publish_failed: {type(e).__name__}]'
 
     return f'acked: {msg_id} (scope={scope})'
+
+
+@mcp.tool()
+def purge_expired_messages() -> str:
+    """Scan the Zenoh msg/** namespace and delete all TTL-expired messages.
+
+    Performs a full storage-level GC sweep across all ``msg/**`` keys
+    (not limited to the current session's inbox). Expired entries are
+    removed from both Zenoh storage and the local SQLite inbox index.
+
+    TTL expiry follows message-level precedence:
+    ``expires_at`` > ``ttl_sec + created_at`` > never-expires.
+
+    Returns:
+        Summary string: ``purged N expired message(s)`` or an error message.
+    """
+    index = _get_messaging_index()
+    try:
+        session = _get_zenoh_session()
+    except Exception as e:  # noqa: BLE001
+        return f'purge failed: Zenoh session unavailable: {type(e).__name__}: {e}'
+    try:
+        count = purge_expired_msgs(session, index)
+    except Exception as e:  # noqa: BLE001
+        return f'purge failed: {type(e).__name__}: {e}'
+    return f'purged {count} expired message(s)'
 
 
 def _is_tty_misinvocation() -> bool:
