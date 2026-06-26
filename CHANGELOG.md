@@ -40,6 +40,12 @@ versions without a migration path until `1.0.0`.
 
 ### Fixed
 
+- fix: `include_expired=True` でのデバッグ閲覧が storage を破壊しないよう、lazy-delete を
+  `if not include_expired:` の内側に移動。デバッグ閲覧は read-only になり、GC は
+  `purge_expired_messages` MCP ツール / 通常の `check_messages` 経路に委ねる (C1, PR #222)
+- fix: `purge_expired_msgs` のスキャン失敗を `(purged_count, scan_ok)` タプルで呼び出し側に
+  伝達。MCP ツールはスキャン失敗時に `purge incomplete: scan failed (0 messages purged)` を返し、
+  0件成功と区別できる。`check_messages` の inline purge except に `log.debug` を追加 (C2, PR #222)
 - Escape LIKE wildcard chars (`%`, `_`, `\`) in `search()` to prevent over-matching (#211 follow-up)
 - search(): 複数語クエリを AND 検索に修正。スペース区切りの各語を個別に評価し、
   3文字未満の語は LIKE フォールバックで補完 (Issue #210)
