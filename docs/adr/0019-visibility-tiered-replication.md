@@ -1,6 +1,6 @@
 # ADR-0019: Observation visibility tier による selective replication
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-06-06 (Revised: 2026-06-12)
 - Supersedes: なし
 - Related: ADR-0001, ADR-0004, ADR-0006, ADR-0007, ADR-0010, ADR-0014
