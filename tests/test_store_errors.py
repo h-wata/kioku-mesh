@@ -650,6 +650,146 @@ def test_search_via_zenoh_cursor_strict_tuple_walks_same_timestamp(monkeypatch: 
     ], 'cursor_observation_id must drop the boundary row and anything sorted before it'
 
 
+def test_search_via_zenoh_and_or_and_first_ordering(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zenoh fallback and_or places AND-matching observations before OR-only ones (#227).
+
+    Two observations are constructed: one matching all query terms (AND hit)
+    and one matching only a single term (OR-only hit). Even though the OR-only
+    observation has a newer created_at, it must appear after the AND hit in
+    the result.
+    """
+    older_ts = '2025-01-01T00:00:00.000000Z'
+    newer_ts = '2025-06-01T00:00:00.000000Z'
+
+    and_obs = Observation(content='alpha beta match', project='andor-order')
+    and_obs.created_at = older_ts
+
+    or_only_obs = Observation(content='alpha only', project='andor-order')
+    or_only_obs.created_at = newer_ts
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(and_obs), _ok_reply(or_only_obs)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='alpha beta', project='andor-order', search_mode='and_or')
+
+    ids = [o.observation_id for o in results]
+    assert and_obs.observation_id in ids, 'AND-matching obs must be in results'
+    assert or_only_obs.observation_id in ids, 'OR-only obs must also be in results'
+    assert ids.index(and_obs.observation_id) < ids.index(
+        or_only_obs.observation_id
+    ), 'AND hit must appear before OR-only hit regardless of created_at order'
+
+
+def test_search_via_zenoh_and_or_fills_from_or_when_and_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zenoh fallback and_or fills remaining slots with OR-only hits when AND phase is short.
+
+    With limit=2: one AND hit and two OR-only hits. The AND hit fills slot 0;
+    the two OR-only hits (sorted by recency) fill slots 1 and 2 up to limit.
+    """
+    and_obs = Observation(content='alpha beta', project='fill-fallback')
+    or_obs1 = Observation(content='alpha only', project='fill-fallback')
+    or_obs2 = Observation(content='beta only', project='fill-fallback')
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(and_obs), _ok_reply(or_obs1), _ok_reply(or_obs2)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='alpha beta', project='fill-fallback', search_mode='and_or', limit=2)
+
+    assert len(results) == 2
+    assert results[0].observation_id == and_obs.observation_id, 'AND hit must be first'
+    or_ids = {or_obs1.observation_id, or_obs2.observation_id}
+    assert results[1].observation_id in or_ids, 'second slot must be an OR-only hit'
+
+
+def test_search_via_zenoh_and_or_no_duplicate_observation_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """and_or result contains no duplicate observation_ids (#227)."""
+    obs = Observation(content='alpha beta', project='andor-dedup')
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(obs)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='alpha beta', project='andor-dedup', search_mode='and_or')
+
+    ids = [o.observation_id for o in results]
+    assert ids == list(dict.fromkeys(ids)), 'and_or result must not contain duplicate observation_ids'
+    assert obs.observation_id in ids
+
+
+def test_search_via_zenoh_and_or_base_filter_project_maintained(monkeypatch: pytest.MonkeyPatch) -> None:
+    """and_or keeps base filter: project-mismatch obs must not appear in results (#227)."""
+    keep = Observation(content='alpha beta', project='target')
+    drop = Observation(content='alpha beta', project='other')
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(keep), _ok_reply(drop)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='alpha beta', project='target', search_mode='and_or')
+
+    ids = {o.observation_id for o in results}
+    assert keep.observation_id in ids
+    assert drop.observation_id not in ids
+
+
+def test_search_via_zenoh_or_unchanged_by_refactor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refactor must not change or-mode behaviour: any-term match included, no-match excluded."""
+    match_obs = Observation(content='alpha only', project='or-regression')
+    no_match_obs = Observation(content='gamma only', project='or-regression')
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(match_obs), _ok_reply(no_match_obs)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='alpha beta', project='or-regression', search_mode='or')
+
+    ids = {o.observation_id for o in results}
+    assert match_obs.observation_id in ids, 'or-mode: single-term match must be included'
+    assert no_match_obs.observation_id not in ids, 'or-mode: no-term match must be excluded'
+
+
+def test_search_via_zenoh_and_unchanged_by_refactor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refactor must not change and-mode behaviour: full-string substring match."""
+    match_obs = Observation(content='alpha beta here', project='and-regression')
+    no_match_obs = Observation(content='alpha only here', project='and-regression')
+
+    fake = _FakeSession(
+        [
+            [],  # tombstones empty
+            [_ok_reply(match_obs), _ok_reply(no_match_obs)],
+        ]
+    )
+    _install_fake_session(monkeypatch, fake)
+
+    results = store.search_observations(query='alpha beta', project='and-regression', search_mode='and')
+
+    ids = {o.observation_id for o in results}
+    assert match_obs.observation_id in ids, 'and-mode: full substring match must be included'
+    assert no_match_obs.observation_id not in ids, 'and-mode: non-substring obs must be excluded'
+
+
 def test_facade_reexports_are_plain_aliases() -> None:
     """#172: store's re-exports are aliases of the owning module's functions.
 
