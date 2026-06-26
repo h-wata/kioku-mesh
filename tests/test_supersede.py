@@ -150,6 +150,26 @@ def test_search_memory_type_filter(idx: LocalIndex) -> None:
     assert [h.memory_type for h in hits] == ['decision']
 
 
+# C1: memory_type AND is maintained under search_mode='or' and 'and_or'
+
+
+def test_memory_type_filter_ands_with_or_search_mode(idx: LocalIndex) -> None:
+    """memory_type filter stays ANDed even when search_mode='or'/'and_or'.
+
+    Both observations contain the same query term so the OR expansion
+    would return them both if memory_type were ORed in.  The note must
+    be excluded in all modes.
+    """
+    term = 'postgresql'
+    idx.upsert(_mk(f'use {term} for prod', memory_type='decision', subject='db'))
+    idx.upsert(_mk(f'{term} note entry', memory_type='note', subject='db'))
+
+    for mode in ('or', 'and_or'):
+        hits = idx.search(memory_type='decision', query=term, search_mode=mode)
+        types = [h.memory_type for h in hits]
+        assert types == ['decision'], f"search_mode={mode!r}: expected only 'decision', got {types}"
+
+
 # -- doctor.check_conflicting_latest -------------------------------------------
 
 
