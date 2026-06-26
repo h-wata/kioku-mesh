@@ -1064,24 +1064,41 @@ class LocalIndex:
                     self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
                 if shadow_rows:
                     self._conn.executemany(_MARK_SHADOWED_SQL, shadow_rows)
-                # ADR-0021 R1: rebuild obs_fts and superseded_by as recovery path.
+                # ADR-0025: incremental FTS rebuild — reuse diff already computed for obs_index.
+                # Order: upsert first, then delete (same-id upsert+tombstone nets to delete).
                 if self._fts_cap != _FTS_CAP_LIKE:
-                    self._conn.execute('DELETE FROM obs_fts')
-                    tombstoned_ids = {r[1] for r in mark_rows}
-                    fts_rows = [
-                        (
-                            obs.observation_id,
-                            obs.content,
-                            obs.subject or '',
-                            obs.summary or '',
-                            ' '.join(obs.tags or []),
-                            obs.project or '',
+                    obs_by_id = {obs.observation_id: obs for obs in obs_list}
+                    for row in upsert_rows:
+                        obs_id = row[0]
+                        obs = obs_by_id[obs_id]
+                        self._conn.execute(_FTS_DELETE_SQL, (obs_id,))
+                        self._conn.execute(
+                            _FTS_UPSERT_SQL,
+                            (
+                                obs_id,
+                                obs.content,
+                                obs.subject or '',
+                                obs.summary or '',
+                                ' '.join(obs.tags or []),
+                                obs.project or '',
+                            ),
                         )
-                        for obs in obs_list
-                        if obs.observation_id not in tombstoned_ids
-                    ]
-                    if fts_rows:
-                        self._conn.executemany(_FTS_UPSERT_SQL, fts_rows)
+                    for _del_at, obs_id in mark_rows:
+                        self._conn.execute(_FTS_DELETE_SQL, (obs_id,))
+                    for _shad_at, obs_id in shadow_rows:
+                        self._conn.execute(_FTS_DELETE_SQL, (obs_id,))
+                    # drift guard: count mismatch triggers full rebuild as self-heal.
+                    (fts_count,) = self._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
+                    (live_count,) = self._conn.execute(
+                        'SELECT COUNT(*) FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
+                    ).fetchone()
+                    if fts_count != live_count:
+                        log.warning(
+                            'rebuild_from_zenoh FTS drift detected (%d vs %d live); falling back to full rebuild',
+                            fts_count,
+                            live_count,
+                        )
+                        _rebuild_fts_from_obs_index(self._conn)
                 # Reconstruct superseded_by from obs_list (reset first for idempotency).
                 self._conn.execute('UPDATE obs_index SET superseded_by = NULL')
                 for obs in obs_list:
