@@ -331,8 +331,14 @@ def _search_via_zenoh(
     triggers the same strict-tuple cursor semantics as
     :meth:`LocalIndex.search` so bulk-delete pagination keeps working
     on the fallback path too (#66).
-    ``search_mode`` is propagated: 'or'/'and_or' uses OR across content /
-    project / tags substrings; 'and' uses AND (existing behaviour).
+
+    ``search_mode`` controls query-term matching:
+      'and' (default): full query string must appear as a single substring.
+      'or': any space-separated term must match.
+      'and_or': two-phase — AND-matching observations (all terms present)
+        precede OR-only observations (any term present), matching
+        :meth:`LocalIndex.search` semantics.  Base filters (project /
+        since / until / tombstones) remain AND-combined in every mode.
     """
     since_dt = _parse_iso(since_iso)
     until_dt = _parse_iso(until_iso)
@@ -352,12 +358,13 @@ def _search_via_zenoh(
         if tomb_id is not None:
             tombs.add(tomb_id)
 
-    q = query.lower()
-    use_or = search_mode in ('or', 'and_or')
+    # Collect all base-filter-passing observations. Query filtering is applied
+    # after the scan so and_or can classify each observation into AND / OR-only
+    # buckets without scanning Zenoh twice.
     # Use a dict keyed by observation_id so multiple Zenoh storages replying
     # with the same observation (multi-router / replication overlap) do not
     # produce duplicates (#12). Last-writer-wins within a single GET scan.
-    results_by_id: dict[str, Observation] = {}
+    candidates: dict[str, Observation] = {}
     for ok in _iter_ok_replies(session, key_expr):
         key_id = obs_id_from_key(str(ok.key_expr))
         if key_id is None:
@@ -390,32 +397,52 @@ def _search_via_zenoh(
                         continue
                 elif obs_dt > until_dt:
                     continue
-        if q:
-            if use_or:
-                terms = q.split()
-                if not any(
-                    t in obs.content.lower() or t in obs.project.lower() or any(t in tag.lower() for tag in obs.tags)
-                    for t in terms
-                ):
-                    continue
-            elif (
-                q not in obs.content.lower()
-                and q not in obs.project.lower()
-                and not any(q in t.lower() for t in obs.tags)
-            ):
-                continue
-        results_by_id[obs.observation_id] = obs
+        candidates[obs.observation_id] = obs
 
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
     # Sort by (created_at, observation_id) DESC tuple so the bulk-delete
     # cursor sees the same stable order as the SQLite path (#66). Without
     # the secondary key, ties on a boundary timestamp would shuffle
     # between calls and the next page could skip or re-emit rows.
-    return sorted(
-        results_by_id.values(),
-        key=lambda o: (_parse_iso(o.created_at) or epoch, o.observation_id),
-        reverse=True,
-    )[:limit]
+    def sort_key(o: Observation) -> tuple:
+        return (_parse_iso(o.created_at) or epoch, o.observation_id)
+
+    q = query.lower()
+    if not q:
+        return sorted(candidates.values(), key=sort_key, reverse=True)[:limit]
+
+    terms = q.split()
+
+    def _term_in_obs(obs: Observation, term: str) -> bool:
+        return (
+            term in obs.content.lower() or term in obs.project.lower() or any(term in tag.lower() for tag in obs.tags)
+        )
+
+    if search_mode == 'and_or':
+        # Two-phase: AND-matching observations first, then OR-only fills remaining
+        # slots. Mirrors LocalIndex.search and_or semantics (#227).
+        and_hits: list[Observation] = []
+        or_only_hits: list[Observation] = []
+        for obs in candidates.values():
+            if all(_term_in_obs(obs, t) for t in terms):
+                and_hits.append(obs)
+            elif any(_term_in_obs(obs, t) for t in terms):
+                or_only_hits.append(obs)
+        return [
+            *sorted(and_hits, key=sort_key, reverse=True),
+            *sorted(or_only_hits, key=sort_key, reverse=True),
+        ][:limit]
+
+    if search_mode == 'or':
+        filtered = [obs for obs in candidates.values() if any(_term_in_obs(obs, t) for t in terms)]
+    else:  # 'and': full query string as single substring (existing behaviour)
+        filtered = [
+            obs
+            for obs in candidates.values()
+            if q in obs.content.lower() or q in obs.project.lower() or any(q in tag.lower() for tag in obs.tags)
+        ]
+    return sorted(filtered, key=sort_key, reverse=True)[:limit]
 
 
 def find_observation_by_id(observation_id: str) -> Observation | None:
