@@ -29,6 +29,7 @@ from . import __version__
 from . import doctor as doctor_module
 from . import mcp_install as mcp_install_module
 from . import tls as tls_module
+from . import zenohd_install as zenohd_install_module
 from .backend import get_backend
 from .backend import reset_backend
 from .config import format_visibility
@@ -85,11 +86,13 @@ def _positive_int(value: str) -> int:
     """Argparse type that rejects zero / negative integers."""
     parsed = int(value)
     if parsed < 1:
-        raise argparse.ArgumentTypeError('must be a positive integer (1 or greater).')
+        raise argparse.ArgumentTypeError(
+            'must be a positive integer (1 or greater).')
     return parsed
 
 
-def _iter_delete_targets(args: argparse.Namespace, *, batch_size: int) -> Iterator[Observation]:
+def _iter_delete_targets(args: argparse.Namespace, *,
+                         batch_size: int) -> Iterator[Observation]:
     """Yield bulk-delete targets in (created_at, observation_id) DESC order.
 
     Pages over :func:`search_observations` using the strict
@@ -126,7 +129,8 @@ def _iter_delete_targets(args: argparse.Namespace, *, batch_size: int) -> Iterat
         cursor_obs_id = last.observation_id
 
 
-def _count_delete_targets(args: argparse.Namespace, *, batch_size: int) -> tuple[int, str | None]:
+def _count_delete_targets(args: argparse.Namespace, *,
+                          batch_size: int) -> tuple[int, str | None]:
     """Return ``(total_count, error_message)`` for bulk-delete preflight.
 
     Streams via :func:`_iter_delete_targets` so the count is uncapped
@@ -147,7 +151,8 @@ def _cmd_save(args: argparse.Namespace) -> int:
     references = _parse_csv(args.references) if args.references else []
     supersedes = _parse_csv(args.supersedes) if args.supersedes else []
     try:
-        visibility, scope_id = resolve_write_visibility(getattr(args, 'visibility', '') or '')
+        visibility, scope_id = resolve_write_visibility(
+            getattr(args, 'visibility', '') or '')
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
@@ -166,7 +171,9 @@ def _cmd_save(args: argparse.Namespace) -> int:
         scope_id=scope_id,
     )
     get_backend().put_observation(obs)
-    print(f'saved: {obs.observation_id} (visibility={format_visibility(visibility, scope_id)})')
+    print(
+        f'saved: {obs.observation_id} (visibility={format_visibility(visibility, scope_id)})'
+    )
     return 0
 
 
@@ -183,11 +190,9 @@ def _format_search_text_entry(obs: Observation) -> str:
     subject_part = f' {obs.subject}' if obs.subject else ''
     project_part = f' ({obs.project})' if obs.project else ''
     refs_part = f' (refs: {", ".join(obs.references)})' if obs.references else ''
-    return (
-        f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
-        f'{project_part}{subject_part}{refs_part}\n'
-        f'{body} <id={obs.observation_id}>'
-    )
+    return (f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
+            f'{project_part}{subject_part}{refs_part}\n'
+            f'{body} <id={obs.observation_id}>')
 
 
 def _format_search_markdown_body(obs: Observation) -> str:
@@ -206,16 +211,15 @@ def _format_search_markdown_entry(obs: Observation) -> str:
     project_part = f' ({obs.project})' if obs.project else ''
     refs_part = f' (refs: {", ".join(obs.references)})' if obs.references else ''
     body = _format_search_markdown_body(obs)
-    return (
-        f'- **[{obs.memory_type}][{obs.importance}]** '
-        f'{obs.created_at[:16]}{project_part} '
-        f'{body}{refs_part} <id={obs.observation_id}>'
-    )
+    return (f'- **[{obs.memory_type}][{obs.importance}]** '
+            f'{obs.created_at[:16]}{project_part} '
+            f'{body}{refs_part} <id={obs.observation_id}>')
 
 
 def _format_search_json(results: list[Observation]) -> str:
     """Render search results as a JSON array using the full observation schema."""
-    return json.dumps([json.loads(obs.to_json()) for obs in results], ensure_ascii=False)
+    return json.dumps([json.loads(obs.to_json()) for obs in results],
+                      ensure_ascii=False)
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -236,7 +240,8 @@ def _cmd_search(args: argparse.Namespace) -> int:
             print('[]')
         return 0
     if args.format == 'text':
-        print('\n---\n'.join(_format_search_text_entry(obs) for obs in results))
+        print('\n---\n'.join(
+            _format_search_text_entry(obs) for obs in results))
         return 0
     if args.format == 'markdown':
         print('\n'.join(_format_search_markdown_entry(obs) for obs in results))
@@ -247,11 +252,13 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
 def _cmd_get_memory(args: argparse.Namespace) -> int:
     if len(args.observation_id) != 32:
-        print('observation_id must be a full 32-character match.', file=sys.stderr)
+        print('observation_id must be a full 32-character match.',
+              file=sys.stderr)
         return 2
     obs = get_backend().find_observation_by_id(args.observation_id)
     if obs is None:
-        print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
+        print(f'observation_id {args.observation_id} not found.',
+              file=sys.stderr)
         return 1
     lines = [
         f'id: {obs.observation_id}',
@@ -316,7 +323,8 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         if args.until:
             selector_parts.append(f'until={args.until!r}')
         selector_text = ', '.join(selector_parts)
-        print(f'bulk delete target: {total} entries ({selector_text})', file=sys.stderr)
+        print(f'bulk delete target: {total} entries ({selector_text})',
+              file=sys.stderr)
         if total == 0:
             print('no targets — no observations matched the selector.')
             print(_LOCAL_INDEX_HINT, file=sys.stderr)
@@ -364,7 +372,8 @@ def _cmd_delete(args: argparse.Namespace) -> int:
                 deleted += 1
             except Exception as e:  # noqa: BLE001 — one bad row must not abort the sweep (#66)
                 failures += 1
-                print(f'  put_tombstone failed for {obs.observation_id}: {e}', file=sys.stderr)
+                print(f'  put_tombstone failed for {obs.observation_id}: {e}',
+                      file=sys.stderr)
             if deleted + failures >= next_progress:
                 print(
                     f'  progress: {deleted + failures}/{total} (ok={deleted}, fail={failures})',
@@ -377,11 +386,13 @@ def _cmd_delete(args: argparse.Namespace) -> int:
         return 0 if failures == 0 else 1
 
     if len(args.observation_id) != 32:
-        print('observation_id must be a full 32-character match.', file=sys.stderr)
+        print('observation_id must be a full 32-character match.',
+              file=sys.stderr)
         return 2
     obs = get_backend().find_observation_by_id(args.observation_id)
     if obs is None:
-        print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
+        print(f'observation_id {args.observation_id} not found.',
+              file=sys.stderr)
         return 1
     get_backend().put_tombstone(obs, reason=args.reason or '')
     print(f'deleted (tombstone): {args.observation_id}')
@@ -401,7 +412,8 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     try:
         recent = get_backend().search_observations(limit=MAX_SEARCH)
     except Exception as e:  # noqa: BLE001
-        print(f'failed to read shared memory [{type(e).__name__}]: {e}', file=sys.stderr)
+        print(f'failed to read shared memory [{type(e).__name__}]: {e}',
+              file=sys.stderr)
         return 1
     status = get_backend().get_status()
     by_family: dict[str, int] = {}
@@ -416,13 +428,19 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f'backend: {status.mode}')
     print(f'pc_id: {get_pc_id()}')
     print(f'session_id: {get_session_id()}')
-    print(f'agent_family: {af_value} {_format_identity_source(af_source, "KIOKU_MESH_AGENT_FAMILY")}')
-    print(f'client_id: {cid_value} {_format_identity_source(cid_source, "KIOKU_MESH_CLIENT_ID")}')
+    print(
+        f'agent_family: {af_value} {_format_identity_source(af_source, "KIOKU_MESH_AGENT_FAMILY")}'
+    )
+    print(
+        f'client_id: {cid_value} {_format_identity_source(cid_source, "KIOKU_MESH_CLIENT_ID")}'
+    )
     print(f'zenoh_session: {status.zenoh_session}')
     print(f'last_put_at_iso: {status.last_put_at_iso or "-"}')
     print(f'last_put_status: {status.last_put_status}')
     print(f'pending_puts: {status.pending_puts}')
-    print(f'count (within limit {MAX_SEARCH}): {len(recent)}{" (limit may be reached)" if truncated else ""}')
+    print(
+        f'count (within limit {MAX_SEARCH}): {len(recent)}{" (limit may be reached)" if truncated else ""}'
+    )
     for family, count in sorted(by_family.items()):
         print(f'  family {family}: {count}')
     for pc, count in sorted(by_pc.items()):
@@ -444,16 +462,20 @@ def _cmd_drain(args: argparse.Namespace) -> int:
         return 2
     drained = get_backend().drain_pending(limit=args.limit, wait=True)
     remaining = get_backend().get_status().pending_puts
-    print(f'pending_puts drain complete: drained={drained}, remaining={remaining}')
+    print(
+        f'pending_puts drain complete: drained={drained}, remaining={remaining}'
+    )
     return 0
 
 
 def _cmd_gc(args: argparse.Namespace) -> int:
     if args.force_id:
         if len(args.force_id) != 32:
-            print('--force-id requires a full 32-character observation_id.', file=sys.stderr)
+            print('--force-id requires a full 32-character observation_id.',
+                  file=sys.stderr)
             return 2
-        obs_removed, tomb_removed = get_backend().physical_delete_observation(args.force_id)
+        obs_removed, tomb_removed = get_backend().physical_delete_observation(
+            args.force_id)
         parts = []
         if obs_removed:
             parts.append('obs')
@@ -468,7 +490,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         return 0
     if args.by_pc_id:
         if get_backend().get_status().mode == 'local':
-            print('--by-pc-id is not supported in local mode.', file=sys.stderr)
+            print('--by-pc-id is not supported in local mode.',
+                  file=sys.stderr)
             return 2
         return _cmd_gc_by_pc_id(args)
     # Shadow sweep for zenoh: rebuild index from zenoh first so discovery path is current.
@@ -480,7 +503,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
                 f'rebuild_from_zenoh skipped before gc shadow sweep: {type(e).__name__}: {e}',
                 file=sys.stderr,
             )
-    purged_tomb = get_backend().gc_tombstones(retention_days=args.retention_days, project=args.project or '')
+    purged_tomb = get_backend().gc_tombstones(
+        retention_days=args.retention_days, project=args.project or '')
     project_note = f' (project={args.project})' if args.project else ''
     if args.no_shadow_prune:
         print(
@@ -489,13 +513,11 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         )
         return 0
     purged_shadow, revived_shadow = get_backend().gc_shadows(
-        retention_days=args.retention_days, project=args.project or ''
-    )
+        retention_days=args.retention_days, project=args.project or '')
     print(
         f'retention {args.retention_days}-day sweep{project_note}: '
         f'physically deleted {purged_tomb} tombstones / {purged_shadow} shadows '
-        f'(revived {revived_shadow})'
-    )
+        f'(revived {revived_shadow})')
     return 0
 
 
@@ -505,11 +527,14 @@ def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
         return 2
 
     print(
-        f'scanning mem/obs/** pc_id={args.by_pc_id!r}'
-        + (f' session_prefix={args.session_prefix!r}' if args.session_prefix else ''),
+        f'scanning mem/obs/** pc_id={args.by_pc_id!r}' +
+        (f' session_prefix={args.session_prefix!r}'
+         if args.session_prefix else ''),
         file=sys.stderr,
     )
-    matches, sessions = scan_obs_by_pc_id(args.by_pc_id, session_prefix=args.session_prefix or '')
+    matches, sessions = scan_obs_by_pc_id(args.by_pc_id,
+                                          session_prefix=args.session_prefix
+                                          or '')
     print(f'matched obs: {len(matches)} entries', file=sys.stderr)
     if not matches:
         print('no targets — no observations matched the pc_id.')
@@ -542,13 +567,14 @@ def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
             return 1
 
     def _on_progress(i: int, total: int, purged: int, failures: int) -> None:
-        print(f'  progress: {i}/{total} (purged={purged}, fail={failures})', file=sys.stderr)
+        print(f'  progress: {i}/{total} (purged={purged}, fail={failures})',
+              file=sys.stderr)
 
-    purged, tombs_purged, failures = execute_bulk_purge(matches, on_progress=_on_progress)
+    purged, tombs_purged, failures = execute_bulk_purge(
+        matches, on_progress=_on_progress)
     print(
         f'physically deleted: obs={purged}, tombs={tombs_purged}, failures={failures}'
-        ' (tomb sweep / broadcast skipped)',
-    )
+        ' (tomb sweep / broadcast skipped)', )
     return 0 if failures == 0 else 1
 
 
@@ -573,15 +599,22 @@ def _distinct_values_from_local_index(method_name: str) -> list[str]:
 
 def _complete_project(prefix: str, **_kwargs) -> list[str]:
     """Argcomplete callback: suggest ``--project`` values from the local index."""
-    return [v for v in _distinct_values_from_local_index('distinct_projects') if v.startswith(prefix)]
+    return [
+        v for v in _distinct_values_from_local_index('distinct_projects')
+        if v.startswith(prefix)
+    ]
 
 
 def _complete_pc_id(prefix: str, **_kwargs) -> list[str]:
     """Argcomplete callback: suggest ``--pc-id`` / ``--by-pc-id`` values."""
-    return [v for v in _distinct_values_from_local_index('distinct_pc_ids') if v.startswith(prefix)]
+    return [
+        v for v in _distinct_values_from_local_index('distinct_pc_ids')
+        if v.startswith(prefix)
+    ]
 
 
-def _attach_completer(action: argparse.Action, completer: Callable[..., list[str]]) -> None:
+def _attach_completer(action: argparse.Action,
+                      completer: Callable[..., list[str]]) -> None:
     """Attach an argcomplete completer to an argparse Action, no-op if argcomplete is absent."""
     if argcomplete is None:
         return
@@ -603,7 +636,6 @@ def _default_init_path() -> Path:
 # back to the most common location only when ``which`` fails, with a warning.
 _SYSTEMD_ZENOHD_FALLBACK = '/usr/bin/zenohd'
 
-
 _SYSTEMD_UNIT_NAME = 'kioku-mesh-zenohd.service'
 
 
@@ -614,7 +646,8 @@ def _default_systemd_user_unit_path() -> Path:
 
 
 def _detect_systemd_user(
-    run: Callable[[list[str]], 'subprocess.CompletedProcess[str]'] | None = None,
+    run: Callable[[list[str]], 'subprocess.CompletedProcess[str]']
+    | None = None,
 ) -> tuple[bool, str]:
     """Return ``(supported, reason)`` for systemd-user availability on this host.
 
@@ -655,9 +688,14 @@ def _detect_systemd_user(
     return True, ''
 
 
-def _default_systemctl_probe(argv: list[str]) -> 'subprocess.CompletedProcess[str]':
+def _default_systemctl_probe(
+        argv: list[str]) -> 'subprocess.CompletedProcess[str]':
     """Run a ``systemctl --user`` probe with a short timeout. Raises on timeout / OS error."""
-    return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=2.0)
+    return subprocess.run(argv,
+                          capture_output=True,
+                          text=True,
+                          check=False,
+                          timeout=2.0)
 
 
 def _quote_systemd_value(value: str) -> str:
@@ -675,7 +713,8 @@ def _quote_systemd_value(value: str) -> str:
     return f'"{escaped}"'
 
 
-def _render_systemd_unit(config_path: Path, zenohd_binary: str, rocksdb_root: str) -> str:
+def _render_systemd_unit(config_path: Path, zenohd_binary: str,
+                         rocksdb_root: str) -> str:
     """Render a systemd --user unit pointing at the given kioku-mesh config.
 
     Mirrors the manual recipe documented in README §"systemd unit (zenohd)";
@@ -705,8 +744,7 @@ def _render_systemd_unit(config_path: Path, zenohd_binary: str, rocksdb_root: st
         'RestartSec=5s\n'
         '\n'
         '[Install]\n'
-        'WantedBy=default.target\n'
-    )
+        'WantedBy=default.target\n')
 
 
 # Probe destinations span: public internet (default route), the three RFC1918
@@ -748,7 +786,9 @@ def _detect_local_ipv4() -> list[str]:
     # Hostname resolution catches VPN / tunnel interfaces that don't match any
     # probe subnet (e.g. site-to-site IPSec on a custom prefix).
     try:
-        for entry in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+        for entry in socket.getaddrinfo(socket.gethostname(),
+                                        None,
+                                        family=socket.AF_INET):
             ip = entry[4][0]
             if isinstance(ip, str):
                 _add(ip)
@@ -757,7 +797,8 @@ def _detect_local_ipv4() -> list[str]:
     return found
 
 
-def _normalize_endpoint(spec: str, default_port: int = _DEFAULT_ZENOH_PORT) -> str:
+def _normalize_endpoint(spec: str,
+                        default_port: int = _DEFAULT_ZENOH_PORT) -> str:
     """Normalize a user-supplied endpoint to ``tcp/<host>:<port>``."""
     spec = spec.strip()
     if not spec:
@@ -788,12 +829,15 @@ def _dedupe_endpoints(endpoints: list[str]) -> list[str]:
 
 def _prompt_listen_endpoints(detected: list[str]) -> list[str]:
     """Interactive listen-endpoint picker. Returns normalized, deduplicated ``tcp/...`` strings."""
-    options: list[tuple[str, str]] = [('127.0.0.1', 'loopback only — single-host testing')]
+    options: list[tuple[str, str]] = [('127.0.0.1',
+                                       'loopback only — single-host testing')]
     for ip in detected:
         options.append((ip, 'detected interface'))
     options.append(('0.0.0.0', 'all interfaces — firewall recommended'))
     options.append(('custom', 'enter manually'))
-    print('\nSelect listen endpoint(s) (comma-separated for multiple, e.g. "1,2"):', file=sys.stderr)
+    print(
+        '\nSelect listen endpoint(s) (comma-separated for multiple, e.g. "1,2"):',
+        file=sys.stderr)
     for idx, (ip, note) in enumerate(options, 1):
         print(f'  {idx}) {ip:<20} ({note})', file=sys.stderr)
     raw = input('> ').strip()
@@ -812,7 +856,8 @@ def _prompt_listen_endpoints(detected: list[str]) -> list[str]:
             raise ValueError(f'selection {idx} out of range')
         ip, _ = options[idx - 1]
         if ip == 'custom':
-            ip = input('  custom endpoint (ip[:port] or tcp/ip:port): ').strip()
+            ip = input(
+                '  custom endpoint (ip[:port] or tcp/ip:port): ').strip()
             if not ip:
                 raise ValueError('custom endpoint must not be empty')
         picks.append(_normalize_endpoint(ip))
@@ -850,7 +895,7 @@ def _to_tls_endpoints(endpoints: list[str]) -> list[str]:
     out: list[str] = []
     for ep in endpoints:
         if ep.startswith('tcp/') and not _is_loopback_endpoint(ep):
-            out.append('tls/' + ep[len('tcp/') :])
+            out.append('tls/' + ep[len('tcp/'):])
         else:
             out.append(ep)
     return out
@@ -867,27 +912,26 @@ def _render_tls_block() -> str:
     ca = tls_module.ca_cert_path()
     cert = tls_module.peer_cert_path()
     key = tls_module.peer_key_path()
-    return (
-        '  transport: {\n'
-        '    link: {\n'
-        '      tls: {\n'
-        f'        root_ca_certificate: "{ca}",\n'
-        '        enable_mtls: true,\n'
-        '        verify_name_on_connect: true,\n'
-        f'        listen_private_key: "{key}",\n'
-        f'        listen_certificate: "{cert}",\n'
-        f'        connect_private_key: "{key}",\n'
-        f'        connect_certificate: "{cert}",\n'
-        '      },\n'
-        '    },\n'
-        '  },\n'
-        '\n'
-    )
+    return ('  transport: {\n'
+            '    link: {\n'
+            '      tls: {\n'
+            f'        root_ca_certificate: "{ca}",\n'
+            '        enable_mtls: true,\n'
+            '        verify_name_on_connect: true,\n'
+            f'        listen_private_key: "{key}",\n'
+            f'        listen_certificate: "{cert}",\n'
+            f'        connect_private_key: "{key}",\n'
+            f'        connect_certificate: "{cert}",\n'
+            '      },\n'
+            '    },\n'
+            '  },\n'
+            '\n')
 
 
-def _render_mesh_config(
-    mode: str, listen_endpoints: list[str], connect_endpoints: list[str], tls: bool = False
-) -> str:
+def _render_mesh_config(mode: str,
+                        listen_endpoints: list[str],
+                        connect_endpoints: list[str],
+                        tls: bool = False) -> str:
     """Render a hub-or-spoke zenohd config with rocksdb + replication.
 
     When ``tls`` is set, endpoints use the ``tls/`` scheme and a
@@ -953,17 +997,19 @@ def _render_mesh_config(
         '      },\n'
         '    },\n'
         '  },\n'
-        '}\n'
-    )
+        '}\n')
 
 
-def _resolve_listen_endpoints(args: argparse.Namespace, detected: list[str]) -> list[str]:
+def _resolve_listen_endpoints(args: argparse.Namespace,
+                              detected: list[str]) -> list[str]:
     """Resolve listen endpoints from flags / interactive picker / mode default."""
     if args.listen:
-        return _dedupe_endpoints([_normalize_endpoint(spec) for spec in args.listen])
+        return _dedupe_endpoints(
+            [_normalize_endpoint(spec) for spec in args.listen])
     if sys.stdin.isatty():
         return _prompt_listen_endpoints(detected)
-    raise ValueError(f'--listen required for --mode {args.mode} in non-interactive use')
+    raise ValueError(
+        f'--listen required for --mode {args.mode} in non-interactive use')
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -1042,25 +1088,32 @@ def _cmd_mesh_start(args: argparse.Namespace) -> int:
     if _is_wildcard:
         _detected = _detect_local_ipv4()
         print(f'Router listening on {args.listen} (all interfaces).')
-        print(f'  from this host:   ZENOH_CONNECT=tcp/127.0.0.1:{_port} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...')
+        print(
+            f'  from this host:   ZENOH_CONNECT=tcp/127.0.0.1:{_port} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...'
+        )
         if _detected:
             _hint_ip = _detected[0]
             _all_ips = ', '.join(_detected)
             print(
                 f'  from other hosts: ZENOH_CONNECT=tcp/{_hint_ip}:{_port} KIOKU_MESH_BACKEND=zenoh '
-                f'kioku-mesh save ...'
-            )
+                f'kioku-mesh save ...')
             print(f'                    ^ auto-detected IPs: {_all_ips}')
         else:
             print(
                 f'  from other hosts: '
                 f'ZENOH_CONNECT=tcp/<this-host-ip>:{_port} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...'
             )
-            print("                    ^ replace <this-host-ip> with this machine's LAN IP")
+            print(
+                "                    ^ replace <this-host-ip> with this machine's LAN IP"
+            )
     else:
         print(f'Router listening on {args.listen}.')
-        print(f'  connect with: ZENOH_CONNECT={args.listen} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...')
-    print('Subscribing to peer observations (saves will be visible from this process)...')
+        print(
+            f'  connect with: ZENOH_CONNECT={args.listen} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...'
+        )
+    print(
+        'Subscribing to peer observations (saves will be visible from this process)...'
+    )
     print('Press Ctrl-C to stop.')
 
     # Start index subscriber so peer saves are visible from router search.
@@ -1068,7 +1121,8 @@ def _cmd_mesh_start(args: argparse.Namespace) -> int:
     os.environ['ZENOH_CONNECT'] = self_connect_ep
     os.environ['KIOKU_MESH_BACKEND'] = 'zenoh'
     set_rebuild_on_init_default(False)
-    get_index()  # opens client session to our router + starts replication subscriber
+    get_index(
+    )  # opens client session to our router + starts replication subscriber
 
     def _shutdown(sig: int, frame: object) -> None:
         stop_pending_drain_background()
@@ -1098,8 +1152,12 @@ def _cmd_mesh_join(args: argparse.Namespace) -> int:
         return 1
 
     print(f'Connected to peer {args.peer}')
-    print(f'In another terminal: ZENOH_CONNECT={args.peer} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...')
-    print('Subscribing to mesh observations (saves from peers will be stored locally)...')
+    print(
+        f'In another terminal: ZENOH_CONNECT={args.peer} KIOKU_MESH_BACKEND=zenoh kioku-mesh save ...'
+    )
+    print(
+        'Subscribing to mesh observations (saves from peers will be stored locally)...'
+    )
     print('Press Ctrl-C to stop.')
 
     # Start index subscriber to receive saves from the mesh.
@@ -1126,7 +1184,9 @@ def _cmd_init_local(args: argparse.Namespace) -> int:
 
     config_path = _config_path()
     if config_path.exists() and not args.force:
-        print(f'error: {config_path} already exists. Use --force to overwrite.', file=sys.stderr)
+        print(
+            f'error: {config_path} already exists. Use --force to overwrite.',
+            file=sys.stderr)
         return 1
     if args.to_stdout:
         sys.stdout.write('backend: local\n')
@@ -1135,17 +1195,16 @@ def _cmd_init_local(args: argparse.Namespace) -> int:
     print(f'wrote {written}')
     print('local backend ready — no zenohd required.')
     print('next: kioku-mesh save "hello local"')
-    print(
-        'scale up: for multi-host mesh, install zenohd then '
-        '`kioku-mesh init --mode hub --force` (see README §Power users).'
-    )
+    print('scale up: for multi-host mesh, install zenohd then '
+          '`kioku-mesh init --mode hub --force` (see README §Power users).')
     return 0
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
     if args.mode == 'local':
         if getattr(args, 'tls', False):
-            print('error: --tls applies only to --mode hub / spoke.', file=sys.stderr)
+            print('error: --tls applies only to --mode hub / spoke.',
+                  file=sys.stderr)
             return 2
         return _cmd_init_local(args)
 
@@ -1156,18 +1215,24 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f'error: {e}', file=sys.stderr)
         return 2
 
-    connect = _dedupe_endpoints([_normalize_endpoint(spec) for spec in (args.connect or [])])
+    connect = _dedupe_endpoints(
+        [_normalize_endpoint(spec) for spec in (args.connect or [])])
     if args.mode == 'spoke' and not connect:
-        print('error: --connect required for --mode spoke (the hub endpoint to dial).', file=sys.stderr)
+        print(
+            'error: --connect required for --mode spoke (the hub endpoint to dial).',
+            file=sys.stderr)
         return 2
     if args.mode == 'hub' and connect:
-        print('error: --connect is not used with --mode hub (hubs only listen).', file=sys.stderr)
+        print(
+            'error: --connect is not used with --mode hub (hubs only listen).',
+            file=sys.stderr)
         return 2
 
     # Loopback in listen is what makes local MCP clients reach this router on the
     # default ``ZENOH_CONNECT=tcp/127.0.0.1:7447``. Don't add it silently; surface
     # the gap so the user knows ZENOH_CONNECT will need to point elsewhere.
-    if args.mode in ('hub', 'spoke') and not any('127.0.0.1' in ep for ep in listen):
+    if args.mode in ('hub', 'spoke') and not any('127.0.0.1' in ep
+                                                 for ep in listen):
         print(
             'note: 127.0.0.1 is not in --listen; local MCP clients will need '
             'ZENOH_CONNECT pointed at one of the listed endpoints.',
@@ -1177,26 +1242,32 @@ def _cmd_init(args: argparse.Namespace) -> int:
     use_tls = getattr(args, 'tls', False)
     if use_tls:
         if args.mode not in ('hub', 'spoke'):
-            print('error: --tls applies only to --mode hub / spoke.', file=sys.stderr)
+            print('error: --tls applies only to --mode hub / spoke.',
+                  file=sys.stderr)
             return 2
         # mTLS rides on TCP; cross-host udp/ endpoints can't be wrapped in TLS, so
         # they'd stay plaintext + unauthenticated while the config advertises mTLS.
         # Refuse rather than silently emit an unprotected cross-host link.
-        bad_udp = [ep for ep in (*listen, *connect) if ep.startswith('udp/') and not _is_loopback_endpoint(ep)]
+        bad_udp = [
+            ep for ep in (*listen, *connect)
+            if ep.startswith('udp/') and not _is_loopback_endpoint(ep)
+        ]
         if bad_udp:
             print(
                 'error: --tls cannot secure cross-host UDP endpoints (mTLS rides on TCP). '
-                'Use tcp/ for these, or drop --tls:\n  ' + '\n  '.join(bad_udp),
+                'Use tcp/ for these, or drop --tls:\n  ' +
+                '\n  '.join(bad_udp),
                 file=sys.stderr,
             )
             return 2
-        cert_paths = (tls_module.ca_cert_path(), tls_module.peer_cert_path(), tls_module.peer_key_path())
+        cert_paths = (tls_module.ca_cert_path(), tls_module.peer_cert_path(),
+                      tls_module.peer_key_path())
         missing = [p for p in cert_paths if not p.is_file()]
         if missing:
             print(
                 'error: --tls needs certificates that are not present yet:\n  '
-                + '\n  '.join(str(p) for p in missing)
-                + '\nProvision them first: `kioku-mesh tls init-ca` (CA host), then on each peer '
+                + '\n  '.join(str(p) for p in missing) +
+                '\nProvision them first: `kioku-mesh tls init-ca` (CA host), then on each peer '
                 '`kioku-mesh tls enroll <ca-host> --san <addr>` (with SSH), or the copy-paste flow '
                 '`tls request` -> `tls sign` -> `tls install`.',
                 file=sys.stderr,
@@ -1221,12 +1292,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
     # resolves to, honoring the legacy mesh-mem fallback so an existing store
     # is not orphaned on a partially-migrated host (#128).
     rocksdb_leaf = data_share_leaf()
-    unit_path = _default_systemd_user_unit_path() if args.install_systemd else None
+    unit_path = _default_systemd_user_unit_path(
+    ) if args.install_systemd else None
     unit_body: str | None = None
     if args.install_systemd:
         supported, reason = _detect_systemd_user()
         if not supported:
-            print(f'error: --install-systemd is not supported here. {reason}', file=sys.stderr)
+            print(f'error: --install-systemd is not supported here. {reason}',
+                  file=sys.stderr)
             return 2
         zenohd_binary = shutil.which('zenohd')
         if zenohd_binary is None:
@@ -1236,12 +1309,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             zenohd_binary = _SYSTEMD_ZENOHD_FALLBACK
-        unit_body = _render_systemd_unit(config_path, zenohd_binary, f'%h/.local/share/{rocksdb_leaf}')
+        unit_body = _render_systemd_unit(config_path, zenohd_binary,
+                                         f'%h/.local/share/{rocksdb_leaf}')
 
     if args.to_stdout:
         sys.stdout.write(body)
         if unit_body is not None:
-            sys.stdout.write('\n# --- systemd unit (' + str(unit_path) + ') ---\n')
+            sys.stdout.write('\n# --- systemd unit (' + str(unit_path) +
+                             ') ---\n')
             sys.stdout.write(unit_body)
         return 0
 
@@ -1249,12 +1324,16 @@ def _cmd_init(args: argparse.Namespace) -> int:
     # pure add-on: keep the user's existing config untouched (don't demand
     # --force, don't rewrite it) and only generate the unit. --force still
     # overwrites the config when the user explicitly asks.
-    reuse_existing_config = config_path.exists() and not args.force and args.install_systemd
+    reuse_existing_config = config_path.exists(
+    ) and not args.force and args.install_systemd
     if config_path.exists() and not args.force and not reuse_existing_config:
-        print(f'error: {config_path} already exists. Use --force to overwrite.', file=sys.stderr)
+        print(
+            f'error: {config_path} already exists. Use --force to overwrite.',
+            file=sys.stderr)
         return 1
     if unit_path is not None and unit_path.exists() and not args.force:
-        print(f'error: {unit_path} already exists. Use --force to overwrite.', file=sys.stderr)
+        print(f'error: {unit_path} already exists. Use --force to overwrite.',
+              file=sys.stderr)
         return 1
 
     if reuse_existing_config:
@@ -1267,11 +1346,15 @@ def _cmd_init(args: argparse.Namespace) -> int:
         unit_path.parent.mkdir(parents=True, exist_ok=True)
         unit_path.write_text(unit_body, encoding='utf-8')
         print(f'wrote {unit_path}')
-        print('enable: systemctl --user daemon-reload && systemctl --user enable --now kioku-mesh-zenohd')
+        print(
+            'enable: systemctl --user daemon-reload && systemctl --user enable --now kioku-mesh-zenohd'
+        )
     else:
         print(f'next: zenohd -c {config_path}')
     if args.mode in ('hub', 'spoke'):
-        print(f'also: export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/{rocksdb_leaf}"')
+        print(
+            f'also: export ZENOH_BACKEND_ROCKSDB_ROOT="$HOME/.local/share/{rocksdb_leaf}"'
+        )
     _print_mode_followup(args.mode, listen)
     return 0
 
@@ -1279,18 +1362,22 @@ def _cmd_init(args: argparse.Namespace) -> int:
 def _print_mode_followup(mode: str, listen_endpoints: list[str]) -> None:
     """Print mode-specific scale-up / cross-peer guidance after init."""
     if mode == 'hub':
-        hint_ip = _first_lan_ip_from_listen(listen_endpoints) or '<this-host-ip>'
+        hint_ip = _first_lan_ip_from_listen(
+            listen_endpoints) or '<this-host-ip>'
         print(
             f'on each spoke: kioku-mesh init --mode spoke --listen 127.0.0.1 '
-            f'--listen <spoke-lan-ip> --connect {hint_ip}:7447'
-        )
+            f'--listen <spoke-lan-ip> --connect {hint_ip}:7447')
     elif mode == 'spoke':
-        print('then (once zenohd is running and synced with the hub): kioku-mesh --rebuild status')
+        print(
+            'then (once zenohd is running and synced with the hub): kioku-mesh --rebuild status'
+        )
         print(
             '  populates the local search index from memories already on the hub; '
             'until you run it once, status/search show 0 even though replication succeeded.'
         )
-        print("on the hub: confirm --listen includes this spoke's reachable IP, then restart zenohd.")
+        print(
+            "on the hub: confirm --listen includes this spoke's reachable IP, then restart zenohd."
+        )
 
 
 def _first_lan_ip_from_listen(listen_endpoints: list[str]) -> str | None:
@@ -1306,14 +1393,26 @@ def _cmd_tls_init_ca(args: argparse.Namespace) -> int:
     """Create the mesh CA (run once, on the host that will hold the CA key)."""
     ca_key = tls_module.ca_key_path()
     if ca_key.exists() and not args.force:
-        print(f'error: {ca_key} already exists. Use --force to replace the CA.', file=sys.stderr)
-        print('  warning: replacing the CA invalidates every peer cert it signed.', file=sys.stderr)
+        print(
+            f'error: {ca_key} already exists. Use --force to replace the CA.',
+            file=sys.stderr)
+        print(
+            '  warning: replacing the CA invalidates every peer cert it signed.',
+            file=sys.stderr)
         return 1
     tls_module.create_ca(common_name=args.name, days=args.days)
-    print(f'wrote {tls_module.ca_key_path()} (keep this secret — never copy it to another host)')
-    print(f'wrote {tls_module.ca_cert_path()} (public — distribute to every peer)')
-    print('next on each peer: kioku-mesh tls enroll <this-host> --san <address-peers-dial> (with SSH),')
-    print('             or copy-paste: kioku-mesh tls request --san <address-peers-dial>')
+    print(
+        f'wrote {tls_module.ca_key_path()} (keep this secret — never copy it to another host)'
+    )
+    print(
+        f'wrote {tls_module.ca_cert_path()} (public — distribute to every peer)'
+    )
+    print(
+        'next on each peer: kioku-mesh tls enroll <this-host> --san <address-peers-dial> (with SSH),'
+    )
+    print(
+        '             or copy-paste: kioku-mesh tls request --san <address-peers-dial>'
+    )
     return 0
 
 
@@ -1335,19 +1434,25 @@ def _read_pasted_blob() -> str:
 def _cmd_tls_request(args: argparse.Namespace) -> int:
     """Generate this peer's key (stays local) + a CSR blob to hand to the CA host."""
     try:
-        _key_pem, csr_pem = tls_module.generate_key_and_csr(args.san, common_name=args.cn or None)
+        _key_pem, csr_pem = tls_module.generate_key_and_csr(args.san,
+                                                            common_name=args.cn
+                                                            or None)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
     blob = tls_module.encode_csr_blob(csr_pem)
     # Guidance goes to stderr so stdout is a clean blob you can pipe or copy
     # without slicing prose out of it.
-    print(f'wrote {tls_module.peer_key_path()} (private — stays on this host)', file=sys.stderr)
+    print(f'wrote {tls_module.peer_key_path()} (private — stays on this host)',
+          file=sys.stderr)
     if args.out:
         Path(args.out).write_text(blob + '\n')
-        print(f'wrote CSR request to {args.out} — send it to the CA host', file=sys.stderr)
+        print(f'wrote CSR request to {args.out} — send it to the CA host',
+              file=sys.stderr)
     else:
-        print('copy the block below to the CA host and run `kioku-mesh tls sign`:', file=sys.stderr)
+        print(
+            'copy the block below to the CA host and run `kioku-mesh tls sign`:',
+            file=sys.stderr)
         print(blob)
     print(
         'then paste the bundle it returns into `kioku-mesh tls install` here.\n'
@@ -1366,7 +1471,9 @@ def _resolve_csr_input(args: argparse.Namespace) -> str | None:
             return None
         return src.read_text()
     if sys.stdin.isatty():
-        print('paste the CSR block from `kioku-mesh tls request` (reads to its -----END line):', file=sys.stderr)
+        print(
+            'paste the CSR block from `kioku-mesh tls request` (reads to its -----END line):',
+            file=sys.stderr)
     return _read_pasted_blob()
 
 
@@ -1374,7 +1481,9 @@ def _cmd_tls_sign(args: argparse.Namespace) -> int:
     """Sign a peer's CSR with the local CA (run on the CA host); emit a cert bundle."""
     ca_key = tls_module.ca_key_path()
     if not ca_key.is_file():
-        print(f'error: no CA at {ca_key}. Run `kioku-mesh tls init-ca` on this host first.', file=sys.stderr)
+        print(
+            f'error: no CA at {ca_key}. Run `kioku-mesh tls init-ca` on this host first.',
+            file=sys.stderr)
         return 2
     raw = _resolve_csr_input(args)
     if raw is None:
@@ -1385,21 +1494,30 @@ def _cmd_tls_sign(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
-    bundle = tls_module.encode_cert_bundle(cert_pem, tls_module.ca_cert_path().read_bytes())
+    bundle = tls_module.encode_cert_bundle(
+        cert_pem,
+        tls_module.ca_cert_path().read_bytes())
     if args.out:
         Path(args.out).write_text(bundle + '\n')
-        print(f'wrote signed bundle to {args.out} — send it back to the requesting peer', file=sys.stderr)
+        print(
+            f'wrote signed bundle to {args.out} — send it back to the requesting peer',
+            file=sys.stderr)
     else:
-        print('copy the block below back to the requesting peer for `kioku-mesh tls install`:', file=sys.stderr)
+        print(
+            'copy the block below back to the requesting peer for `kioku-mesh tls install`:',
+            file=sys.stderr)
         print(bundle)
     return 0
 
 
-def _resolve_install_material(args: argparse.Namespace) -> tuple[bytes, bytes] | None:
+def _resolve_install_material(
+        args: argparse.Namespace) -> tuple[bytes, bytes] | None:
     """Return ``(cert_pem, ca_pem)`` from --cert/--ca files or a pasted bundle blob, or None on error."""
     if args.cert or args.ca:
         if not (args.cert and args.ca):
-            print('error: --cert and --ca must be given together (or omit both to paste a bundle).', file=sys.stderr)
+            print(
+                'error: --cert and --ca must be given together (or omit both to paste a bundle).',
+                file=sys.stderr)
             return None
         cert_path, ca_path = Path(args.cert), Path(args.ca)
         for label, p in (('--cert', cert_path), ('--ca', ca_path)):
@@ -1415,7 +1533,9 @@ def _resolve_install_material(args: argparse.Namespace) -> tuple[bytes, bytes] |
         raw = src.read_text()
     else:
         if sys.stdin.isatty():
-            print('paste the bundle block from `kioku-mesh tls sign` (reads to its -----END line):', file=sys.stderr)
+            print(
+                'paste the bundle block from `kioku-mesh tls sign` (reads to its -----END line):',
+                file=sys.stderr)
         raw = _read_pasted_blob()
     try:
         return tls_module.decode_cert_bundle(raw)
@@ -1444,7 +1564,8 @@ def _cmd_tls_install(args: argparse.Namespace) -> int:
         return 2
     print(f'installed {tls_module.peer_cert_path()}')
     print(f'installed {tls_module.ca_cert_path()}')
-    print('next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
+    print(
+        'next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
     return 0
 
 
@@ -1462,7 +1583,9 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
     already-enrolled peer's key with one that no longer matches its cert.
     """
     try:
-        key_pem, csr_pem = tls_module.build_key_and_csr(args.san, common_name=args.cn or None)
+        key_pem, csr_pem = tls_module.build_key_and_csr(args.san,
+                                                        common_name=args.cn
+                                                        or None)
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
@@ -1475,13 +1598,18 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
     # shlex.join so a --remote-mesh path with spaces stays a single argument and
     # any shell metacharacters are quoted rather than interpreted by the remote
     # shell the command is handed to.
-    remote_cmd = shlex.join([args.remote_mesh, 'tls', 'sign', '--days', str(args.days)])
+    remote_cmd = shlex.join(
+        [args.remote_mesh, 'tls', 'sign', '--days',
+         str(args.days)])
     ssh_cmd += [args.ca_host, remote_cmd]
     print(f'signing on {args.ca_host} over SSH ...', file=sys.stderr)
     try:
         proc = subprocess.run(  # noqa: S603 - args are explicit, not a shell string
-            ssh_cmd, input=csr_blob, capture_output=True, text=True, timeout=args.timeout
-        )
+            ssh_cmd,
+            input=csr_blob,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout)
     except FileNotFoundError:
         print(
             'error: `ssh` not found. Use the copy-paste flow instead: `tls request` -> `tls sign` -> `tls install`.',
@@ -1489,11 +1617,14 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
         )
         return 2
     except subprocess.TimeoutExpired:
-        print(f'error: SSH to {args.ca_host} timed out after {args.timeout}s.', file=sys.stderr)
+        print(f'error: SSH to {args.ca_host} timed out after {args.timeout}s.',
+              file=sys.stderr)
         return 2
     if proc.returncode != 0:
         if proc.stderr.strip():
-            sys.stderr.write(proc.stderr if proc.stderr.endswith('\n') else proc.stderr + '\n')
+            sys.stderr.write(
+                proc.stderr if proc.stderr.endswith('\n') else proc.stderr +
+                '\n')
         print(
             f'error: remote `tls sign` failed on {args.ca_host} (exit {proc.returncode}). '
             f'Is `{args.remote_mesh}` on its PATH and the CA initialized there?',
@@ -1512,15 +1643,19 @@ def _cmd_tls_enroll(args: argparse.Namespace) -> int:
     # cert + ca). install's checks are guaranteed to pass after validate_bundle.
     tls_module.write_peer_material(key_pem, csr_pem)
     tls_module.install(cert_pem, ca_pem)
-    print(f'enrolled via {args.ca_host}: installed {tls_module.peer_cert_path()} + {tls_module.ca_cert_path()}')
-    print('next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
+    print(
+        f'enrolled via {args.ca_host}: installed {tls_module.peer_cert_path()} + {tls_module.ca_cert_path()}'
+    )
+    print(
+        'next: kioku-mesh init --mode <hub|spoke> --tls --listen ... --force')
     return 0
 
 
 def _cmd_tls_info(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Show the local CA / peer certificate details and expiry."""
     found = False
-    for label, path in (('CA', tls_module.ca_cert_path()), ('peer', tls_module.peer_cert_path())):
+    for label, path in (('CA', tls_module.ca_cert_path()),
+                        ('peer', tls_module.peer_cert_path())):
         if not path.is_file():
             continue
         found = True
@@ -1536,23 +1671,48 @@ def _cmd_tls_info(args: argparse.Namespace) -> int:  # noqa: ARG001
             print(f'  SAN:     {", ".join(info.sans)}')
         print(f'  expires: {info.not_valid_after:%Y-%m-%d} ({state})')
     if not found:
-        print('no certificates found. Run `kioku-mesh tls init-ca` / `tls request` to provision them.')
+        print(
+            'no certificates found. Run `kioku-mesh tls init-ca` / `tls request` to provision them.'
+        )
         return 1
     return 0
 
 
+def _cmd_zenohd_install(args: argparse.Namespace) -> int:
+    bin_dir = Path(
+        args.bin_dir
+    ) if args.bin_dir else zenohd_install_module.default_bin_dir()
+    try:
+        installed = zenohd_install_module.install(
+            version=args.version,
+            bin_dir=bin_dir,
+            verbose=args.verbose,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f'error: {exc}', file=sys.stderr)
+        return 1
+    for name, path in installed.items():
+        print(f'installed {name}: {path}')
+    print()
+    print(f'add to PATH: export PATH="{bin_dir}:$PATH"')
+    if bin_dir.as_posix() not in os.environ.get('PATH', '').split(':'):
+        print('  (not yet on PATH — add the line above to your shell profile)')
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog='kioku-mesh', description='kioku-mesh CLI')
-    parser.add_argument('--version', action='version', version=f'kioku-mesh {__version__}')
+    parser = argparse.ArgumentParser(prog='kioku-mesh',
+                                     description='kioku-mesh CLI')
+    parser.add_argument('--version',
+                        action='version',
+                        version=f'kioku-mesh {__version__}')
     parser.add_argument(
         '--rebuild',
         action='store_true',
-        help=(
-            'Rebuild the SQLite index from zenoh on first startup. '
-            'CLI is one-shot and skips by default (#38); '
-            'pass this when the index is empty and you want search to work, or during CI verification. '
-            'KIOKU_MESH_FORCE_REBUILD=1 has the same effect.'
-        ),
+        help=('Rebuild the SQLite index from zenoh on first startup. '
+         'CLI is one-shot and skips by default (#38); '
+         'pass this when the index is empty and you want search to work, or during CI verification. '
+         'KIOKU_MESH_FORCE_REBUILD=1 has the same effect.'),
     )
     sub = parser.add_subparsers(dest='command', required=True)
 
@@ -1560,8 +1720,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_save = sub.add_parser('save', help='Save an observation')
     p_save.add_argument('content', help='content to save')
-    _attach_completer(p_save.add_argument('-p', '--project', default=''), _complete_project)
-    p_save.add_argument('-t', '--tags', default='', help='comma-separated tags')
+    _attach_completer(p_save.add_argument('-p', '--project', default=''),
+                      _complete_project)
+    p_save.add_argument('-t',
+                        '--tags',
+                        default='',
+                        help='comma-separated tags')
     p_save.add_argument(
         '--memory-type',
         dest='memory_type',
@@ -1585,7 +1749,9 @@ def _build_parser() -> argparse.ArgumentParser:
         'default follows config.yaml default_visibility (empty = legacy layout)',
     )
     p_save.add_argument('--subject', default='', help='short topic name')
-    p_save.add_argument('--summary', default='', help='one-line summary shown in search results')
+    p_save.add_argument('--summary',
+                        default='',
+                        help='one-line summary shown in search results')
     p_save.add_argument(
         '--source-files',
         dest='source_files',
@@ -1605,31 +1771,66 @@ def _build_parser() -> argparse.ArgumentParser:
     p_save.set_defaults(func=_cmd_save)
 
     p_search = sub.add_parser('search', help='Search memories')
-    p_search.add_argument('query', nargs='?', default='', help='search keyword (optional)')
+    p_search.add_argument('query',
+                          nargs='?',
+                          default='',
+                          help='search keyword (optional)')
     p_search.add_argument('--agent-family', dest='agent_family', default='')
     p_search.add_argument('--client-id', dest='client_id', default='')
-    _attach_completer(p_search.add_argument('--pc-id', dest='pc_id', default=''), _complete_pc_id)
+    _attach_completer(
+        p_search.add_argument('--pc-id', dest='pc_id', default=''),
+        _complete_pc_id)
     p_search.add_argument('--session-id', dest='session_id', default='')
-    _attach_completer(p_search.add_argument('-p', '--project', default=''), _complete_project)
-    p_search.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
-    p_search.add_argument('-n', '--limit', type=int, default=50, help='max results (default: 50)')
-    p_search.add_argument('--format', choices=_SEARCH_FORMATS, default='text', help='output format (default: text)')
+    _attach_completer(p_search.add_argument('-p', '--project', default=''),
+                      _complete_project)
+    p_search.add_argument('--since',
+                          default='',
+                          help='limit to ISO8601 timestamp and later')
+    p_search.add_argument('-n',
+                          '--limit',
+                          type=int,
+                          default=50,
+                          help='max results (default: 50)')
+    p_search.add_argument('--format',
+                          choices=_SEARCH_FORMATS,
+                          default='text',
+                          help='output format (default: text)')
     p_search.set_defaults(func=_cmd_search)
 
-    p_delete = sub.add_parser('delete', help='Soft-delete an observation (tombstone)')
-    p_delete.add_argument('observation_id', nargs='?', default='', help='full 32-character observation_id')
+    p_delete = sub.add_parser('delete',
+                              help='Soft-delete an observation (tombstone)')
+    p_delete.add_argument('observation_id',
+                          nargs='?',
+                          default='',
+                          help='full 32-character observation_id')
     _attach_completer(
-        p_delete.add_argument('-p', '--project', default='', help='tombstone observations in the given project'),
+        p_delete.add_argument(
+            '-p',
+            '--project',
+            default='',
+            help='tombstone observations in the given project'),
         _complete_project,
     )
     _attach_completer(
-        p_delete.add_argument('--pc-id', dest='pc_id', default='', help='tombstone observations from the given pc_id'),
+        p_delete.add_argument(
+            '--pc-id',
+            dest='pc_id',
+            default='',
+            help='tombstone observations from the given pc_id'),
         _complete_pc_id,
     )
-    p_delete.add_argument('--since', default='', help='limit to ISO8601 timestamp and later')
-    p_delete.add_argument('--until', default='', help='limit to ISO8601 timestamp and earlier')
-    p_delete.add_argument('--dry-run', action='store_true', help='show count only, do not delete')
-    p_delete.add_argument('--yes', action='store_true', help='skip interactive confirmation for bulk delete')
+    p_delete.add_argument('--since',
+                          default='',
+                          help='limit to ISO8601 timestamp and later')
+    p_delete.add_argument('--until',
+                          default='',
+                          help='limit to ISO8601 timestamp and earlier')
+    p_delete.add_argument('--dry-run',
+                          action='store_true',
+                          help='show count only, do not delete')
+    p_delete.add_argument('--yes',
+                          action='store_true',
+                          help='skip interactive confirmation for bulk delete')
     p_delete.add_argument(
         '--batch-size',
         dest='batch_size',
@@ -1644,19 +1845,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=_cmd_status)
 
     p_drain = sub.add_parser('drain', help='Drain pending_puts')
-    p_drain.add_argument('--pending', action='store_true', help='replay queued rows in pending_puts.db')
-    p_drain.add_argument('--limit', type=_positive_int, default=None, help='max rows drained per invocation')
+    p_drain.add_argument('--pending',
+                         action='store_true',
+                         help='replay queued rows in pending_puts.db')
+    p_drain.add_argument('--limit',
+                         type=_positive_int,
+                         default=None,
+                         help='max rows drained per invocation')
     p_drain.set_defaults(func=_cmd_drain)
 
-    p_gc = sub.add_parser('gc', help='Physically delete tombstoned entries (retention / --force-id / --by-pc-id)')
+    p_gc = sub.add_parser(
+        'gc',
+        help='Physically delete tombstoned entries (retention / --force-id / --by-pc-id)'
+    )
     p_gc.add_argument(
         '--force-id',
         dest='force_id',
         default='',
-        help=(
-            'physically delete observation_id by 32-char exact match '
-            '(emergency-purge for sensitive data; --project is ignored)'
-        ),
+        help=('physically delete observation_id by 32-char exact match '
+              '(emergency-purge for sensitive data; --project is ignored)'),
     )
     p_gc.add_argument(
         '--retention-days',
@@ -1679,10 +1886,9 @@ def _build_parser() -> argparse.ArgumentParser:
             '--by-pc-id',
             dest='by_pc_id',
             default='',
-            help=(
-                'bulk-physically-delete obs matching a 32-char pc_id (for cleaning up bench/spam). '
-                'Default is dry-run; pass --execute to actually delete. Skips tomb sweep / broadcast.'
-            ),
+            help=('bulk-physically-delete obs matching a 32-char pc_id (for cleaning up bench/spam). '
+             'Default is dry-run; pass --execute to actually delete. Skips tomb sweep / broadcast.'
+             ),
         ),
         _complete_pc_id,
     )
@@ -1710,26 +1916,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_gc.set_defaults(func=_cmd_gc)
 
-    p_get = sub.add_parser('get-memory', help='Get a single observation by observation_id')
-    p_get.add_argument('observation_id', help='full 32-character observation_id')
+    p_get = sub.add_parser('get-memory',
+                           help='Get a single observation by observation_id')
+    p_get.add_argument('observation_id',
+                       help='full 32-character observation_id')
     p_get.set_defaults(func=_cmd_get_memory)
 
     p_init = sub.add_parser(
         'init',
         help='Generate a starter zenohd config under ~/.config/kioku-mesh/',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=(
-            'Generate a starter config. Pick --mode by the deployment shape you want:\n'
-            '\n'
-            '  local  (default) SQLite only, no zenohd. Single-host persistent storage\n'
-            '         with zero daemon. The easiest starting point.\n'
-            '  hub    zenohd + rocksdb + LAN listener. Central peer that spokes dial in to\n'
-            '         (multi-host mesh, persistent).\n'
-            '  spoke  zenohd + rocksdb, dials a hub via --connect (multi-host mesh, persistent).\n'
-            '\n'
-            'For ephemeral Zenoh smoke tests without provisioning, use `kioku-mesh mesh start`.\n'
-            'See README §Power users for the multi-host walkthrough.'
-        ),
+        description=('Generate a starter config. Pick --mode by the deployment shape you want:\n'
+         '\n'
+         '  local  (default) SQLite only, no zenohd. Single-host persistent storage\n'
+         '         with zero daemon. The easiest starting point.\n'
+         '  hub    zenohd + rocksdb + LAN listener. Central peer that spokes dial in to\n'
+         '         (multi-host mesh, persistent).\n'
+         '  spoke  zenohd + rocksdb, dials a hub via --connect (multi-host mesh, persistent).\n'
+         '\n'
+         'For ephemeral Zenoh smoke tests without provisioning, use `kioku-mesh mesh start`.\n'
+         'See README §Power users for the multi-host walkthrough.'),
     )
     p_init.add_argument(
         '--mode',
@@ -1759,12 +1965,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         '--tls',
         action='store_true',
-        help=(
-            'emit an mTLS config (tls/ endpoints + transport.link.tls). hub/spoke only; '
-            'requires certs provisioned via `kioku-mesh tls` first.'
-        ),
+        help=('emit an mTLS config (tls/ endpoints + transport.link.tls). hub/spoke only; '
+         'requires certs provisioned via `kioku-mesh tls` first.'),
     )
-    p_init.add_argument('--force', action='store_true', help='overwrite if the target file exists')
+    p_init.add_argument('--force',
+                        action='store_true',
+                        help='overwrite if the target file exists')
     p_init.add_argument(
         '--print',
         dest='to_stdout',
@@ -1775,11 +1981,9 @@ def _build_parser() -> argparse.ArgumentParser:
         '--install-systemd',
         dest='install_systemd',
         action='store_true',
-        help=(
-            'also install a user-scope systemd unit at '
-            f'{_default_systemd_user_unit_path()} that runs `zenohd -c <out>` on login. '
-            'Linux only; macOS / Windows / non-systemd hosts get a clear error.'
-        ),
+        help=('also install a user-scope systemd unit at '
+         f'{_default_systemd_user_unit_path()} that runs `zenohd -c <out>` on login. '
+         'Linux only; macOS / Windows / non-systemd hosts get a clear error.'),
     )
     p_init.set_defaults(func=_cmd_init)
 
@@ -1837,24 +2041,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mesh = sub.add_parser(
         'mesh',
         help='Embedded zenoh router for try-it / demo (no zenohd binary required)',
-        description=(
-            'Ephemeral multi-host mesh without the zenohd binary. Intended as a\n'
-            'try-it / demo path — cross-host replication is NOT persistent across\n'
-            'router restarts, and writes made while a peer was offline are not\n'
-            'replayed later. For production multi-host use, install zenohd and\n'
-            'follow the Power users section in the README.\n\n'
-            '60-second multi-host start:\n'
-            '  Host A: kioku-mesh mesh start\n'
-            '  Host B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh '
-            'kioku-mesh mesh join tcp/<host-a-ip>:17447\n'
-            '  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh '
-            'kioku-mesh save "hello mesh"\n'
-            '  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh '
-            'kioku-mesh search "hello"\n\n'
-            'Env vars:\n'
-            '  ZENOH_CONNECT   zenoh router endpoint (e.g. tcp/192.168.1.10:17447)\n'
-            '  KIOKU_MESH_BACKEND  set to "zenoh" to use Zenoh transport (default for mesh)'
-        ),
+        description=('Ephemeral multi-host mesh without the zenohd binary. Intended as a\n'
+         'try-it / demo path — cross-host replication is NOT persistent across\n'
+         'router restarts, and writes made while a peer was offline are not\n'
+         'replayed later. For production multi-host use, install zenohd and\n'
+         'follow the Power users section in the README.\n\n'
+         '60-second multi-host start:\n'
+         '  Host A: kioku-mesh mesh start\n'
+         '  Host B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh '
+         'kioku-mesh mesh join tcp/<host-a-ip>:17447\n'
+         '  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh '
+         'kioku-mesh save "hello mesh"\n'
+         '  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh '
+         'kioku-mesh search "hello"\n\n'
+         'Env vars:\n'
+         '  ZENOH_CONNECT   zenoh router endpoint (e.g. tcp/192.168.1.10:17447)\n'
+         '  KIOKU_MESH_BACKEND  set to "zenoh" to use Zenoh transport (default for mesh)'
+         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_mesh_sub = p_mesh.add_subparsers(dest='mesh_command', required=True)
@@ -1862,18 +2065,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mesh_start = p_mesh_sub.add_parser(
         'start',
         help='Start an in-process zenoh router (foreground; Ctrl-C to stop)',
-        description=(
-            'Start an in-process zenoh router (mode=router). No zenohd binary required.\n\n'
-            'The router subscribes to all peer saves and stores them in the local SQLite index,\n'
-            'so `kioku-mesh search` from this terminal will return content saved by remote peers.\n\n'
-            'Example:\n'
-            '  kioku-mesh mesh start --listen tcp/0.0.0.0:17447\n\n'
-            'Then on a remote host:\n'
-            '  ZENOH_CONNECT=tcp/<this-host>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"\n\n'
-            'Env vars:\n'
-            '  ZENOH_CONNECT     (set automatically by mesh start to point at the local router)\n'
-            '  KIOKU_MESH_BACKEND  (set automatically to "zenoh")'
-        ),
+        description=('Start an in-process zenoh router (mode=router). No zenohd binary required.\n\n'
+         'The router subscribes to all peer saves and stores them in the local SQLite index,\n'
+         'so `kioku-mesh search` from this terminal will return content saved by remote peers.\n\n'
+         'Example:\n'
+         '  kioku-mesh mesh start --listen tcp/0.0.0.0:17447\n\n'
+         'Then on a remote host:\n'
+         '  ZENOH_CONNECT=tcp/<this-host>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"\n\n'
+         'Env vars:\n'
+         '  ZENOH_CONNECT     (set automatically by mesh start to point at the local router)\n'
+         '  KIOKU_MESH_BACKEND  (set automatically to "zenoh")'),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_mesh_start.add_argument(
@@ -1886,18 +2087,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mesh_join = p_mesh_sub.add_parser(
         'join',
         help='Connect to a mesh peer (foreground; accumulates peer saves locally)',
-        description=(
-            'Connect to a mesh router as an in-process peer. Starts a replication subscriber\n'
-            'so remote saves are accumulated in the local SQLite index (Ctrl-C to stop).\n\n'
-            'Example:\n'
-            '  kioku-mesh mesh join tcp/192.168.1.10:17447\n\n'
-            'After joining, in another terminal:\n'
-            '  ZENOH_CONNECT=tcp/192.168.1.10:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"\n'
-            '  kioku-mesh search "hello"  # reads from local SQLite filled by the subscriber\n\n'
-            'Env vars:\n'
-            '  ZENOH_CONNECT     endpoint to connect to (set automatically from <peer> arg)\n'
-            '  KIOKU_MESH_BACKEND  set to "zenoh" automatically'
-        ),
+        description=('Connect to a mesh router as an in-process peer. Starts a replication subscriber\n'
+         'so remote saves are accumulated in the local SQLite index (Ctrl-C to stop).\n\n'
+         'Example:\n'
+         '  kioku-mesh mesh join tcp/192.168.1.10:17447\n\n'
+         'After joining, in another terminal:\n'
+         '  ZENOH_CONNECT=tcp/192.168.1.10:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"\n'
+         '  kioku-mesh search "hello"  # reads from local SQLite filled by the subscriber\n\n'
+         'Env vars:\n'
+         '  ZENOH_CONNECT     endpoint to connect to (set automatically from <peer> arg)\n'
+         '  KIOKU_MESH_BACKEND  set to "zenoh" automatically'),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_mesh_join.add_argument(
@@ -1910,29 +2109,30 @@ def _build_parser() -> argparse.ArgumentParser:
         'tls',
         help='Provision mTLS certificates for the mesh (private CA, CSR-based)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description=(
-            'Provision mutual-TLS certificates so only peers holding a cert signed\n'
-            'by your CA can join the mesh. Trust model: one private CA, one key per\n'
-            'peer that never leaves the peer (only the CSR travels).\n\n'
-            'Copy-paste flow (no SSH, no file shuffling):\n'
-            '  CA host:   kioku-mesh tls init-ca\n'
-            '  each peer: kioku-mesh tls request --san <addr-peers-dial>\n'
-            '             (copy the printed CSR block to the CA host)\n'
-            '  CA host:   kioku-mesh tls sign        (paste the CSR block)\n'
-            '             (copy the printed bundle block back to the peer)\n'
-            '  each peer: kioku-mesh tls install     (paste the bundle block)\n'
-            '             kioku-mesh init --mode <hub|spoke> --tls --listen ... --force\n\n'
-            'Have SSH to the CA host? One command does all three:\n'
-            '  each peer: kioku-mesh tls enroll <ca-host> --san <addr-peers-dial>\n\n'
-            'The blocks (CSR, signed bundle) are not secret; move them however is\n'
-            'convenient — paste, chat, scp, a USB stick. The CA key and each peer\n'
-            'key are secret and never appear in a block or leave their host.'
-        ),
+        description=('Provision mutual-TLS certificates so only peers holding a cert signed\n'
+         'by your CA can join the mesh. Trust model: one private CA, one key per\n'
+         'peer that never leaves the peer (only the CSR travels).\n\n'
+         'Copy-paste flow (no SSH, no file shuffling):\n'
+         '  CA host:   kioku-mesh tls init-ca\n'
+         '  each peer: kioku-mesh tls request --san <addr-peers-dial>\n'
+         '             (copy the printed CSR block to the CA host)\n'
+         '  CA host:   kioku-mesh tls sign        (paste the CSR block)\n'
+         '             (copy the printed bundle block back to the peer)\n'
+         '  each peer: kioku-mesh tls install     (paste the bundle block)\n'
+         '             kioku-mesh init --mode <hub|spoke> --tls --listen ... --force\n\n'
+         'Have SSH to the CA host? One command does all three:\n'
+         '  each peer: kioku-mesh tls enroll <ca-host> --san <addr-peers-dial>\n\n'
+         'The blocks (CSR, signed bundle) are not secret; move them however is\n'
+         'convenient — paste, chat, scp, a USB stick. The CA key and each peer\n'
+         'key are secret and never appear in a block or leave their host.'),
     )
     p_tls_sub = p_tls.add_subparsers(dest='tls_command', required=True)
 
-    p_tls_initca = p_tls_sub.add_parser('init-ca', help='Create the mesh CA (run once, on the CA host)')
-    p_tls_initca.add_argument('--name', default='kioku-mesh-ca', help='CA common name (default: kioku-mesh-ca)')
+    p_tls_initca = p_tls_sub.add_parser(
+        'init-ca', help='Create the mesh CA (run once, on the CA host)')
+    p_tls_initca.add_argument('--name',
+                              default='kioku-mesh-ca',
+                              help='CA common name (default: kioku-mesh-ca)')
     p_tls_initca.add_argument(
         '--days',
         type=int,
@@ -1940,8 +2140,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f'CA validity in days (default: {tls_module.DEFAULT_CA_DAYS})',
     )
     p_tls_initca.add_argument(
-        '--force', action='store_true', help='replace an existing CA (invalidates signed peer certs)'
-    )
+        '--force',
+        action='store_true',
+        help='replace an existing CA (invalidates signed peer certs)')
     p_tls_initca.set_defaults(func=_cmd_tls_init_ca)
 
     p_tls_request = p_tls_sub.add_parser(
@@ -1956,17 +2157,29 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help='address peers dial this host on (IP or hostname). Repeatable; include every reachable address.',
     )
-    p_tls_request.add_argument('--cn', default='', help='certificate common name (default: first --san)')
-    p_tls_request.add_argument('-o', '--out', default='', help='write the CSR blob to a file instead of stdout')
+    p_tls_request.add_argument(
+        '--cn',
+        default='',
+        help='certificate common name (default: first --san)')
+    p_tls_request.add_argument(
+        '-o',
+        '--out',
+        default='',
+        help='write the CSR blob to a file instead of stdout')
     p_tls_request.set_defaults(func=_cmd_tls_request)
 
-    p_tls_sign = p_tls_sub.add_parser('sign', help='Sign a peer CSR with the local CA (run on the CA host)')
+    p_tls_sign = p_tls_sub.add_parser(
+        'sign', help='Sign a peer CSR with the local CA (run on the CA host)')
     p_tls_sign.add_argument(
         'csr',
         nargs='?',
         help='path to a .csr file or saved CSR blob; omit to paste/pipe one on stdin',
     )
-    p_tls_sign.add_argument('-o', '--out', default='', help='write the signed cert bundle to a file instead of stdout')
+    p_tls_sign.add_argument(
+        '-o',
+        '--out',
+        default='',
+        help='write the signed cert bundle to a file instead of stdout')
     p_tls_sign.add_argument(
         '--days',
         type=int,
@@ -1984,15 +2197,21 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs='?',
         help='path to a saved cert-bundle blob; omit to paste/pipe one on stdin',
     )
-    p_tls_install.add_argument('--cert', help='(file mode) path to this peer signed certificate; use with --ca')
-    p_tls_install.add_argument('--ca', help='(file mode) path to the CA certificate; use with --cert')
+    p_tls_install.add_argument(
+        '--cert',
+        help='(file mode) path to this peer signed certificate; use with --ca')
+    p_tls_install.add_argument(
+        '--ca', help='(file mode) path to the CA certificate; use with --cert')
     p_tls_install.set_defaults(func=_cmd_tls_install)
 
     p_tls_enroll = p_tls_sub.add_parser(
         'enroll',
         help='One command: request + sign over SSH + install (needs SSH to the CA host)',
     )
-    p_tls_enroll.add_argument('ca_host', metavar='CA-HOST', help='SSH destination of the CA host (e.g. user@hub)')
+    p_tls_enroll.add_argument(
+        'ca_host',
+        metavar='CA-HOST',
+        help='SSH destination of the CA host (e.g. user@hub)')
     p_tls_enroll.add_argument(
         '--san',
         action='append',
@@ -2001,7 +2220,10 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help='address peers dial this host on (IP or hostname). Repeatable.',
     )
-    p_tls_enroll.add_argument('--cn', default='', help='certificate common name (default: first --san)')
+    p_tls_enroll.add_argument(
+        '--cn',
+        default='',
+        help='certificate common name (default: first --san)')
     p_tls_enroll.add_argument(
         '--days',
         type=int,
@@ -2014,8 +2236,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help='kioku-mesh command name on the CA host (default: kioku-mesh)',
     )
     p_tls_enroll.add_argument(
-        '--ssh-port', type=int, default=0, help='SSH port for the CA host (default: ssh default)'
-    )
+        '--ssh-port',
+        type=int,
+        default=0,
+        help='SSH port for the CA host (default: ssh default)')
     p_tls_enroll.add_argument(
         '--ssh-opt',
         action='append',
@@ -2023,11 +2247,43 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar='OPT',
         help="pass an -o option to ssh (repeatable), e.g. --ssh-opt 'StrictHostKeyChecking=accept-new'",
     )
-    p_tls_enroll.add_argument('--timeout', type=int, default=60, help='SSH timeout in seconds (default: 60)')
+    p_tls_enroll.add_argument('--timeout',
+                              type=int,
+                              default=60,
+                              help='SSH timeout in seconds (default: 60)')
     p_tls_enroll.set_defaults(func=_cmd_tls_enroll)
 
-    p_tls_info = p_tls_sub.add_parser('info', help='Show local CA / peer certificate details and expiry')
+    p_tls_info = p_tls_sub.add_parser(
+        'info', help='Show local CA / peer certificate details and expiry')
     p_tls_info.set_defaults(func=_cmd_tls_info)
+
+    p_zenohd = sub.add_parser(
+        'zenohd',
+        help='Manage zenohd and zenoh-backend-rocksdb binaries',
+    )
+    p_zenohd_sub = p_zenohd.add_subparsers(dest='zenohd_command',
+                                           required=True)
+    p_zenohd_install = p_zenohd_sub.add_parser(
+        'install',
+        help='Download and install zenohd + zenoh-backend-rocksdb (version-matched)',
+    )
+    p_zenohd_install.add_argument(
+        '--version',
+        default='1.9.0',
+        help='Zenoh release version to install (default: 1.9.0)',
+    )
+    p_zenohd_install.add_argument(
+        '--bin-dir',
+        default=None,
+        metavar='DIR',
+        help='Destination directory (default: ~/.local/share/kioku-mesh/bin)',
+    )
+    p_zenohd_install.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Print download progress',
+    )
+    p_zenohd_install.set_defaults(func=_cmd_zenohd_install)
 
     return parser
 

@@ -20,6 +20,7 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- `zenohd install` subcommand: auto-download zenohd + zenoh-backend-rocksdb with SHA-256 checksum verification, arch/OS/libc detection, and PATH guidance (#113)
 - Edge-case tests for short-term AND, double-quote escape, and whitespace-only query in `search()` (#211 follow-up)
 - test: supersedes-aware 隠蔽 x FTS full rebuild の回帰テスト追加 (PR #207 cross-review R9)
 - **FTS5 trigram 全文検索 + supersedes-aware 検索 (ADR-0021, #203).** `LocalIndex` に FTS5 virtual table (`obs_fts`) を追加し、日本語部分一致を含む bm25 ランキング付き全文検索を実現。3-stage fallback: trigram → 標準 FTS5 → LIKE。`obs_index` に `superseded_by` カラムを追加し、supersedes チェーンを辿って obsolete な記憶を検索結果から自動除外する (`include_superseded=False` デフォルト)。`doctor` コマンドで FTS5 capability を表示。`SCHEMA_VERSION` 2 → 3 前方 migration 付き。
