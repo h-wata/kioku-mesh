@@ -27,6 +27,7 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- `migrate-visibility` subcommand: safely move legacy `mem/obs/...` / `mem/tomb/...` keys into explicit visibility namespaces (`user`/`team`/`mesh`) via copy-verify-delete-repair ordering with mandatory backup/checkpoint (ADR-0019 Phase C, #219)
 - `zenohd install` subcommand: auto-download zenohd + zenoh-backend-rocksdb with SHA-256 checksum verification, arch/OS/libc detection, and PATH guidance (#113)
 - Edge-case tests for short-term AND, double-quote escape, and whitespace-only query in `search()` (#211 follow-up)
 - test: supersedes-aware 隠蔽 x FTS full rebuild の回帰テスト追加 (PR #207 cross-review R9)
