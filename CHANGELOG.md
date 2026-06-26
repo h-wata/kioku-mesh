@@ -18,6 +18,13 @@ versions without a migration path until `1.0.0`.
   CLI コマンド (`kioku-mesh`, `kioku-mesh-mcp`) および環境変数プレフィックス (`KIOKU_MESH_*`) は変更ありません。
   旧環境変数 `MESH_MEM_*` は `v1.0.0` まで fallback + `DeprecationWarning` で動作します。
 
+### Fixed
+
+- zenohd/rocksdb download URL を upstream 実在形式に修正
+  (zenoh- prefix、-standalone suffix、全 OS で .zip) (#221)
+- SHA-256 検証を GitHub Releases API の digest フィールドを使う方式に変更
+  (.sha256 companion は upstream に存在しないため) (#221)
+
 ### Added
 
 - `zenohd install` subcommand: auto-download zenohd + zenoh-backend-rocksdb with SHA-256 checksum verification, arch/OS/libc detection, and PATH guidance (#113)
