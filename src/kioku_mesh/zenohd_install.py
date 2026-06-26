@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 import platform
 import subprocess
 import tarfile
 import tempfile
 import urllib.request
 import zipfile
-from pathlib import Path
 
 from .core.paths import resolve_app_dir
 

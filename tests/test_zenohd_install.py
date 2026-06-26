@@ -5,12 +5,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
 import subprocess
 import tarfile
-import zipfile
-from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
+import zipfile
 
 import pytest
 
