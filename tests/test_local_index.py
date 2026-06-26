@@ -1472,6 +1472,140 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ADR-0025: incremental FTS rebuild + drift-detection guard (Issue #224)
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_incremental_fts_upsert(tmp_path: Path) -> None:
+    """New observation appears in Zenoh → FTS row added (incremental upsert)."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'incr_upsert.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('incremental fts add', project='incr')
+        stats = idx.rebuild_from_zenoh(_FakeSession([obs], []))
+
+        assert stats.added == 1
+        (fts_count,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert fts_count == 1, 'FTS must have exactly one row after incremental upsert'
+        results = idx.search(query='incremental', project='incr')
+        assert any(r.observation_id == obs.observation_id for r in results)
+    finally:
+        idx.close()
+
+
+def test_rebuild_incremental_fts_tombstone(tmp_path: Path) -> None:
+    """Tombstoned observation is removed from FTS (incremental delete)."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'incr_tomb.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('tombstone me', project='incr')
+        idx.upsert(obs)
+        (before,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert before == 1
+
+        tomb = Tombstone(observation_id=obs.observation_id, deleted_at='2026-06-01T00:00:00.000000Z')
+        idx.rebuild_from_zenoh(_FakeSession([obs], [tomb]))
+
+        (after,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert after == 0, 'FTS must be empty after tombstone applied incrementally'
+        assert idx.search(project='incr') == []
+    finally:
+        idx.close()
+
+
+def test_rebuild_incremental_fts_shadow(tmp_path: Path) -> None:
+    """Shadow-marked observation is removed from FTS (incremental delete)."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'incr_shadow.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('shadow me from fts', project='incr')
+        idx.upsert(obs)
+        (before,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert before == 1
+
+        # Rebuild with empty Zenoh → obs not seen → shadow_rows applied
+        stats = idx.rebuild_from_zenoh(_FakeSession([], []))
+
+        assert stats.shadowed == 1
+        (after,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert after == 0, 'FTS must be empty after shadow applied incrementally'
+    finally:
+        idx.close()
+
+
+def test_rebuild_incremental_fts_drift_fallback(tmp_path: Path) -> None:
+    """Count mismatch between obs_fts and live obs_index triggers full rebuild."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'incr_drift.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('drift guard content', project='incr')
+        idx.upsert(obs)
+
+        # Corrupt FTS by deleting all rows.
+        idx._conn.execute('DELETE FROM obs_fts')  # noqa: SLF001
+        idx._conn.commit()  # noqa: SLF001
+        (before,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert before == 0
+
+        # Rebuild with same obs (unchanged → no upsert_rows) → drift detected → full rebuild.
+        idx.rebuild_from_zenoh(_FakeSession([obs], []))
+
+        (after,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert after == 1, 'Drift guard must trigger full rebuild and restore FTS'
+        results = idx.search(query='drift guard', project='incr')
+        assert any(r.observation_id == obs.observation_id for r in results)
+    finally:
+        idx.close()
+
+
+def test_rebuild_incremental_fts_unchanged_not_retokenized(tmp_path: Path) -> None:
+    """Unchanged observations are not re-inserted into FTS during incremental rebuild."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'incr_unchanged.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('unchanged stays put', project='incr')
+        idx.upsert(obs)
+        (count_before,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert count_before == 1
+
+        # First rebuild: obs unchanged → stats.unchanged == 1.
+        stats = idx.rebuild_from_zenoh(_FakeSession([obs], []))
+        assert stats.unchanged == 1
+
+        # FTS must still have exactly one row (no duplicate from re-insert).
+        (count_after,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert count_after == 1, 'Unchanged obs must not create duplicate FTS rows'
+
+        # Second rebuild: still unchanged → still exactly one FTS row.
+        stats2 = idx.rebuild_from_zenoh(_FakeSession([obs], []))
+        assert stats2.unchanged == 1
+        (count_after2,) = idx._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()  # noqa: SLF001
+        assert count_after2 == 1, 'Repeated unchanged rebuild must not accumulate FTS rows'
+    finally:
+        idx.close()
+
+
+# ---------------------------------------------------------------------------
 # R9: supersedes-aware hide x FTS full rebuild (PR #207 cross-review)
 # ---------------------------------------------------------------------------
 
