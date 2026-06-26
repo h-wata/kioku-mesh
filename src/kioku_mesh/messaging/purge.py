@@ -26,9 +26,9 @@ messaging モジュールは memory モジュールを直接 import しない (A
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from datetime import timezone
+import logging
 from typing import TYPE_CHECKING
 
 from .models import is_expired
@@ -85,9 +85,7 @@ def purge_expired_msgs(
                 json_str = reply.ok.payload.to_bytes().decode('utf-8')
                 msg = Message.from_json(json_str)
             except Exception:  # noqa: BLE001 — skip malformed payloads
-                log.debug(
-                    'purge_expired_msgs: skipping malformed payload at %s',
-                    key)
+                log.debug('purge_expired_msgs: skipping malformed payload at %s', key)
                 continue
             if is_expired(msg):
                 expired_keys.append(key)
