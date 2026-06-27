@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 
 import pytest
 
@@ -307,9 +308,9 @@ def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
     results = get_backend().search_observations(query='B2 regression', project='b2test')
-    assert any(
-        r.observation_id == obs.observation_id for r in results
-    ), 'local-only row must survive rebuild_from_zenoh on the zenoh cache DB'
+    assert any(r.observation_id == obs.observation_id for r in results), (
+        'local-only row must survive rebuild_from_zenoh on the zenoh cache DB'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -391,3 +392,219 @@ def test_contract_drain_returns_int(contract_backend: object) -> None:
     drained = contract_backend.drain_pending()  # type: ignore[union-attr]
     assert isinstance(drained, int)
     assert drained >= 0
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase2: raw-store SoT tests (a / b / c / d)
+# ---------------------------------------------------------------------------
+
+
+def test_preexisting_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(a) Pre-existing index.db is migrated to raw.db when LocalBackend opens."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    reset_backend()
+
+    from kioku_mesh.memory.local_index import LocalIndex
+
+    local_dir = tmp_path / 'local'
+    local_dir.mkdir()
+
+    obs_live = Observation(content='live row', project='mig')
+    obs_tomb = Observation(content='tombstoned row', project='mig')
+    obs_old = Observation(content='superseded row', project='mig')
+    obs_new = Observation(content='superseder row', project='mig', supersedes=[obs_old.observation_id])
+
+    idx = LocalIndex.connect(str(local_dir / 'index.db'))
+    idx.upsert(obs_live)
+    idx.upsert(obs_tomb)
+    idx.mark_deleted(obs_tomb.observation_id, '2026-01-01T00:00:00.000000Z')
+    idx.upsert(obs_old)
+    idx.upsert(obs_new)
+    row_count_before = idx.row_count()
+    idx.close()
+
+    get_backend()  # triggers migrate_from_index + rebuild_from_raw_records
+
+    raw_db = local_dir / 'raw.db'
+    conn = sqlite3.connect(str(raw_db))
+    obs_ids = {r[0] for r in conn.execute('SELECT observation_id FROM local_obs').fetchall()}
+    tomb_ids = {r[0] for r in conn.execute('SELECT observation_id FROM local_tomb').fetchall()}
+    conn.close()
+
+    assert obs_live.observation_id in obs_ids
+    assert obs_old.observation_id in obs_ids
+    assert obs_new.observation_id in obs_ids
+    assert obs_tomb.observation_id in tomb_ids
+    assert obs_tomb.observation_id not in obs_ids  # tombstoned row must go to local_tomb only
+
+    idx2 = LocalIndex.connect(str(local_dir / 'index.db'))
+    assert idx2.row_count() >= row_count_before
+    idx2.close()
+
+    # Second open must not duplicate raw rows.
+    reset_backend()
+    get_backend()
+
+    conn2 = sqlite3.connect(str(raw_db))
+    obs_count2 = conn2.execute('SELECT COUNT(*) FROM local_obs').fetchone()[0]
+    tomb_count2 = conn2.execute('SELECT COUNT(*) FROM local_tomb').fetchone()[0]
+    conn2.close()
+
+    assert obs_count2 == len(obs_ids)
+    assert tomb_count2 == len(tomb_ids)
+
+    reset_backend()
+
+
+def test_raw_store_rebuild_after_index_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(b) After index.db deletion, LocalBackend rebuilds search state from raw.db."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    reset_backend()
+
+    backend = get_backend()
+    assert isinstance(backend, LocalBackend)
+
+    obs = Observation(content='rebuild from raw', project='rebuild')
+    obs_old = Observation(content='old superseded', project='rebuild')
+    obs_new = Observation(content='superseder', project='rebuild', supersedes=[obs_old.observation_id])
+    obs_tomb = Observation(content='tombstoned obs', project='rebuild')
+
+    backend.put_observation(obs)
+    backend.put_observation(obs_old)
+    backend.put_observation(obs_new)
+    backend.put_observation(obs_tomb)
+    backend.put_tombstone(obs_tomb, reason='test')
+
+    reset_backend()
+
+    (tmp_path / 'local' / 'index.db').unlink()
+
+    backend2 = get_backend()
+    assert isinstance(backend2, LocalBackend)
+
+    assert backend2.find_observation_by_id(obs.observation_id) is not None
+
+    results = backend2.search_observations(project='rebuild')
+    result_ids = {r.observation_id for r in results}
+    assert obs.observation_id in result_ids
+    assert obs_new.observation_id in result_ids
+    assert obs_old.observation_id not in result_ids  # superseded_by obs_new
+    assert obs_tomb.observation_id not in result_ids  # tombstoned
+
+    reset_backend()
+
+
+def test_contract_local_backend_raw_store_parity(contract_backend: object) -> None:
+    """(c) LocalBackend raw-store rebuild produces same CRUD results as before reopen."""
+    obs = _mk_obs('parity raw store c', project='parity-c')
+    contract_backend.put_observation(obs)  # type: ignore[union-attr]
+    _settle(contract_backend)
+
+    found = contract_backend.find_observation_by_id(obs.observation_id)  # type: ignore[union-attr]
+    assert found is not None
+    assert found.content == 'parity raw store c'
+
+    results = contract_backend.search_observations(  # type: ignore[union-attr]
+        query='parity raw store', project='parity-c'
+    )
+    assert any(r.observation_id == obs.observation_id for r in results)
+
+    if isinstance(contract_backend, LocalBackend):
+        reset_backend()
+        backend2 = get_backend()
+        assert isinstance(backend2, LocalBackend)
+
+        found2 = backend2.find_observation_by_id(obs.observation_id)
+        assert found2 is not None
+        assert found2.content == 'parity raw store c'
+
+        results2 = backend2.search_observations(query='parity raw store', project='parity-c')
+        assert any(r.observation_id == obs.observation_id for r in results2)
+
+        backend2.put_tombstone(obs, reason='parity test c')
+        results3 = backend2.search_observations(query='parity raw store', project='parity-c')
+        assert not any(r.observation_id == obs.observation_id for r in results3)
+
+        assert backend2.get_status().mode == 'local'
+
+        reset_backend()
+
+
+def test_split_brain_index_failure_recovered_by_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(d) raw write success + index no-op: reopen recovers obs via rebuild_from_raw_records."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    reset_backend()
+
+    from kioku_mesh.memory.local_index import LocalIndex
+
+    backend = get_backend()
+    assert isinstance(backend, LocalBackend)
+
+    obs = Observation(content='split brain obs', project='split')
+
+    # Simulate index update failure: upsert is a no-op; raw write still commits.
+    monkeypatch.setattr(LocalIndex, 'upsert', lambda self, o: None)
+    backend.put_observation(obs)
+
+    assert backend.find_observation_by_id(obs.observation_id) is None
+
+    # Reopen: rebuild_from_raw_records (executemany, not upsert) restores the obs.
+    reset_backend()
+    backend2 = get_backend()
+
+    assert backend2.find_observation_by_id(obs.observation_id) is not None
+
+    reset_backend()
+
+
+def test_no_ghost_row_on_raw_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(d) raw write failure must not create ghost rows in LocalIndex."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    reset_backend()
+
+    from kioku_mesh.memory.local_raw_store import LocalRawStore
+
+    backend = get_backend()
+    assert isinstance(backend, LocalBackend)
+
+    obs_ghost = Observation(content='ghost candidate', project='ghost')
+
+    def _fail_put_obs(self: LocalRawStore, obs: Observation) -> None:
+        raise sqlite3.Error('simulated raw write failure')
+
+    monkeypatch.setattr(LocalRawStore, 'put_obs', _fail_put_obs)
+
+    with pytest.raises(Exception):  # noqa: B017
+        backend.put_observation(obs_ghost)
+
+    assert backend.find_observation_by_id(obs_ghost.observation_id) is None
+
+    reset_backend()
+
+
+def test_physical_delete_not_resurrected_by_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """(d) Physically deleted obs must not reappear after raw.db rebuild on reopen."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    reset_backend()
+
+    backend = get_backend()
+    assert isinstance(backend, LocalBackend)
+
+    obs = Observation(content='to be physically deleted', project='del-test')
+    backend.put_observation(obs)
+    assert backend.find_observation_by_id(obs.observation_id) is not None
+
+    deleted, _ = backend.physical_delete_observation(obs.observation_id)
+    assert deleted
+
+    reset_backend()
+    backend2 = get_backend()
+
+    assert backend2.find_observation_by_id(obs.observation_id) is None
+
+    reset_backend()
