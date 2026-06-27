@@ -100,11 +100,13 @@ class LocalBackend:
         self._idx.rebuild_from_raw_records(self._raw_store.scan_obs(), self._raw_store.scan_tombs())
 
     def put_observation(self, obs: Observation) -> None:
-        self._idx.upsert(obs)
+        self._raw_store.put_obs(obs)  # SoT: raises on failure; index not touched
+        self._idx.upsert(obs)  # best-effort (LocalIndex.upsert swallows errors)
 
     def put_tombstone(self, obs: Observation, reason: str = '') -> None:
         tomb = Tombstone(observation_id=obs.observation_id, reason=reason)
-        self._idx.mark_deleted(obs.observation_id, tomb.deleted_at)
+        self._raw_store.put_tomb(tomb)  # SoT: raises on failure; index not touched
+        self._idx.mark_deleted(obs.observation_id, tomb.deleted_at)  # best-effort
 
     def search_observations(
         self,
@@ -148,9 +150,9 @@ class LocalBackend:
         obs = self._idx.find_by_id(observation_id, include_deleted=True)
         if obs is None:
             return (False, False)
-        # Check if it was already tombstoned (has deleted_at in payload is not reliable;
-        # use find_by_id include_deleted to detect existence, then physical_delete).
-        self._idx.physical_delete(observation_id)
+        self._raw_store.delete_obs(observation_id)  # SoT: raises on failure
+        self._raw_store.delete_tomb(observation_id)  # SoT: raises on failure
+        self._idx.physical_delete(observation_id)  # best-effort
         return (True, False)
 
     def get_status(self) -> BackendStatus:
@@ -174,6 +176,8 @@ class LocalBackend:
         purged = 0
         if project:
             for obs_id, _ in self._idx.list_tombstoned_obs_in_project(project, cutoff_iso):
+                self._raw_store.delete_obs(obs_id)
+                self._raw_store.delete_tomb(obs_id)
                 self._idx.physical_delete(obs_id)
                 purged += 1
         else:
@@ -205,6 +209,8 @@ class LocalBackend:
                 return 0
         purged = 0
         for (obs_id,) in rows:
+            self._raw_store.delete_obs(obs_id)
+            self._raw_store.delete_tomb(obs_id)
             self._idx.physical_delete(obs_id)
             purged += 1
         return purged
@@ -220,6 +226,7 @@ class LocalBackend:
         candidate_ids = self._idx.list_expired_shadowed_obs(cutoff_iso, project=project)
         purged = 0
         for obs_id in candidate_ids:
+            self._raw_store.delete_obs(obs_id)
             self._idx.physical_delete(obs_id)
             purged += 1
         return (purged, 0)
