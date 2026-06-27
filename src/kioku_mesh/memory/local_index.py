@@ -887,6 +887,58 @@ class LocalIndex:
                 return []
         return [(row[0], row[1] or '', row[2] or '', row[3] or '', row[4] or '') for row in rows]
 
+    def inspect_by_id(self, observation_id: str) -> dict | None:
+        """Return raw state metadata for ``observation_id``, or None if physically missing.
+
+        Unlike ``find_by_id``, this always queries the raw index row regardless of
+        tombstone / shadow state and returns a computed ``state`` field:
+
+        - ``"live"``: row exists with no tombstone, shadow, or live superseder.
+        - ``"tombstoned"``: ``deleted_at IS NOT NULL``.
+        - ``"shadowed"``: ``shadowed_at IS NOT NULL`` (and not tombstoned).
+        - ``"superseded"``: ``superseded_by IS NOT NULL`` (and row is otherwise live).
+        - ``"physical-missing"``: no row found in obs_index → returns ``None``.
+
+        Returns:
+            dict with keys ``id``, ``payload``, ``state``, ``deleted_at``,
+            ``shadowed_at``, ``superseded_by``, ``created_at``, ``updated_at``.
+            ``updated_at`` is always ``None`` (column not present in current schema).
+            Returns ``None`` when the row does not exist (physical-missing).
+        """
+        if self._disabled or self._conn is None:
+            return None
+        sql = (
+            'SELECT observation_id, payload_json, created_at, deleted_at, shadowed_at, superseded_by '
+            'FROM obs_index WHERE observation_id = ?'
+        )
+        with self._lock:
+            try:
+                row = self._conn.execute(sql, (observation_id,)).fetchone()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.inspect_by_id failed for %s: %s', observation_id, e)
+                return None
+        if row is None:
+            return None
+        obs_id, payload_json, created_at, deleted_at, shadowed_at, superseded_by = row
+        if deleted_at is not None:
+            state = 'tombstoned'
+        elif shadowed_at is not None:
+            state = 'shadowed'
+        elif superseded_by is not None:
+            state = 'superseded'
+        else:
+            state = 'live'
+        return {
+            'id': obs_id,
+            'payload': payload_json,
+            'state': state,
+            'deleted_at': deleted_at,
+            'shadowed_at': shadowed_at,
+            'superseded_by': superseded_by,
+            'created_at': created_at,
+            'updated_at': None,
+        }
+
     def find_by_id(self, observation_id: str, include_deleted: bool = False) -> Observation | None:
         """Return the observation with id ``observation_id`` or None.
 

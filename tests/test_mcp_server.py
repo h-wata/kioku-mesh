@@ -732,3 +732,103 @@ def test_search_memory_unknown_search_mode_returns_error(single_zenohd: Any) -> 
 
     text = _run(_go())
     assert 'search_mode' in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase3: get_memory state field tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_memory_state_field(single_zenohd: Any) -> None:  # noqa: ARG001
+    """get_memory response includes a 'state:' line."""
+    obs = _mk_obs('state field test', project='mcp-state')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'state:' in text
+
+
+def test_get_memory_state_live(single_zenohd: Any) -> None:  # noqa: ARG001
+    """A freshly saved observation returns state: live."""
+    obs = _mk_obs('live state test', project='mcp-state-live')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'state: live' in text
+
+
+@pytest.mark.skip(
+    reason=(
+        'Zenoh mode: get_memory uses find_observation_by_id which filters tombstoned rows. '
+        'Tombstoned obs return "not found" before inspect_by_id is reached in Zenoh mode. '
+        'Local backend tombstoned state is covered in test_get_memory_state_local_tombstoned.'
+    )
+)
+def test_get_memory_state_tombstoned(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Zenoh mode tombstoned obs: not retrievable via get_memory (see local backend test for coverage)."""
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase3 B1 regression: local backend state reporting
+# ---------------------------------------------------------------------------
+
+
+def test_get_memory_state_local_tombstoned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalBackend: tombstoned obs must return state: tombstoned, not state: live (B1 guard).
+
+    Regression test for the B1 blocker reported in worker4_review.yaml:
+    CLI/MCP called store.get_index() (Zenoh sidecar index) instead of
+    backend._idx (LocalBackend index). In local mode the sidecar index is
+    empty, so inspect_by_id returned None and state defaulted to 'live'
+    even when the local row was tombstoned.
+    """
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import get_backend as _get_backend  # noqa: PLC0415
+
+    backend = _get_backend()
+    obs = _mk_obs('local tombstone b1 test', project='mcp-local-b1')
+    backend.put_observation(obs)
+    backend.put_tombstone(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            return result.data
+
+    text = _run(_go())
+    assert 'state: tombstoned' in text, f'Expected "state: tombstoned", got: {text!r}'
+
+
+def test_get_memory_state_local_shadowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalBackend: shadowed obs must return state: shadowed, not state: live."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import get_backend as _get_backend  # noqa: PLC0415
+
+    backend = _get_backend()
+    obs = _mk_obs('local shadowed b1 test', project='mcp-local-shadow')
+    backend.put_observation(obs)
+    # Mark shadowed directly via backend._idx.
+    shadowed_at = '2026-06-27T00:00:00.000000Z'
+    backend._idx.mark_shadowed_missing(obs.observation_id, shadowed_at)  # noqa: SLF001
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            return result.data
+
+    text = _run(_go())
+    assert 'state: shadowed' in text, f'Expected "state: shadowed", got: {text!r}'
