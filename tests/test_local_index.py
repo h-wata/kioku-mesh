@@ -2595,3 +2595,208 @@ def test_inspect_precedence_shadowed_over_superseded(tmp_path: Path) -> None:
         assert result['superseded_by'] == obs_b.observation_id
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase4: additive filter tests (memory_types, source_files, references)
+# ---------------------------------------------------------------------------
+
+
+def test_search_memory_types_filter_matches_only_specified(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'mt_filter.db'))
+    try:
+        obs_decision = Observation(
+            content='a design decision',
+            project='p',
+            memory_type='decision',
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs_note = Observation(
+            content='a note',
+            project='p',
+            memory_type='note',
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        idx.upsert(obs_decision)
+        idx.upsert(obs_note)
+        hits = idx.search(memory_types=['decision'])
+        ids = {h.observation_id for h in hits}
+        assert obs_decision.observation_id in ids
+        assert obs_note.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_memory_types_filter_none_returns_all(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'mt_none.db'))
+    try:
+        obs1 = Observation(
+            content='c1',
+            project='p',
+            memory_type='decision',
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs2 = Observation(
+            content='c2',
+            project='p',
+            memory_type='bug',
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+        hits = idx.search(memory_types=None)
+        ids = {h.observation_id for h in hits}
+        assert obs1.observation_id in ids
+        assert obs2.observation_id in ids
+    finally:
+        idx.close()
+
+
+def test_search_memory_types_filter_empty_list_returns_all(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'mt_empty.db'))
+    try:
+        obs1 = Observation(
+            content='c1',
+            project='p',
+            memory_type='decision',
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs2 = Observation(
+            content='c2',
+            project='p',
+            memory_type='note',
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+        hits = idx.search(memory_types=[])
+        ids = {h.observation_id for h in hits}
+        assert obs1.observation_id in ids
+        assert obs2.observation_id in ids
+    finally:
+        idx.close()
+
+
+def test_search_source_files_filter_exact(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'sf_filter.db'))
+    try:
+        obs_a = Observation(
+            content='obs with src/a.py',
+            project='p',
+            source_files=['src/a.py'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs_b = Observation(
+            content='obs with src/b.py',
+            project='p',
+            source_files=['src/b.py'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        idx.upsert(obs_a)
+        idx.upsert(obs_b)
+        hits = idx.search(source_files=['src/a.py'])
+        ids = {h.observation_id for h in hits}
+        assert obs_a.observation_id in ids
+        assert obs_b.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_references_filter_exact(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'ref_filter.db'))
+    try:
+        obs1 = Observation(
+            content='obs with ref #1',
+            project='p',
+            references=['#1'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs2 = Observation(
+            content='obs with ref #2',
+            project='p',
+            references=['#2'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        idx.upsert(obs1)
+        idx.upsert(obs2)
+        hits = idx.search(references=['#2'])
+        ids = {h.observation_id for h in hits}
+        assert obs2.observation_id in ids
+        assert obs1.observation_id not in ids
+    finally:
+        idx.close()
+
+
+def test_search_composite_memory_types_and_source_files(tmp_path: Path) -> None:
+    idx = LocalIndex.connect(str(tmp_path / 'composite.db'))
+    try:
+        obs_match = Observation(
+            content='decision with src/a.py',
+            project='p',
+            memory_type='decision',
+            source_files=['src/a.py'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs_wrong_type = Observation(
+            content='note with src/a.py',
+            project='p',
+            memory_type='note',
+            source_files=['src/a.py'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        obs_wrong_file = Observation(
+            content='decision with src/b.py',
+            project='p',
+            memory_type='decision',
+            source_files=['src/b.py'],
+            agent_family='c',
+            client_id='c',
+            pc_id='p',
+            session_id='s',
+        )
+        idx.upsert(obs_match)
+        idx.upsert(obs_wrong_type)
+        idx.upsert(obs_wrong_file)
+        hits = idx.search(memory_types=['decision'], source_files=['src/a.py'])
+        ids = {h.observation_id for h in hits}
+        assert obs_match.observation_id in ids
+        assert obs_wrong_type.observation_id not in ids
+        assert obs_wrong_file.observation_id not in ids
+    finally:
+        idx.close()

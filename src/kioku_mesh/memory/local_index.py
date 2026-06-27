@@ -487,6 +487,9 @@ class LocalIndex:
         include_deleted: bool = False,
         include_superseded: bool = False,
         search_mode: str = 'and',
+        memory_types: list[str] | None = None,
+        source_files: list[str] | None = None,
+        references: list[str] | None = None,
     ) -> list[Observation]:
         """SQL-side search returning Observations ordered by created_at DESC.
 
@@ -548,6 +551,9 @@ class LocalIndex:
                 include_deleted=include_deleted,
                 include_superseded=include_superseded,
                 search_mode='and',
+                memory_types=memory_types,
+                source_files=source_files,
+                references=references,
             )
             if len(strict) >= limit:
                 return strict[:limit]
@@ -567,6 +573,9 @@ class LocalIndex:
                 include_deleted=include_deleted,
                 include_superseded=include_superseded,
                 search_mode='or',
+                memory_types=memory_types,
+                source_files=source_files,
+                references=references,
             )
             seen = {obs.observation_id for obs in strict}
             return [*strict, *(obs for obs in broad if obs.observation_id not in seen)][:limit]
@@ -604,6 +613,29 @@ class LocalIndex:
             # cheaply (used by supersede-candidate detection).
             where.append('memory_type = ?')
             params.append(memory_type)
+        # ADR-0028 Phase4: additive plural filters for recall_context.
+        if memory_types:
+            clean_types = [t for t in memory_types if t]
+            if clean_types:
+                placeholders = ','.join('?' for _ in clean_types)
+                where.append(f'memory_type IN ({placeholders})')
+                params.extend(clean_types)
+        if source_files:
+            clean_sf = [f for f in source_files if f]
+            if clean_sf:
+                placeholders = ','.join('?' for _ in clean_sf)
+                where.append(
+                    f"EXISTS (SELECT 1 FROM json_each(payload_json, '$.source_files') WHERE value IN ({placeholders}))"
+                )
+                params.extend(clean_sf)
+        if references:
+            clean_refs = [r for r in references if r]
+            if clean_refs:
+                placeholders = ','.join('?' for _ in clean_refs)
+                where.append(
+                    f"EXISTS (SELECT 1 FROM json_each(payload_json, '$.references') WHERE value IN ({placeholders}))"
+                )
+                params.extend(clean_refs)
         if since_iso:
             where.append('created_at >= ?')
             params.append(since_iso)

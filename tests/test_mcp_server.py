@@ -832,3 +832,308 @@ def test_get_memory_state_local_shadowed(monkeypatch: pytest.MonkeyPatch) -> Non
 
     text = _run(_go())
     assert 'state: shadowed' in text, f'Expected "state: shadowed", got: {text!r}'
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase4: recall_context MCP tool tests (9 cases)
+# ---------------------------------------------------------------------------
+
+
+def _mk_local_backend(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN202
+    """Switch to local backend mode and return the backend instance."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import reset_backend as _reset  # noqa: PLC0415
+
+    _reset()
+    from kioku_mesh.backend import get_backend as _get_backend  # noqa: PLC0415
+
+    return _get_backend()
+
+
+def _mk_obs_full(
+    content: str,
+    *,
+    project: str = 'rc-test',
+    memory_type: str = 'note',
+    importance: int = 3,
+    source_files: list[str] | None = None,
+    references: list[str] | None = None,
+) -> Observation:
+    return Observation(
+        content=content,
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id='mcp-pc',
+        session_id='mcp-sess',
+        project=project,
+        memory_type=memory_type,
+        importance=importance,
+        source_files=source_files or [],
+        references=references or [],
+    )
+
+
+# Case 1: tool registered and existing tools unchanged
+def test_recall_context_tool_registered_and_signature_additive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recall_context is registered; existing tools are still present and callable."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+
+    async def _go() -> tuple[list[str], str, str]:
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+            names = [t.name for t in tools]
+            # search_memory backward compat call
+            r_sm = await client.call_tool('search_memory', {'project': 'no-match-rc-sig'})
+            # recall_context no-args call
+            r_rc = await client.call_tool('recall_context', {})
+            return names, r_sm.data, r_rc.data
+
+    names, sm_out, rc_out = _run(_go())
+    assert 'recall_context' in names
+    assert 'search_memory' in names
+    assert 'get_memory' in names
+    assert 'save_observation' in names
+    assert 'No matching memories' in sm_out
+    # Empty index → no results
+    assert 'No matching current context.' in rc_out or 'recall_context:' in rc_out
+
+
+# Case 2: grouping by project and memory_type
+def test_recall_context_groups_project_and_memory_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Output is grouped by (project, memory_type) in first-hit order."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_d = _mk_obs_full('decision content', project='grp-a', memory_type='decision')
+    obs_b = _mk_obs_full('bug content', project='grp-a', memory_type='bug')
+    obs_d2 = _mk_obs_full('decision in b', project='grp-b', memory_type='decision')
+    backend.put_observation(obs_d)
+    backend.put_observation(obs_b)
+    backend.put_observation(obs_d2)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'grp-a'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'recall_context:' in text
+    assert 'project=grp-a' in text
+    assert 'decision content' in text
+    assert 'bug content' in text
+    # group headers appear
+    assert 'memory_type=decision' in text
+    assert 'memory_type=bug' in text
+    # full content is in output
+    assert obs_d.observation_id in text
+    assert obs_b.observation_id in text
+
+
+# Case 3: memory_types filter (valid + invalid)
+def test_recall_context_memory_types_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """memory_types=['decision'] returns only decisions; invalid type returns error."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_d = _mk_obs_full('decision only', project='mt-test', memory_type='decision')
+    obs_n = _mk_obs_full('note only', project='mt-test', memory_type='note')
+    backend.put_observation(obs_d)
+    backend.put_observation(obs_n)
+
+    async def _go_valid() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'mt-test', 'memory_types': ['decision']},
+            )
+            return result.data
+
+    async def _go_invalid() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'mt-test', 'memory_types': ['invalid_type']},
+            )
+            return result.data
+
+    valid_out = _run(_go_valid())
+    assert obs_d.observation_id in valid_out
+    assert obs_n.observation_id not in valid_out
+
+    invalid_out = _run(_go_invalid())
+    assert 'invalid' in invalid_out.lower() or 'memory_types' in invalid_out
+
+
+# Case 4: source_files exact-match filter
+def test_recall_context_source_files_filter_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """source_files=['src/a.py'] returns only obs whose source_files include 'src/a.py'."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_a = _mk_obs_full('has src/a.py', project='sf-test', source_files=['src/a.py'])
+    obs_b = _mk_obs_full('has src/b.py', project='sf-test', source_files=['src/b.py'])
+    backend.put_observation(obs_a)
+    backend.put_observation(obs_b)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'sf-test', 'source_files': ['src/a.py']},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert obs_a.observation_id in text
+    assert obs_b.observation_id not in text
+
+
+# Case 5: references exact-match filter
+def test_recall_context_references_filter_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """references=['#2'] returns only obs whose references include '#2'."""
+    backend = _mk_local_backend(monkeypatch)
+    obs1 = _mk_obs_full('ref #1', project='ref-test', references=['#1'])
+    obs2 = _mk_obs_full('ref #2', project='ref-test', references=['#2'])
+    backend.put_observation(obs1)
+    backend.put_observation(obs2)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'ref-test', 'references': ['#2']},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert obs2.observation_id in text
+    assert obs1.observation_id not in text
+
+
+# Case 6: hidden states excluded by default
+def test_recall_context_hidden_states_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tombstoned and shadowed observations are excluded by default."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_live = _mk_obs_full('live obs', project='hidden-test')
+    obs_tomb = _mk_obs_full('tombstoned obs', project='hidden-test')
+    obs_shadow = _mk_obs_full('shadowed obs', project='hidden-test')
+    obs_super_old = _mk_obs_full('superseded old', project='hidden-test')
+    obs_super_new = _mk_obs_full('supersedes old', project='hidden-test')
+    backend.put_observation(obs_live)
+    backend.put_observation(obs_tomb)
+    backend.put_observation(obs_shadow)
+    backend.put_observation(obs_super_old)
+    # supersede chain
+    obs_super_new.supersedes = [obs_super_old.observation_id]
+    backend.put_observation(obs_super_new)
+    # tombstone obs_tomb
+    backend.put_tombstone(obs_tomb)
+    # shadow obs_shadow directly via _idx
+    backend._idx.mark_shadowed_missing(obs_shadow.observation_id, '2026-01-01T00:00:00.000000Z')  # noqa: SLF001
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'hidden-test'},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert obs_live.observation_id in text
+    assert obs_tomb.observation_id not in text
+    assert obs_shadow.observation_id not in text
+    # superseded old is hidden as a top-level entry; superseder is visible.
+    # obs_super_old.observation_id may appear in the supersedes: field of the
+    # superseder entry but must NOT appear as its own id: line.
+    assert f'id: {obs_super_old.observation_id}' not in text
+    assert obs_super_new.observation_id in text
+
+
+# Case 7: importance ordering preserved
+def test_recall_context_importance_ordering_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-empty query orders higher importance first; empty query stays chronological."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_low = _mk_obs_full('ordering keyword', project='ord-test', importance=1)
+    obs_high = _mk_obs_full('ordering keyword', project='ord-test', importance=5)
+    backend.put_observation(obs_low)
+    backend.put_observation(obs_high)
+
+    async def _go_query() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'ord-test', 'query': 'ordering'},
+            )
+            return result.data
+
+    text = _run(_go_query())
+    pos_high = text.find(obs_high.observation_id)
+    pos_low = text.find(obs_low.observation_id)
+    assert pos_high != -1
+    assert pos_low != -1
+    assert pos_high < pos_low, 'higher importance should appear first when query is non-empty'
+
+
+# Case 8: limit clamp (1000→100, 0→1)
+def test_recall_context_limit_clamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """limit=1000 returns at most 100; limit=0 returns at least 1."""
+    backend = _mk_local_backend(monkeypatch)
+    for i in range(5):
+        backend.put_observation(_mk_obs_full(f'clamp obs {i}', project='clamp-test'))
+
+    async def _go_large() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'clamp-test', 'limit': 1000},
+            )
+            return result.data
+
+    async def _go_zero() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'clamp-test', 'limit': 0},
+            )
+            return result.data
+
+    # Should not error and return up to 100 results (we have 5)
+    text_large = _run(_go_large())
+    assert 'recall_context:' in text_large
+
+    # limit=0 clamped to 1, should return exactly 1 result
+    text_zero = _run(_go_zero())
+    assert 'recall_context: 1 result(s)' in text_zero
+
+
+# Case 9: index disabled message
+def test_recall_context_index_disabled_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the local index is disabled, recall_context returns a clear error, not a Zenoh scan."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_DISABLE_INDEX', '1')
+    from kioku_mesh.backend import reset_backend as _reset  # noqa: PLC0415
+
+    _reset()
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {})
+            return result.data
+
+    text = _run(_go())
+    assert 'recall_context requires the local index' in text
+    assert 'KIOKU_MESH_DISABLE_INDEX' in text
