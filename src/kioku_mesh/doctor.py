@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -30,6 +31,8 @@ from kioku_mesh.core._env_compat import get_env
 from . import __version__
 from .identity import state_dir
 from .paths import resolve_app_dir
+
+log = logging.getLogger(__name__)
 
 ZENOH_DEFAULT_ENDPOINT = 'tcp/localhost:7447'
 ZENOH_CONNECT_TIMEOUT_SEC = 1.0
@@ -501,6 +504,12 @@ def check_fts5(index: object = None) -> CheckResult:
 
 # ADR-0026 §C: conflicting-latest check.
 
+# Upper bound on the live set this check scans. Mirrors the supersede
+# detector's _POOL_LIMIT: a sweep that hits this cap may have missed
+# conflicts beyond it, so the result is reported as inconclusive rather
+# than a clean PASS (the C3 "no silent truncation" rule, applied to doctor).
+_CONFLICT_SCAN_LIMIT = 10_000
+
 
 def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResult:
     """Flag subjects that carry more than one live decision/config entry.
@@ -515,16 +524,21 @@ def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResu
     deliberately local (no global reorganization, per arXiv:2606.24775).
 
     ``observations`` is injectable for tests; by default it pulls the live,
-    non-superseded set from the active backend.
+    non-superseded set from the active backend. The default fetch is capped
+    at :data:`_CONFLICT_SCAN_LIMIT`; hitting that cap is surfaced (debug log
+    + ``details['truncated']``) instead of being silently treated as a clean
+    scan. An injected list is taken as complete — truncation only applies to
+    the backend-fetched path.
     """
     from .memory.supersede import normalize_subject  # noqa: PLC0415
     from .memory.supersede import SUPERSEDE_TYPES  # noqa: PLC0415
 
+    truncated = False
     if observations is None:
         try:
             from .memory.backend import get_backend  # noqa: PLC0415
 
-            observations = get_backend().search_observations(limit=10_000, include_superseded=False)
+            observations = get_backend().search_observations(limit=_CONFLICT_SCAN_LIMIT, include_superseded=False)
         except Exception as e:  # noqa: BLE001
             return CheckResult(
                 name='conflicting_latest',
@@ -532,6 +546,13 @@ def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResu
                 summary='conflicting-latest check skipped: could not read memory',
                 hint='Check the backend config / `kioku-mesh status`.',
                 details={'error': type(e).__name__},
+            )
+        if len(observations) >= _CONFLICT_SCAN_LIMIT:
+            truncated = True
+            log.debug(
+                'conflicting-latest scan reached _CONFLICT_SCAN_LIMIT=%d live entries; '
+                'conflicts beyond the cap are not checked',
+                _CONFLICT_SCAN_LIMIT,
             )
 
     groups: dict[tuple[str, str, str, str, str], list[Any]] = {}
@@ -546,11 +567,26 @@ def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResu
 
     conflicts = {k: v for k, v in groups.items() if len(v) > 1}
     if not conflicts:
+        if truncated:
+            # Cannot certify a clean state: the cap may have hidden conflicts.
+            return CheckResult(
+                name='conflicting_latest',
+                status=CheckStatus.WARN,
+                summary=(
+                    f'no conflicts found, but the scan was truncated at {_CONFLICT_SCAN_LIMIT} '
+                    'live entries — result is incomplete'
+                ),
+                hint=(
+                    'Narrow the working set (e.g. per-project) or raise the scan limit to verify; '
+                    'this is a soft cap, not a correctness boundary.'
+                ),
+                details={'conflicts': 0, 'truncated': True, 'scan_limit': _CONFLICT_SCAN_LIMIT},
+            )
         return CheckResult(
             name='conflicting_latest',
             status=CheckStatus.PASS,
             summary='no subject has multiple live decision/config entries',
-            details={'conflicts': 0},
+            details={'conflicts': 0, 'truncated': False},
         )
 
     examples = []
@@ -565,15 +601,18 @@ def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResu
                 'observation_ids': ids,
             }
         )
+    summary = f'{len(conflicts)} subject(s) have multiple live decision/config entries'
+    if truncated:
+        summary += f' (scan truncated at {_CONFLICT_SCAN_LIMIT}; more may exist)'
     return CheckResult(
         name='conflicting_latest',
         status=CheckStatus.WARN,
-        summary=f'{len(conflicts)} subject(s) have multiple live decision/config entries',
+        summary=summary,
         hint=(
             'Resolve each by superseding (save the current one with supersedes=[old_ids]) '
             'or deleting the stale entries (`kioku-mesh delete <id>`).'
         ),
-        details={'conflicts': len(conflicts), 'examples': examples},
+        details={'conflicts': len(conflicts), 'examples': examples, 'truncated': truncated},
     )
 
 
