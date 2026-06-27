@@ -2276,6 +2276,14 @@ def test_rebuild_preserves_shadow_state(tmp_path: Path) -> None:
         fts_results = idx.search(query='absent', project='inv23')
         fts_ids = {r.observation_id for r in fts_results}
         assert shadow_obs.observation_id not in fts_ids, 'shadowed obs must not appear in FTS results'
+        # AC-4/INV-3: FTS must be rebuilt from live raw observations (positive assertion).
+        # Searching for a token from live_obs's content must return live_obs — empty
+        # obs_fts would make this fail, proving FTS is not merely empty.
+        live_fts_results = idx.search(query='live', project='inv23')
+        live_fts_ids = {r.observation_id for r in live_fts_results}
+        assert (
+            live_obs.observation_id in live_fts_ids
+        ), 'rebuild_from_zenoh must reindex live raw observation in obs_fts'
     finally:
         idx.close()
 

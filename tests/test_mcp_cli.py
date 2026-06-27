@@ -413,6 +413,53 @@ def test_cli_status_shows_live_tombstoned_shadowed(
     assert 'hint:' in out  # shadowed > 0 triggers hint
 
 
+def test_cli_status_show_shadows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Status --show-shadows must exit 0 and list shadowed observations when present."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import get_backend
+    from kioku_mesh.backend import LocalBackend
+    from kioku_mesh.backend import reset_backend
+
+    reset_backend()
+    backend = get_backend()
+    assert isinstance(backend, LocalBackend)
+
+    # Seed one shadowed observation directly via the internal index.
+    obs = Observation(content='shadowed test content', project='showshadow')
+    backend._idx.upsert(obs)  # noqa: SLF001
+    backend._idx.mark_shadowed_missing(obs.observation_id, '2026-06-01T00:00:00.000000Z')  # noqa: SLF001
+
+    # Reset so _cmd_status creates a fresh backend (same state dir via autouse fixture).
+    reset_backend()
+
+    rc = cli_main(['status', '--show-shadows'])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'shadowed observations:' in out
+    assert obs.observation_id in out
+
+
+def test_cli_status_show_shadows_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Status --show-shadows exits 0 and prints 'no shadowed observations.' when none exist."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import reset_backend
+
+    reset_backend()
+
+    rc = cli_main(['status', '--show-shadows'])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'no shadowed observations.' in out
+
+
 def test_cli_drain_pending_replays_queued_rows(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,

@@ -433,7 +433,7 @@ def _format_identity_source(source: IdentitySource, env_var: str) -> str:
     return f'(default — set {env_var} to override)'
 
 
-def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
+def _cmd_status(args: argparse.Namespace) -> int:
     try:
         recent = get_backend().search_observations(limit=MAX_SEARCH)
     except Exception as e:  # noqa: BLE001
@@ -479,6 +479,16 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
                 'WARNING: peer alignment not yet complete. Search counts may be low right after restart.',
                 file=sys.stderr,
             )
+    if args.show_shadows:
+        backend = get_backend()
+        idx = getattr(backend, '_idx', None) or get_index()
+        shadows = idx.list_shadowed_obs(limit=50)
+        if shadows:
+            print('shadowed observations:')
+            for obs_id, proj, _created_at, shadowed_at, summary in shadows:
+                print(f'  {obs_id}  project={proj}  shadowed_at={shadowed_at}  summary={summary[:60]}')
+        else:
+            print('no shadowed observations.')
     return 0
 
 
@@ -1855,6 +1865,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_delete.set_defaults(func=_cmd_delete)
 
     p_status = sub.add_parser('status', help='Show memory status')
+    p_status.add_argument(
+        '--show-shadows',
+        action='store_true',
+        default=False,
+        dest='show_shadows',
+        help='list shadowed observations (read-only, no unshadow/delete)',
+    )
     p_status.set_defaults(func=_cmd_status)
 
     p_drain = sub.add_parser('drain', help='Drain pending_puts')

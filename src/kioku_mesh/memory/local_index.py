@@ -877,7 +877,7 @@ class LocalIndex:
             sql += ' AND project = ?'
             params.append(project)
         sql += ' ORDER BY shadowed_at DESC LIMIT ?'
-        params.append(limit)
+        params.append(max(1, limit))
         with self._lock:
             try:
                 rows = self._conn.execute(sql, params).fetchall()
