@@ -285,3 +285,55 @@ def test_pool_limit_triggers_debug_log(
     find_candidates_in_index(idx, obs)
 
     assert any('_POOL_LIMIT' in m for m in debug_calls)
+
+
+# -- doctor conflicting-latest scan truncation ---------------------------------
+
+
+def _patch_backend(monkeypatch: pytest.MonkeyPatch, rows: list[Observation]) -> None:
+    """Make the doctor's lazily-imported get_backend return ``rows``."""
+    import kioku_mesh.memory.backend as backend_module
+
+    class _StubBackend:
+        def search_observations(self, **_kw: object) -> list[Observation]:
+            return rows
+
+    monkeypatch.setattr(backend_module, 'get_backend', lambda: _StubBackend())
+
+
+def test_conflicting_latest_truncation_warns_when_no_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A truncated scan with no conflicts is WARN (inconclusive), not PASS."""
+    import kioku_mesh.doctor as doctor_module
+
+    monkeypatch.setattr(doctor_module, '_CONFLICT_SCAN_LIMIT', 3)
+    # Distinct subjects → no conflict, but len == patched cap → truncated.
+    _patch_backend(monkeypatch, [_mk(f'd{i}', subject=f's{i}') for i in range(3)])
+
+    result = check_conflicting_latest()
+    assert result.status is CheckStatus.WARN
+    assert result.details['truncated'] is True
+    assert result.details['conflicts'] == 0
+
+
+def test_conflicting_latest_truncation_noted_alongside_conflict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When truncated AND conflicts exist, the summary flags the truncation."""
+    import kioku_mesh.doctor as doctor_module
+
+    monkeypatch.setattr(doctor_module, '_CONFLICT_SCAN_LIMIT', 3)
+    _patch_backend(monkeypatch, [_mk('a', subject='db'), _mk('b', subject='DB'), _mk('c', subject='cache')])
+
+    result = check_conflicting_latest()
+    assert result.status is CheckStatus.WARN
+    assert result.details['conflicts'] == 1
+    assert result.details['truncated'] is True
+    assert 'truncated' in result.summary
+
+
+def test_conflicting_latest_injected_list_never_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An injected observations list is taken as complete, ignoring the cap."""
+    import kioku_mesh.doctor as doctor_module
+
+    monkeypatch.setattr(doctor_module, '_CONFLICT_SCAN_LIMIT', 1)
+    result = check_conflicting_latest(observations=[_mk('only', subject='db')])
+    assert result.status is CheckStatus.PASS
+    assert result.details['truncated'] is False
