@@ -285,10 +285,15 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
     if len(args.observation_id) != 32:
         print('observation_id must be a full 32-character match.', file=sys.stderr)
         return 2
+    include_deleted = getattr(args, 'include_hidden', False)
     obs = get_backend().find_observation_by_id(args.observation_id)
+    if obs is None and include_deleted:
+        obs = get_index().find_by_id(args.observation_id, include_deleted=True)
     if obs is None:
         print(f'observation_id {args.observation_id} not found.', file=sys.stderr)
         return 1
+    state_info = get_index().inspect_by_id(args.observation_id)
+    state = state_info['state'] if state_info else 'live'
     lines = [
         f'id: {obs.observation_id}',
         f'memory_type: {obs.memory_type}',
@@ -302,6 +307,7 @@ def _cmd_get_memory(args: argparse.Namespace) -> int:
         f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
         f'references: {", ".join(obs.references) if obs.references else "-"}',
         f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
+        f'state: {state}',
         '---',
         obs.content,
     ]
@@ -1943,6 +1949,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_get = sub.add_parser('get-memory', help='Get a single observation by observation_id')
     p_get.add_argument('observation_id', help='full 32-character observation_id')
+    p_get.add_argument(
+        '--include-hidden',
+        dest='include_hidden',
+        action='store_true',
+        help='also return tombstoned / shadowed observations',
+    )
     p_get.set_defaults(func=_cmd_get_memory)
 
     p_init = sub.add_parser(

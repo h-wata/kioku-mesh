@@ -40,6 +40,7 @@ from .messaging.models import Message
 from .messaging.purge import purge_expired_msgs
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
+from .store import get_index
 from .store import MAX_SEARCH
 from .store import search_observations
 from .store import start_pending_drain_background
@@ -398,6 +399,8 @@ def get_memory(observation_id: str) -> str:
         return f'observation_id {observation_id} not found.'
     _obs_extras = obs._extras if hasattr(obs, '_extras') else {}  # noqa: SLF001
     superseded_by = _obs_extras.get('superseded_by')
+    state_info = get_index().inspect_by_id(observation_id)
+    state = state_info['state'] if state_info else 'live'
     lines = [
         f'id: {obs.observation_id}',
         f'memory_type: {obs.memory_type}',
@@ -412,6 +415,7 @@ def get_memory(observation_id: str) -> str:
         f'references: {", ".join(obs.references) if obs.references else "-"}',
         f'supersedes: {", ".join(obs.supersedes) if obs.supersedes else "-"}',
         f'superseded_by: {superseded_by or "-"}',
+        f'state: {state}',
         '---',
         obs.content,
     ]

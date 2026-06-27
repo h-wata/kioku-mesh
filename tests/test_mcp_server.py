@@ -732,3 +732,51 @@ def test_search_memory_unknown_search_mode_returns_error(single_zenohd: Any) -> 
 
     text = _run(_go())
     assert 'search_mode' in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase3: get_memory state field tests
+# ---------------------------------------------------------------------------
+
+
+def test_get_memory_state_field(single_zenohd: Any) -> None:  # noqa: ARG001
+    """get_memory response includes a 'state:' line."""
+    obs = _mk_obs('state field test', project='mcp-state')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'state:' in text
+
+
+def test_get_memory_state_live(single_zenohd: Any) -> None:  # noqa: ARG001
+    """A freshly saved observation returns state: live."""
+    obs = _mk_obs('live state test', project='mcp-state-live')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'state: live' in text
+
+
+@pytest.mark.skip(
+    reason=(
+        'get_memory uses find_observation_by_id which filters tombstoned rows. '
+        'Tombstoned obs return "not found" before inspect_by_id is reached. '
+        'State inspection for tombstoned obs is covered in test_local_index.py::test_inspect_tombstoned.'
+    )
+)
+def test_get_memory_state_tombstoned(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Tombstoned observation would return state: tombstoned (skipped: not retrievable via get_memory)."""

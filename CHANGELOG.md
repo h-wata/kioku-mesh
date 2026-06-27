@@ -15,6 +15,10 @@ versions without a migration path until `1.0.0`.
 - Added shadow visibility to `status` output (live/tombstoned/shadowed counts) and
   `doctor` check (`check_shadow_visibility`); added `list_shadowed_obs` to LocalIndex
   and invariant tests for INV-2/INV-3/INV-4/INV-5 (ADR-0028 Phase 1)
+- ADR-0028 Phase3: `LocalIndex.inspect_by_id` による computed state
+  (live/tombstoned/shadowed/superseded/physical-missing) の表面化。
+  `get_memory`(MCP) および `get-memory`(CLI) のレスポンスに `state` フィールドを追加(additive)。
+  CLI に `--include-hidden` オプション追加。既存インタフェース変更なし。
 
 ## [0.7.0] - 2026-06-26
 

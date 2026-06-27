@@ -2427,3 +2427,95 @@ def test_list_shadowed_obs(tmp_path: Path) -> None:
             assert row[3] != ''  # shadowed_at is non-empty
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase3: inspect_by_id state inspection tests
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_live(tmp_path: Path) -> None:
+    """inspect_by_id returns state='live' for a normal observation."""
+    idx = LocalIndex.connect(str(tmp_path / 'inspect_live.db'))
+    try:
+        obs = _mk_obs('live observation', project='p')
+        idx.upsert(obs)
+        result = idx.inspect_by_id(obs.observation_id)
+        assert result is not None
+        assert result['state'] == 'live'
+        assert result['id'] == obs.observation_id
+        assert result['deleted_at'] is None
+        assert result['shadowed_at'] is None
+        assert result['superseded_by'] is None
+        assert result['created_at'] == obs.created_at
+        assert result['payload'] is not None
+        assert result['updated_at'] is None
+    finally:
+        idx.close()
+
+
+def test_inspect_tombstoned(tmp_path: Path) -> None:
+    """inspect_by_id returns state='tombstoned' after mark_deleted."""
+    idx = LocalIndex.connect(str(tmp_path / 'inspect_tomb.db'))
+    try:
+        obs = _mk_obs('tombstoned observation', project='p')
+        idx.upsert(obs)
+        deleted_at = '2026-06-27T00:00:00.000000Z'
+        idx.mark_deleted(obs.observation_id, deleted_at)
+        result = idx.inspect_by_id(obs.observation_id)
+        assert result is not None
+        assert result['state'] == 'tombstoned'
+        assert result['deleted_at'] == deleted_at
+    finally:
+        idx.close()
+
+
+def test_inspect_shadowed(tmp_path: Path) -> None:
+    """inspect_by_id returns state='shadowed' after mark_shadowed_missing."""
+    idx = LocalIndex.connect(str(tmp_path / 'inspect_shadow.db'))
+    try:
+        obs = _mk_obs('shadowed observation', project='p')
+        idx.upsert(obs)
+        shadowed_at = '2026-06-27T00:00:00.000000Z'
+        idx.mark_shadowed_missing(obs.observation_id, shadowed_at)
+        result = idx.inspect_by_id(obs.observation_id)
+        assert result is not None
+        assert result['state'] == 'shadowed'
+        assert result['shadowed_at'] == shadowed_at
+        assert result['deleted_at'] is None
+    finally:
+        idx.close()
+
+
+def test_inspect_superseded(tmp_path: Path) -> None:
+    """inspect_by_id returns state='superseded' when superseded_by is set."""
+    idx = LocalIndex.connect(str(tmp_path / 'inspect_super.db'))
+    try:
+        obs_a = _mk_obs('old observation', project='p')
+        idx.upsert(obs_a)
+        obs_b = Observation(
+            content='new observation superseding A',
+            project='p',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        idx.upsert(obs_b)
+        result = idx.inspect_by_id(obs_a.observation_id)
+        assert result is not None
+        assert result['state'] == 'superseded'
+        assert result['superseded_by'] == obs_b.observation_id
+    finally:
+        idx.close()
+
+
+def test_inspect_physical_missing(tmp_path: Path) -> None:
+    """inspect_by_id returns None for an observation_id not in the index."""
+    idx = LocalIndex.connect(str(tmp_path / 'inspect_miss.db'))
+    try:
+        result = idx.inspect_by_id('00000000000000000000000000000000')
+        assert result is None
+    finally:
+        idx.close()
