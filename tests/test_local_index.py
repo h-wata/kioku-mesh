@@ -2519,3 +2519,79 @@ def test_inspect_physical_missing(tmp_path: Path) -> None:
         assert result is None
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase3 NB1: inspect_by_id state precedence tests (INV-4)
+# ---------------------------------------------------------------------------
+
+
+def test_inspect_precedence_deleted_over_shadowed(tmp_path: Path) -> None:
+    """deleted_at takes priority over shadowed_at: state must be 'tombstoned'."""
+    idx = LocalIndex.connect(str(tmp_path / 'prec_del_shd.db'))
+    try:
+        obs = _mk_obs('prec del shd', project='p')
+        idx.upsert(obs)
+        deleted_at = '2026-06-27T00:00:00.000000Z'
+        shadowed_at = '2026-06-26T00:00:00.000000Z'
+        # Set both flags directly — mark_deleted clears shadowed_at normally.
+        idx._conn.execute(  # noqa: SLF001
+            'UPDATE obs_index SET deleted_at = ?, shadowed_at = ? WHERE observation_id = ?',
+            (deleted_at, shadowed_at, obs.observation_id),
+        )
+        idx._conn.commit()  # noqa: SLF001
+        result = idx.inspect_by_id(obs.observation_id)
+        assert result is not None
+        assert result['state'] == 'tombstoned', f'deleted_at must beat shadowed_at, got {result["state"]}'
+        assert result['deleted_at'] == deleted_at
+        assert result['shadowed_at'] == shadowed_at
+    finally:
+        idx.close()
+
+
+def test_inspect_precedence_deleted_over_superseded(tmp_path: Path) -> None:
+    """deleted_at takes priority over superseded_by: state must be 'tombstoned'."""
+    idx = LocalIndex.connect(str(tmp_path / 'prec_del_sup.db'))
+    try:
+        obs_a = _mk_obs('prec del sup old', project='p')
+        obs_b = _mk_obs('prec del sup new', project='p')
+        idx.upsert(obs_a)
+        idx.upsert(obs_b)
+        deleted_at = '2026-06-27T00:00:00.000000Z'
+        # Set both deleted_at and superseded_by on obs_a simultaneously.
+        idx._conn.execute(  # noqa: SLF001
+            'UPDATE obs_index SET deleted_at = ?, superseded_by = ? WHERE observation_id = ?',
+            (deleted_at, obs_b.observation_id, obs_a.observation_id),
+        )
+        idx._conn.commit()  # noqa: SLF001
+        result = idx.inspect_by_id(obs_a.observation_id)
+        assert result is not None
+        assert result['state'] == 'tombstoned', f'deleted_at must beat superseded_by, got {result["state"]}'
+        assert result['deleted_at'] == deleted_at
+        assert result['superseded_by'] == obs_b.observation_id
+    finally:
+        idx.close()
+
+
+def test_inspect_precedence_shadowed_over_superseded(tmp_path: Path) -> None:
+    """shadowed_at takes priority over superseded_by: state must be 'shadowed'."""
+    idx = LocalIndex.connect(str(tmp_path / 'prec_shd_sup.db'))
+    try:
+        obs_a = _mk_obs('prec shd sup old', project='p')
+        obs_b = _mk_obs('prec shd sup new', project='p')
+        idx.upsert(obs_a)
+        idx.upsert(obs_b)
+        shadowed_at = '2026-06-27T00:00:00.000000Z'
+        # Set both shadowed_at and superseded_by on obs_a simultaneously.
+        idx._conn.execute(  # noqa: SLF001
+            'UPDATE obs_index SET shadowed_at = ?, superseded_by = ? WHERE observation_id = ?',
+            (shadowed_at, obs_b.observation_id, obs_a.observation_id),
+        )
+        idx._conn.commit()  # noqa: SLF001
+        result = idx.inspect_by_id(obs_a.observation_id)
+        assert result is not None
+        assert result['state'] == 'shadowed', f'shadowed_at must beat superseded_by, got {result["state"]}'
+        assert result['shadowed_at'] == shadowed_at
+        assert result['superseded_by'] == obs_b.observation_id
+    finally:
+        idx.close()

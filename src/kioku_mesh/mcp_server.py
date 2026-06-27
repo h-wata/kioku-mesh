@@ -394,12 +394,14 @@ def get_memory(observation_id: str) -> str:
     """
     if len(observation_id) != 32:
         return 'observation_id must be a full 32-character match.'
-    obs = get_backend().find_observation_by_id(observation_id)
+    backend = get_backend()
+    obs = backend.find_observation_by_id(observation_id)
     if obs is None:
         return f'observation_id {observation_id} not found.'
     _obs_extras = obs._extras if hasattr(obs, '_extras') else {}  # noqa: SLF001
     superseded_by = _obs_extras.get('superseded_by')
-    state_info = get_index().inspect_by_id(observation_id)
+    idx = getattr(backend, '_idx', None) or get_index()  # Phase1 pattern: active backend index
+    state_info = idx.inspect_by_id(observation_id)
     state = state_info['state'] if state_info else 'live'
     lines = [
         f'id: {obs.observation_id}',
