@@ -32,6 +32,7 @@ import logging
 from pathlib import Path
 import sqlite3
 import threading
+from typing import Iterator
 
 from kioku_mesh.core._env_compat import get_env
 
@@ -1054,6 +1055,22 @@ class LocalIndex:
                     continue
                 tomb_ids[tomb.observation_id] = tomb.deleted_at
 
+        return self._rebuild_from_observations(obs_list, tomb_ids, mark_missing_shadowed=True)
+
+    def _rebuild_from_observations(
+        self,
+        obs_list: list[Observation],
+        tomb_ids: dict[str, str],
+        *,
+        mark_missing_shadowed: bool,
+    ) -> RebuildStats:
+        """Apply obs_list and tomb_ids to the SQLite index in one transaction.
+
+        mark_missing_shadowed=True (Zenoh path): index rows absent from
+        obs_list are marked shadowed (may be restored if they reappear).
+        mark_missing_shadowed=False (raw.db path): such rows are physically
+        deleted because raw.db is the SoT and their absence means they are gone.
+        """
         added = 0
         marked_deleted = 0
         shadowed = 0
@@ -1119,11 +1136,11 @@ class LocalIndex:
                     mark_rows.append((del_at, obs_id))
                     marked_deleted += 1
 
-                shadow_rows = []
+                stale_rows: list[tuple[str, str]] = []
                 shadowed_at = _shadow_now_iso()
-                for obs_id, (deleted_at, existing_shadowed_at, _payload_json) in existing.items():
+                for obs_id, (deleted_at, existing_shadowed_at, _) in existing.items():
                     if deleted_at is None and existing_shadowed_at is None and obs_id not in seen_obs_ids:
-                        shadow_rows.append((shadowed_at, obs_id))
+                        stale_rows.append((shadowed_at, obs_id))
                         shadowed += 1
 
                 self._conn.execute('BEGIN')
@@ -1131,8 +1148,16 @@ class LocalIndex:
                     self._conn.executemany(_UPSERT_SQL, upsert_rows)
                 if mark_rows:
                     self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
-                if shadow_rows:
-                    self._conn.executemany(_MARK_SHADOWED_SQL, shadow_rows)
+                if mark_missing_shadowed:
+                    if stale_rows:
+                        self._conn.executemany(_MARK_SHADOWED_SQL, stale_rows)
+                else:
+                    for _, obs_id in stale_rows:
+                        self._conn.execute('DELETE FROM obs_index WHERE observation_id = ?', (obs_id,))
+                        self._conn.execute(
+                            'UPDATE obs_index SET superseded_by = NULL WHERE superseded_by = ?',
+                            (obs_id,),
+                        )
                 # ADR-0025: incremental FTS rebuild — reuse diff already computed for obs_index.
                 # Order: upsert first, then delete (same-id upsert+tombstone nets to delete).
                 if self._fts_cap != _FTS_CAP_LIKE:
@@ -1152,9 +1177,9 @@ class LocalIndex:
                                 obs.project or '',
                             ),
                         )
-                    for _del_at, obs_id in mark_rows:
+                    for _, obs_id in mark_rows:
                         self._conn.execute(_FTS_DELETE_SQL, (obs_id,))
-                    for _shad_at, obs_id in shadow_rows:
+                    for _, obs_id in stale_rows:
                         self._conn.execute(_FTS_DELETE_SQL, (obs_id,))
                     # drift guard: count mismatch triggers full rebuild as self-heal.
                     (fts_count,) = self._conn.execute('SELECT COUNT(*) FROM obs_fts').fetchone()
@@ -1163,7 +1188,7 @@ class LocalIndex:
                     ).fetchone()
                     if fts_count != live_count:
                         log.warning(
-                            'rebuild_from_zenoh FTS drift detected (%d vs %d live); falling back to full rebuild',
+                            '_rebuild_from_observations FTS drift detected (%d vs %d live); falling back to full rebuild',
                             fts_count,
                             live_count,
                         )
@@ -1183,10 +1208,30 @@ class LocalIndex:
                     self._conn.execute('ROLLBACK')
                 except Exception:  # noqa: BLE001
                     pass
-                log.warning('rebuild_from_zenoh transaction failed: %s', e)
+                log.warning('_rebuild_from_observations transaction failed: %s', e)
                 raise
 
         return RebuildStats(added=added, marked_deleted=marked_deleted, shadowed=shadowed, unchanged=unchanged)
+
+    def rebuild_from_raw_records(
+        self,
+        obs_iter: Iterator[Observation],
+        tomb_iter: Iterator[Tombstone],
+        *,
+        mark_missing_shadowed: bool = False,
+    ) -> RebuildStats:
+        """Rebuild the SQLite index from LocalRawStore iterators.
+
+        Intended for LocalBackend open: obs_iter/tomb_iter come from
+        LocalRawStore.scan_obs()/scan_tombs().  raw.db is the SoT so
+        mark_missing_shadowed defaults to False (stale index rows are
+        physically deleted instead of shadowed).
+        """
+        if self._disabled or self._conn is None:
+            return RebuildStats()
+        obs_list = list(obs_iter)
+        tomb_ids = {t.observation_id: t.deleted_at for t in tomb_iter}
+        return self._rebuild_from_observations(obs_list, tomb_ids, mark_missing_shadowed=mark_missing_shadowed)
 
     def close(self) -> None:
         """Close the underlying connection. Safe to call multiple times.
