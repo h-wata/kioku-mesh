@@ -113,7 +113,7 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 ### 保存
 
-CLI の `kioku-mesh save` と MCP の `save_observation` は、どちらも `Observation` を作成し、現在の backend に保存します。`zenoh` backend では Zenoh への `put` 成功が保存成功の契約で、保存後に SQLite ローカルインデックスへ best-effort で upsert します。`local` backend では専用 SQLite index への書き込みが保存成功の契約です。
+CLI の `kioku-mesh save` と MCP の `save_observation` は、どちらも `Observation` を作成し、現在の backend に保存します。`zenoh` backend では Zenoh への `put` 成功が保存成功の契約で、保存後に SQLite ローカルインデックスへ best-effort で upsert します。`local` backend では `state_dir()/local/raw.db` への書き込みが保存成功の契約です（ADR-0028 Phase2）。raw.db へのコミット後、`state_dir()/local/index.db` への best-effort upsert を試みます。index.db の更新に失敗しても raw.db のコミットはロールバックされません。次回 LocalBackend が開かれたとき、raw.db から index.db を再構築します。
 
 ### 検索
 
@@ -141,7 +141,7 @@ Tombstone 済み Observation も、物理削除や監査用途のため単一取
 
 ## 6. ローカル SQLite インデックス
 
-Zenoh backend の SQLite index は `MESH_MEM_INDEX_DB` があればそのパス、なければ `state_dir()/index.db` に作られます。`MESH_MEM_INDEX_DB=:memory:` も指定できます。Local backend は Zenoh sidecar と物理的に分離した `state_dir()/local/index.db` を使い、`MESH_MEM_INDEX_DB` の影響を受けません。
+Zenoh backend の SQLite index は `MESH_MEM_INDEX_DB` があればそのパス、なければ `state_dir()/index.db` に作られます。`MESH_MEM_INDEX_DB=:memory:` も指定できます。Local backend は Zenoh sidecar と物理的に分離した `state_dir()/local/` ディレクトリを使い、`MESH_MEM_INDEX_DB` の影響を受けません。ADR-0028 Phase2 以降、`local` backend における永続化の正本は `state_dir()/local/raw.db` です。`state_dir()/local/index.db` は raw.db から再構築される派生ビューで、破損や欠落があっても raw.db から復元できます。LocalBackend の初期化時に `migrate_from_index` (pre-Phase2 index.db からの copy-only 移行) および `rebuild_from_raw_records` (raw.db を走査して index.db を再構築) が実行されます。
 
 テーブルは `obs_index` で、主な列は以下です。
 
@@ -324,7 +324,7 @@ MCP tool は identity を引数に持ちません。検索 tool だけは narrow
 ## 14. 制約
 
 - plaintext Zenoh の `mem/**` に transport-level auth / encryption はない。7447/tcp は信頼済み peer のみに絞る必要がある。必要なら `kioku-mesh tls` で mTLS config を生成する。
-- `zenoh` backend の SQLite index は正本ではない。破損や未同期時は Zenoh 正本から rebuild する。`local` backend の専用 SQLite は単一ホスト local mode の正本。
+- `zenoh` backend の SQLite index は正本ではない。破損や未同期時は Zenoh 正本から rebuild する。`local` backend では `state_dir()/local/raw.db` が正本。`state_dir()/local/index.db` は派生ビューであり、LocalBackend 起動時に raw.db から再構築される。
 - FTS5 による全文検索は未実装。現在の SQLite 検索は `payload_json` への substring match。
 - CLI は one-shot 起動で rebuild を skip するため、新規 host が既存 mesh の過去データをすぐ検索したい場合は `kioku-mesh --rebuild ...` を明示する。
 - `gc --force-id` の wildcard purge は best-effort。到達不能 peer への完了確認はない。
@@ -339,6 +339,8 @@ MCP tool は identity を引数に持ちません。検索 tool だけは narrow
 - identity のキャッシュ、環境変数 override、`pc_id` の同時生成安全性。
 - CLI/MCP の保存、検索、削除、取得、status、local backend、init/mcp/tls wrapper。
 - SQLite index の schema、検索、削除 stamp、物理削除、rebuild。
+- LocalRawStore の schema/idempotency/migration/split-brain シナリオ（ADR-0028 Phase2）。
+- pre-Phase2 index.db から raw.db への migration、index.db 削除後の raw.db からの rebuild、raw 書き込み失敗時のゴーストロー排除、物理削除後の rebuild での復活なし。
 - Zenoh fallback、session reconnect、readiness 表示。
 - 2 router の offline diff sync と tombstone propagation。
 - GC retention、project filter、`--force-id`、wildcard delete 失敗時の耐性。

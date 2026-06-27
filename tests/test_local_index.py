@@ -2335,9 +2335,12 @@ def test_gc_tombstones_does_not_evict_live(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setenv('KIOKU_MESH_STATE_DIR', str(tmp_path / 'state'))
     reset_backend()
 
+    from kioku_mesh.memory.local_raw_store import LocalRawStore  # noqa: PLC0415
+
     backend = LocalBackend.__new__(LocalBackend)
     idx = LocalIndex.connect(str(tmp_path / 'inv5_tomb.db'))
     backend._idx = idx  # type: ignore[attr-defined]
+    backend._raw_store = LocalRawStore(tmp_path / 'inv5_raw.db')  # type: ignore[attr-defined]
 
     live = Observation(
         content='ancient live obs',
@@ -2370,9 +2373,12 @@ def test_gc_shadows_does_not_evict_live(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv('KIOKU_MESH_STATE_DIR', str(tmp_path / 'state'))
     reset_backend()
 
+    from kioku_mesh.memory.local_raw_store import LocalRawStore  # noqa: PLC0415
+
     backend = LocalBackend.__new__(LocalBackend)
     idx = LocalIndex.connect(str(tmp_path / 'inv5_shadow.db'))
     backend._idx = idx  # type: ignore[attr-defined]
+    backend._raw_store = LocalRawStore(tmp_path / 'inv5_shadow_raw.db')  # type: ignore[attr-defined]
 
     live = Observation(
         content='live obs not shadowed',
