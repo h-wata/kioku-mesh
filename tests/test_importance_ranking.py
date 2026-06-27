@@ -190,14 +190,20 @@ def test_clamped_importance_zero_ranks_as_one(idx: LocalIndex) -> None:
 
 
 def test_legacy_missing_importance_defaults_to_two(idx: LocalIndex) -> None:
-    """Observations without importance get default=2 and rank above importance=1."""
-    default_obs = Observation(
-        content='billing default importance',
-        project='demo',
-        memory_type='decision',
-        created_at='2026-01-01T00:00:00.000000Z',
+    """Legacy JSON without 'importance' field defaults to 2 and ranks above importance=1.
+
+    The test exercises the actual from_json missing-key compatibility path: a raw
+    JSON payload (as emitted by an older writer) that has no 'importance' key is
+    parsed via Observation.from_json, where _from_dict_compat applies the dataclass
+    default=2.  Directly constructing Observation() without the arg would bypass
+    this path (dataclass default fires immediately, never testing the JSON decode).
+    """
+    raw_json = (
+        '{"content": "billing default importance", "project": "demo",'
+        ' "memory_type": "decision", "created_at": "2026-01-01T00:00:00.000000Z"}'
     )
-    assert default_obs.importance == 2, 'missing importance must default to 2'
+    default_obs = Observation.from_json(raw_json)
+    assert default_obs.importance == 2, 'from_json: missing importance field must default to 2'
     idx.upsert(default_obs)
     idx.upsert(_obs('billing low importance', importance=1, created_at='2026-01-02T00:00:00.000000Z'))
 
