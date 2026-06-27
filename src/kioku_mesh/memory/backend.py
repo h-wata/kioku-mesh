@@ -147,8 +147,10 @@ class LocalBackend:
         return find_candidates_in_index(self._idx, obs)
 
     def physical_delete_observation(self, observation_id: str) -> tuple[bool, bool]:
-        obs = self._idx.find_by_id(observation_id, include_deleted=True)
-        if obs is None:
+        # raw.db is authoritative: check it directly, independent of index state.
+        raw_exists = self._raw_store.obs_exists(observation_id)
+        idx_obs = self._idx.find_by_id(observation_id, include_deleted=True)
+        if not raw_exists and idx_obs is None:
             return (False, False)
         self._raw_store.delete_obs(observation_id)  # SoT: raises on failure
         self._raw_store.delete_tomb(observation_id)  # SoT: raises on failure
@@ -175,40 +177,43 @@ class LocalBackend:
         cutoff_iso = cutoff.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
         purged = 0
         if project:
+            # Enumerate from raw.db (authoritative) and index (best-effort); union.
+            candidate_ids: set[str] = set()
+            for obs_id, obs_project in self._raw_store.scan_expired_tomb_ids_with_project(cutoff_iso):
+                if obs_project == project:
+                    candidate_ids.add(obs_id)
             for obs_id, _ in self._idx.list_tombstoned_obs_in_project(project, cutoff_iso):
+                candidate_ids.add(obs_id)
+            for obs_id in candidate_ids:
                 self._raw_store.delete_obs(obs_id)
                 self._raw_store.delete_tomb(obs_id)
                 self._idx.physical_delete(obs_id)
                 purged += 1
         else:
-            # Global sweep: search with include_deleted and purge old tombs.
-            rows = self._idx.search(include_deleted=True, limit=10_000)
-            for obs in rows:
-                # We can't directly query deleted_at from search; use the DB directly.
-                # For now, fall back to project-scoped path with empty string not supported well.
-                # Use the internal connection via list_tombstoned_obs_in_project with empty project.
-                break
-            # Use a direct query approach for the global case.
             purged = self._gc_global_tombs(cutoff_iso)
         return purged
 
     def _gc_global_tombs(self, cutoff_iso: str) -> int:
         """Physical-delete tombstoned rows older than cutoff_iso across all projects."""
-        if self._idx.disabled or self._idx._conn is None:  # noqa: SLF001
-            return 0
         import sqlite3
 
-        with self._idx._lock:  # noqa: SLF001
-            try:
-                rows = self._idx._conn.execute(  # noqa: SLF001
-                    'SELECT observation_id FROM obs_index WHERE deleted_at IS NOT NULL AND deleted_at < ?',
-                    (cutoff_iso,),
-                ).fetchall()
-            except sqlite3.Error as e:
-                log.warning('LocalBackend._gc_global_tombs query failed: %s', e)
-                return 0
+        # Collect from raw.db (authoritative) and index (best-effort); union.
+        candidate_ids: set[str] = {
+            obs_id for obs_id, _ in self._raw_store.scan_expired_tomb_ids_with_project(cutoff_iso)
+        }
+        if not (self._idx.disabled or self._idx._conn is None):  # noqa: SLF001
+            with self._idx._lock:  # noqa: SLF001
+                try:
+                    rows = self._idx._conn.execute(  # noqa: SLF001
+                        'SELECT observation_id FROM obs_index WHERE deleted_at IS NOT NULL AND deleted_at < ?',
+                        (cutoff_iso,),
+                    ).fetchall()
+                    for (obs_id,) in rows:
+                        candidate_ids.add(obs_id)
+                except sqlite3.Error as e:
+                    log.warning('LocalBackend._gc_global_tombs query failed: %s', e)
         purged = 0
-        for (obs_id,) in rows:
+        for obs_id in candidate_ids:
             self._raw_store.delete_obs(obs_id)
             self._raw_store.delete_tomb(obs_id)
             self._idx.physical_delete(obs_id)

@@ -115,6 +115,36 @@ class LocalRawStore:
             self._conn.execute('DELETE FROM local_tomb WHERE observation_id = ?', (observation_id,))
             self._conn.commit()
 
+    def obs_exists(self, observation_id: str) -> bool:
+        """Return True if observation_id is present in local_obs or local_tomb."""
+        with self._lock:
+            row = self._conn.execute(
+                'SELECT 1 FROM local_obs WHERE observation_id = ?'
+                ' UNION ALL SELECT 1 FROM local_tomb WHERE observation_id = ? LIMIT 1',
+                (observation_id, observation_id),
+            ).fetchone()
+        return row is not None
+
+    def scan_expired_tomb_ids_with_project(self, cutoff_iso: str) -> Iterator[tuple[str, str]]:
+        """Yield (observation_id, project) for tombstones older than cutoff_iso.
+
+        project is extracted from payload_json in local_obs via json_extract.
+        Yields '' for project when the obs row is absent from local_obs.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT t.observation_id,
+                       COALESCE(json_extract(o.payload_json, '$.project'), '') AS project
+                FROM local_tomb t
+                LEFT JOIN local_obs o ON t.observation_id = o.observation_id
+                WHERE t.deleted_at < ?
+                """,
+                (cutoff_iso,),
+            ).fetchall()
+        for obs_id, project in rows:
+            yield obs_id, project
+
     def migrate_from_index(self, index_db_path: Path) -> None:
         """Copy pre-Phase2 index.db rows to raw.db.
 

@@ -608,3 +608,44 @@ def test_physical_delete_not_resurrected_by_rebuild(tmp_path: Path, monkeypatch:
     assert backend2.find_observation_by_id(obs.observation_id) is None
 
     reset_backend()
+
+
+def test_physical_delete_observation_split_brain_raw_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B1: physical_delete must remove obs that is in raw.db only (split-brain state)."""
+    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    reset_backend()
+
+    backend = get_backend()
+    assert isinstance(backend, LocalBackend)
+
+    obs = Observation(content='split-brain delete target', project='b1-test')
+
+    # Write directly to raw_store, bypassing index (simulates split-brain).
+    backend._raw_store.put_obs(obs)  # type: ignore[attr-defined]
+
+    # before: index does NOT have the obs (split-brain state confirmed).
+    assert backend.find_observation_by_id(obs.observation_id) is None
+
+    # physical_delete_observation must succeed and remove from raw.db.
+    deleted, _ = backend.physical_delete_observation(obs.observation_id)
+    assert deleted, 'physical_delete must return True for raw-only observation'
+
+    # raw.db must no longer contain the obs.
+    raw_db = tmp_path / 'local' / 'raw.db'
+    conn = sqlite3.connect(str(raw_db))
+    raw_count = conn.execute(
+        'SELECT COUNT(*) FROM local_obs WHERE observation_id = ?',
+        (obs.observation_id,),
+    ).fetchone()[0]
+    conn.close()
+    assert raw_count == 0, 'obs must be removed from raw.db'
+
+    # Reopen: rebuild from raw.db must not resurrect the obs.
+    reset_backend()
+    backend2 = get_backend()
+    assert isinstance(backend2, LocalBackend)
+
+    assert backend2.find_observation_by_id(obs.observation_id) is None
+
+    reset_backend()
