@@ -628,6 +628,29 @@ class LocalIndex:
             like_terms = [term for term in query_terms if len(term) < 3]
         use_fts = bool(fts_terms)
 
+        # ADR-0027: importance-aware ranking. When the caller expressed intent
+        # with a query, importance is the PRIMARY ranking key and the relevance
+        # signal (bm25 / recency) breaks ties within an importance level, so a
+        # critical decision is not buried under a trivial note that merely
+        # mentions the term. Importance-primary (rather than a weighted blend)
+        # is deliberate: SQLite trigram bm25 ranks are ~1e-6 and corpus-
+        # dependent, so no fixed additive weight is stable across stores — but
+        # a 1-5 importance bucket is. Two deliberate exclusions:
+        #   - no-query *browse* listings stay purely chronological (recency is
+        #     the contract of a query-less search; reordering would surprise).
+        #   - cursor pagination (bulk-delete, #66) must keep its
+        #     (created_at, observation_id) ordering or the strict-tuple cursor
+        #     walk skips/repeats rows — never inject importance there.
+        rank_by_importance = bool(query_terms) and not cursor_observation_id
+        imp_plain = 'importance DESC, ' if rank_by_importance else ''
+        if rank_by_importance:
+            # importance first, then bm25 relevance as the in-bucket tiebreak.
+            fts_and_order = 'o.importance DESC, f.rank'
+            fts_or_order = '(f.rank IS NULL), o.importance DESC, f.rank'
+        else:
+            fts_and_order = 'f.rank'
+            fts_or_order = '(f.rank IS NULL), f.rank'
+
         if search_mode == 'and':
             for term in like_terms:
                 where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
@@ -643,7 +666,7 @@ class LocalIndex:
                     'FROM obs_index o '
                     'JOIN fts_match f ON f.observation_id = o.observation_id'
                     f'{fts_where} '
-                    'ORDER BY f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
+                    f'ORDER BY {fts_and_order}, o.created_at DESC, o.observation_id DESC LIMIT ?'
                 )
                 rows_params: list[object] = [match_expr, *params, max(1, limit)]
             else:
@@ -652,8 +675,9 @@ class LocalIndex:
                     sql += ' WHERE ' + ' AND '.join(where)
                 # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
                 # sort key gives a total, stable order for cursor pagination over
-                # rows that share the same ``created_at`` (#66).
-                sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                # rows that share the same ``created_at`` (#66). ``imp_plain`` is
+                # empty on the cursor / browse paths (see rank_by_importance).
+                sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
                 rows_params = [*params, max(1, limit)]
 
         else:  # search_mode == 'or'
@@ -676,7 +700,7 @@ class LocalIndex:
                     'FROM obs_index o '
                     'LEFT JOIN fts_match f ON f.observation_id = o.observation_id'
                     f'{combined_where} '
-                    'ORDER BY (f.rank IS NULL), f.rank, o.created_at DESC, o.observation_id DESC LIMIT ?'
+                    f'ORDER BY {fts_or_order}, o.created_at DESC, o.observation_id DESC LIMIT ?'
                 )
                 rows_params = [match_expr, *params, *like_or_params, max(1, limit)]
             else:
@@ -691,7 +715,7 @@ class LocalIndex:
                     combined_where = (' WHERE ' + ' AND '.join(where)) if where else ''
                 sql = 'SELECT payload_json FROM obs_index'
                 sql += combined_where
-                sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
                 rows_params = [*params, *like_or_params, max(1, limit)]
 
         with self._lock:
@@ -711,7 +735,7 @@ class LocalIndex:
                         like_sql = 'SELECT payload_json FROM obs_index'
                         if like_where:
                             like_sql += ' WHERE ' + ' AND '.join(like_where)
-                        like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                        like_sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
                         like_params.append(max(1, limit))
                     else:  # 'or' fallback: all terms become OR LIKE.
                         all_or_terms = [*fts_terms, *like_terms]
@@ -726,7 +750,7 @@ class LocalIndex:
                             like_sql += ' WHERE ' + ' AND '.join(where)
                         elif or_fallback_preds:
                             like_sql += ' WHERE (' + ' OR '.join(or_fallback_preds) + ')'
-                        like_sql += ' ORDER BY created_at DESC, observation_id DESC LIMIT ?'
+                        like_sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
                         like_params = [*params, *or_fallback_p, max(1, limit)]
                     try:
                         rows = self._conn.execute(like_sql, like_params).fetchall()
