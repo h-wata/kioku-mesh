@@ -308,9 +308,9 @@ def test_backend_switch_does_not_shadow_local_rows(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
     results = get_backend().search_observations(query='B2 regression', project='b2test')
-    assert any(r.observation_id == obs.observation_id for r in results), (
-        'local-only row must survive rebuild_from_zenoh on the zenoh cache DB'
-    )
+    assert any(
+        r.observation_id == obs.observation_id for r in results
+    ), 'local-only row must survive rebuild_from_zenoh on the zenoh cache DB'
 
 
 # ---------------------------------------------------------------------------

@@ -186,7 +186,8 @@ class LocalRawStore:
                         continue
                     obs_rows.append((observation_id, payload_json, obs.created_at))
 
-            from datetime import datetime, timezone  # noqa: PLC0415
+            from datetime import datetime  # noqa: PLC0415
+            from datetime import timezone
 
             completed_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
             try:

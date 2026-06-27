@@ -1188,7 +1188,8 @@ class LocalIndex:
                     ).fetchone()
                     if fts_count != live_count:
                         log.warning(
-                            '_rebuild_from_observations FTS drift detected (%d vs %d live); falling back to full rebuild',
+                            '_rebuild_from_observations FTS drift detected'
+                            ' (%d vs %d live); falling back to full rebuild',
                             fts_count,
                             live_count,
                         )
