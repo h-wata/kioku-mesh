@@ -90,10 +90,14 @@ class LocalBackend:
     def __init__(self) -> None:
         from ..core.identity import state_dir
         from .local_index import LocalIndex
+        from .local_raw_store import LocalRawStore
 
         local_dir = state_dir() / 'local'
         local_dir.mkdir(parents=True, exist_ok=True)
+        self._raw_store = LocalRawStore(local_dir / 'raw.db')
+        self._raw_store.migrate_from_index(local_dir / 'index.db')
         self._idx = LocalIndex.connect(str(local_dir / 'index.db'))
+        self._idx.rebuild_from_raw_records(self._raw_store.scan_obs(), self._raw_store.scan_tombs())
 
     def put_observation(self, obs: Observation) -> None:
         self._idx.upsert(obs)
@@ -222,6 +226,7 @@ class LocalBackend:
 
     def close(self) -> None:
         self._idx.close()
+        self._raw_store.close()
 
 
 class ZenohBackend:
