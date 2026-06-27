@@ -10,6 +10,12 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Added
+
+- Added shadow visibility to `status` output (live/tombstoned/shadowed counts) and
+  `doctor` check (`check_shadow_visibility`); added `list_shadowed_obs` to LocalIndex
+  and invariant tests for INV-2/INV-3/INV-4/INV-5 (ADR-0028 Phase 1)
+
 ## [0.7.0] - 2026-06-26
 
 **Theme: Full-text search additions and stabilization**

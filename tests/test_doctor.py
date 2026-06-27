@@ -375,3 +375,79 @@ def test_cli_doctor_exit_zero_when_all_pass(
     rc = cli_main(['doctor'])
     assert rc == 0
     assert 'all checks passed' in capsys.readouterr().out
+
+
+# -- check_shadow_visibility ---------------------------------------------------
+
+
+def _make_index_with_shadowed(tmp_path: 'Path', *, n_shadowed: int = 0) -> object:
+    """Create a LocalIndex with ``n_shadowed`` rebuild-shadowed observations."""
+    from kioku_mesh.memory.local_index import LocalIndex  # noqa: PLC0415
+    from kioku_mesh.models import Observation  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'shadow_check.db'))
+    for i in range(n_shadowed):
+        obs = Observation(content=f'shadow obs {i}', project='p', agent_family='test')
+        idx.upsert(obs)
+        idx.mark_shadowed_missing(obs.observation_id, f'2026-06-0{i + 1}T00:00:00.000000Z')
+    return idx
+
+
+def test_check_shadow_visibility_pass(tmp_path: 'Path') -> None:
+    """No shadowed rows → PASS."""
+    from kioku_mesh.doctor import check_shadow_visibility  # noqa: PLC0415
+
+    idx = _make_index_with_shadowed(tmp_path, n_shadowed=0)
+    result = check_shadow_visibility(index=idx)
+    assert result.status is CheckStatus.PASS
+    assert 'shadowed observations: 0' in result.summary
+    assert result.details['shadowed'] == 0
+
+
+def test_check_shadow_visibility_warn(tmp_path: 'Path') -> None:
+    """Shadowed rows → WARN with shadow explanation."""
+    from kioku_mesh.doctor import check_shadow_visibility  # noqa: PLC0415
+
+    idx = _make_index_with_shadowed(tmp_path, n_shadowed=2)
+    result = check_shadow_visibility(index=idx)
+    assert result.status is CheckStatus.WARN
+    assert 'shadowed observations: 2' in result.summary
+    assert 'hidden from search' in result.summary
+    assert result.details['shadowed'] == 2
+    assert result.hint != ''
+
+
+def test_run_all_checks_includes_shadow() -> None:
+    """run_all_checks must include a check named 'shadow_visibility'."""
+    names = [r.name for r in doctor.run_all_checks()]
+    assert 'shadow_visibility' in names
+
+
+def test_run_all_checks_shadow_after_fts() -> None:
+    """shadow_visibility must appear after 'fts5' in the check list."""
+    names = [r.name for r in doctor.run_all_checks()]
+    assert names.index('shadow_visibility') > names.index('fts5')
+
+
+def test_check_shadow_visibility_json_output(tmp_path: 'Path') -> None:
+    """to_json includes the shadow_visibility check entry."""
+    from kioku_mesh.doctor import check_shadow_visibility  # noqa: PLC0415
+
+    idx = _make_index_with_shadowed(tmp_path, n_shadowed=1)
+    result = check_shadow_visibility(index=idx)
+    payload = json.loads(to_json([result]))
+    check_names = [c['name'] for c in payload['checks']]
+    assert 'shadow_visibility' in check_names
+    check = next(c for c in payload['checks'] if c['name'] == 'shadow_visibility')
+    assert check['status'] == 'warn'
+    assert check['details']['shadowed'] == 1
+
+
+def test_check_shadow_visibility_text_output(tmp_path: 'Path') -> None:
+    """format_text includes [WARN] shadow_visibility line."""
+    from kioku_mesh.doctor import check_shadow_visibility  # noqa: PLC0415
+
+    idx = _make_index_with_shadowed(tmp_path, n_shadowed=1)
+    result = check_shadow_visibility(index=idx)
+    rendered = format_text([result])
+    assert '[WARN] shadow_visibility' in rendered

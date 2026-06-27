@@ -502,6 +502,69 @@ def check_fts5(index: object = None) -> CheckResult:
     )
 
 
+# ADR-0028 Phase 1: shadow visibility check.
+
+
+def check_shadow_visibility(index: object = None) -> CheckResult:
+    """Report the number of rebuild-shadowed observations in the local index.
+
+    Shadowed observations were present in the local index but not seen during
+    the last ``rebuild_from_zenoh`` sweep. They are hidden from search and
+    ranking but have not been physically deleted. A WARN means the index has
+    unresolved shadow state that may indicate a rebuild coverage gap; running
+    ``kioku-mesh gc --shadows`` or waiting for GC retention to expire will
+    eventually clean them up.
+    """
+    from .memory.local_index import LocalIndex  # noqa: PLC0415
+
+    idx: object = index
+    if idx is None:
+        try:
+            idx = LocalIndex.connect()
+        except Exception:  # noqa: BLE001
+            return CheckResult(
+                name='shadow_visibility',
+                status=CheckStatus.WARN,
+                summary='shadow visibility check skipped: could not open local index',
+                hint='Check KIOKU_MESH_INDEX_DB or run `kioku-mesh init`.',
+            )
+    try:
+        rows = idx.list_shadowed_obs(limit=10_000)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001
+        return CheckResult(
+            name='shadow_visibility',
+            status=CheckStatus.WARN,
+            summary='shadow visibility check skipped: list_shadowed_obs failed',
+        )
+    shadowed_count = len(rows)
+    if shadowed_count == 0:
+        return CheckResult(
+            name='shadow_visibility',
+            status=CheckStatus.PASS,
+            summary='shadowed observations: 0',
+            details={'shadowed': 0},
+        )
+    # Build per-project summary for details.
+    by_project: dict[str, int] = {}
+    for _obs_id, proj, _created_at, _shadowed_at, _summary in rows:
+        key = proj or '(no project)'
+        by_project[key] = by_project.get(key, 0) + 1
+    return CheckResult(
+        name='shadow_visibility',
+        status=CheckStatus.WARN,
+        summary=(
+            f'shadowed observations: {shadowed_count} '
+            '(covered by newer obs, hidden from search, not yet physically deleted)'
+        ),
+        hint=(
+            'Shadowed rows are cleaned up automatically by `kioku-mesh gc --shadows`. '
+            'If counts are unexpectedly high, re-run `rebuild_from_zenoh` or inspect '
+            'with `kioku-mesh status --show-shadows`.'
+        ),
+        details={'shadowed': shadowed_count, 'by_project': by_project},
+    )
+
+
 # ADR-0026 §C: conflicting-latest check.
 
 # Upper bound on the live set this check scans. Mirrors the supersede
@@ -634,6 +697,7 @@ def run_all_checks() -> list[CheckResult]:
         check_embedded_router(),
         check_tls_certs(),
         check_fts5(),
+        check_shadow_visibility(),
         check_conflicting_latest(),
     ]
 
