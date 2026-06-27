@@ -458,6 +458,14 @@ def _cmd_status(args: argparse.Namespace) -> int:  # noqa: ARG001
     print(f'last_put_at_iso: {status.last_put_at_iso or "-"}')
     print(f'last_put_status: {status.last_put_status}')
     print(f'pending_puts: {status.pending_puts}')
+    print(f'observations_live: {status.live}')
+    print(f'observations_tombstoned: {status.tombstoned}')
+    print(f'observations_shadowed: {status.shadowed}')
+    if status.shadowed > 0:
+        print(
+            'hint: shadowed observations exist (covered by newer obs, hidden from search but not deleted).'
+            ' Run `kioku-mesh doctor` for details or `kioku-mesh status --show-shadows` to list them.'
+        )
     print(f'count (within limit {MAX_SEARCH}): {len(recent)}{" (limit may be reached)" if truncated else ""}')
     for family, count in sorted(by_family.items()):
         print(f'  family {family}: {count}')

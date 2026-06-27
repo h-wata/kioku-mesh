@@ -374,6 +374,45 @@ def test_cli_status_local_backend(
     assert 'pending_puts: 0' in out
 
 
+def test_cli_status_shows_live_tombstoned_shadowed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """Status output must include live, tombstoned, and shadowed observation counts."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    from kioku_mesh.backend import BackendStatus
+    from kioku_mesh.backend import reset_backend
+
+    reset_backend()
+
+    # Inject a fake get_status returning known counts.
+    from kioku_mesh import __main__ as main_mod
+
+    fake_status = BackendStatus(mode='local', live=3, tombstoned=1, shadowed=2)
+
+    original_get_backend = main_mod.get_backend
+
+    class _FakeBackend:
+        def search_observations(self, **kwargs: object) -> list[object]:  # noqa: ARG002
+            return []
+
+        def get_status(self) -> BackendStatus:
+            return fake_status
+
+    monkeypatch.setattr(main_mod, 'get_backend', lambda: _FakeBackend())
+
+    rc = cli_main(['status'])
+
+    monkeypatch.setattr(main_mod, 'get_backend', original_get_backend)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'observations_live: 3' in out
+    assert 'observations_tombstoned: 1' in out
+    assert 'observations_shadowed: 2' in out
+    assert 'hint:' in out  # shadowed > 0 triggers hint
+
+
 def test_cli_drain_pending_replays_queued_rows(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,

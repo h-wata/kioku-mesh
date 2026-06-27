@@ -850,6 +850,42 @@ class LocalIndex:
                 return []
         return [row[0] for row in rows]
 
+    def list_shadowed_obs(
+        self,
+        project: str = '',
+        limit: int = 50,
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Return (observation_id, project, created_at, shadowed_at, summary) for shadowed rows.
+
+        Drives ADR-0028 Phase 1 shadow inspect path. Rows with
+        ``shadowed_at IS NOT NULL AND deleted_at IS NULL`` are rebuild-shadowed
+        observations: they were not seen during the last Zenoh rebuild and are
+        hidden from search, but have not been physically deleted yet.
+
+        ``project`` narrows the scan when non-empty. Results are ordered
+        ``shadowed_at DESC`` so the most-recently-shadowed rows appear first.
+        """
+        if self._disabled or self._conn is None:
+            return []
+        sql = (
+            'SELECT observation_id, project, created_at, shadowed_at, summary '
+            'FROM obs_index '
+            'WHERE shadowed_at IS NOT NULL AND deleted_at IS NULL'
+        )
+        params: list[object] = []
+        if project:
+            sql += ' AND project = ?'
+            params.append(project)
+        sql += ' ORDER BY shadowed_at DESC LIMIT ?'
+        params.append(limit)
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.list_shadowed_obs failed: %s', e)
+                return []
+        return [(row[0], row[1] or '', row[2] or '', row[3] or '', row[4] or '') for row in rows]
+
     def find_by_id(self, observation_id: str, include_deleted: bool = False) -> Observation | None:
         """Return the observation with id ``observation_id`` or None.
 

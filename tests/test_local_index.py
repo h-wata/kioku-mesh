@@ -2216,3 +2216,200 @@ def test_search_mode_or_whitespace_query_is_recency(tmp_path: Path) -> None:
         assert obs2.observation_id in ids
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase 1 invariant tests
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_preserves_tombstone_state(tmp_path: Path) -> None:
+    """[INV-2] rebuild_from_zenoh reconstructs tombstone state from Raw payloads.
+
+    obs + tombstone are fed to _FakeSession; after rebuild from empty index,
+    search must not return the tombstoned obs and find_by_id with
+    include_deleted must locate it with deleted_at set.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'inv2_tomb.db'))
+    try:
+        obs = _mk_obs('will be tombstoned', project='inv2')
+        tomb = Tombstone(observation_id=obs.observation_id, deleted_at='2026-06-01T00:00:00.000000Z')
+        session = _FakeSession([obs], [tomb])
+
+        stats = idx.rebuild_from_zenoh(session)
+
+        assert stats.marked_deleted >= 1
+        # Tombstoned row must not appear in live search.
+        live_ids = {r.observation_id for r in idx.search(project='inv2')}
+        assert obs.observation_id not in live_ids, 'tombstoned obs must be hidden from search'
+        # find_by_id with include_deleted must return the row (tombstone not physically deleted).
+        found = idx.find_by_id(obs.observation_id, include_deleted=True)
+        assert found is not None
+    finally:
+        idx.close()
+
+
+def test_rebuild_preserves_shadow_state(tmp_path: Path) -> None:
+    """[INV-2/INV-3] rebuild marks obs absent from Zenoh as shadowed; FTS reflects only live rows.
+
+    An obs present in the index but absent from the session's replies is
+    shadowed by rebuild. After rebuild, search must hide it (INV-2 derived
+    view matches live state) and the FTS table must not include it (INV-3
+    FTS derived only from live rows).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'inv2_shadow.db'))
+    try:
+        live_obs = _mk_obs('live after rebuild', project='inv23')
+        shadow_obs = _mk_obs('absent from zenoh', project='inv23')
+        idx.upsert(live_obs)
+        idx.upsert(shadow_obs)
+
+        # Session only returns live_obs; shadow_obs will be rebuild-shadowed.
+        stats = idx.rebuild_from_zenoh(_FakeSession([live_obs], []))
+
+        assert stats.shadowed >= 1
+        # search must not include the shadowed obs.
+        live_ids = {r.observation_id for r in idx.search(project='inv23')}
+        assert live_obs.observation_id in live_ids
+        assert shadow_obs.observation_id not in live_ids, 'shadowed obs must be hidden from search'
+        # FTS must not include the shadowed obs (INV-3).
+        fts_results = idx.search(query='absent', project='inv23')
+        fts_ids = {r.observation_id for r in fts_results}
+        assert shadow_obs.observation_id not in fts_ids, 'shadowed obs must not appear in FTS results'
+    finally:
+        idx.close()
+
+
+def test_rebuild_preserves_superseded_by(tmp_path: Path) -> None:
+    """[INV-2/INV-4] rebuild reconstructs superseded_by from obs payloads.
+
+    obs_B supersedes obs_A. After rebuilding an empty index from a session
+    containing both, find_by_id on obs_A must return superseded_by set to
+    obs_B.observation_id (INV-4: supersede is a distinct state with its own
+    read semantics, and INV-2: derived view is reconstructable from raw obs).
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'inv24_supersede.db'))
+    try:
+        obs_a = _mk_obs('original decision', project='inv24')
+        obs_b = Observation(
+            content='updated decision',
+            project='inv24',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            supersedes=[obs_a.observation_id],
+        )
+        # Rebuild from session containing both obs.
+        idx.rebuild_from_zenoh(_FakeSession([obs_a, obs_b], []))
+
+        found_a = idx.find_by_id(obs_a.observation_id, include_deleted=True)
+        assert found_a is not None
+        assert hasattr(found_a, '_extras')
+        assert found_a._extras.get('superseded_by') == obs_b.observation_id, (  # noqa: SLF001
+            f'superseded_by must be restored after rebuild; got extras={found_a._extras!r}'  # noqa: SLF001
+        )
+    finally:
+        idx.close()
+
+
+def test_gc_tombstones_does_not_evict_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """[INV-5] gc_tombstones must not delete live observations regardless of age or importance.
+
+    Seeds an old low-importance live obs (no deleted_at). Runs gc_tombstones
+    with retention_days=0 (aggressive cutoff). The live obs must still be
+    searchable afterwards — GC may only remove tombstoned rows.
+    """
+    from kioku_mesh.backend import LocalBackend  # noqa: PLC0415
+    from kioku_mesh.backend import reset_backend  # noqa: PLC0415
+
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_STATE_DIR', str(tmp_path / 'state'))
+    reset_backend()
+
+    backend = LocalBackend.__new__(LocalBackend)
+    idx = LocalIndex.connect(str(tmp_path / 'inv5_tomb.db'))
+    backend._idx = idx  # type: ignore[attr-defined]
+
+    live = Observation(
+        content='ancient live obs',
+        project='inv5',
+        importance=1,
+        created_at='2020-01-01T00:00:00.000000Z',
+        agent_family='claude',
+        client_id='test',
+        pc_id='testpc',
+        session_id='testsession',
+    )
+    idx.upsert(live)
+
+    backend.gc_tombstones(retention_days=0, project='inv5')
+
+    ids = {r.observation_id for r in idx.search(project='inv5')}
+    assert live.observation_id in ids, 'live obs must survive gc_tombstones regardless of age/importance'
+
+
+def test_gc_shadows_does_not_evict_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """[INV-5] gc_shadows must not delete live observations.
+
+    Seeds a live obs with no shadowed_at. Runs gc_shadows with
+    retention_days=0. The live obs must still be searchable afterwards.
+    """
+    from kioku_mesh.backend import LocalBackend  # noqa: PLC0415
+    from kioku_mesh.backend import reset_backend  # noqa: PLC0415
+
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    monkeypatch.setenv('KIOKU_MESH_STATE_DIR', str(tmp_path / 'state'))
+    reset_backend()
+
+    backend = LocalBackend.__new__(LocalBackend)
+    idx = LocalIndex.connect(str(tmp_path / 'inv5_shadow.db'))
+    backend._idx = idx  # type: ignore[attr-defined]
+
+    live = Observation(
+        content='live obs not shadowed',
+        project='inv5s',
+        importance=1,
+        created_at='2020-01-01T00:00:00.000000Z',
+        agent_family='claude',
+        client_id='test',
+        pc_id='testpc',
+        session_id='testsession',
+    )
+    idx.upsert(live)
+
+    backend.gc_shadows(retention_days=0, project='inv5s')
+
+    ids = {r.observation_id for r in idx.search(project='inv5s')}
+    assert live.observation_id in ids, 'live obs must survive gc_shadows regardless of age/importance'
+
+
+def test_list_shadowed_obs(tmp_path: Path) -> None:
+    """list_shadowed_obs returns only shadowed rows, excluding live and tombstoned."""
+    idx = LocalIndex.connect(str(tmp_path / 'list_shadow.db'))
+    try:
+        live = _mk_obs('live obs', project='ls')
+        shadowed = _mk_obs('shadowed obs', project='ls')
+        tombstoned = _mk_obs('tombstoned obs', project='ls')
+
+        idx.upsert(live)
+        idx.upsert(shadowed)
+        idx.upsert(tombstoned)
+
+        idx.mark_shadowed_missing(shadowed.observation_id, '2026-06-01T00:00:00.000000Z')
+        idx.mark_deleted(tombstoned.observation_id, '2026-06-01T00:00:00.000000Z')
+
+        rows = idx.list_shadowed_obs()
+
+        shadow_ids = {row[0] for row in rows}
+        assert shadowed.observation_id in shadow_ids, 'shadowed obs must appear in list_shadowed_obs'
+        assert live.observation_id not in shadow_ids, 'live obs must not appear in list_shadowed_obs'
+        assert tombstoned.observation_id not in shadow_ids, 'tombstoned obs must not appear in list_shadowed_obs'
+
+        # Each row tuple must be (obs_id, project, created_at, shadowed_at, summary).
+        for row in rows:
+            assert len(row) == 5
+            assert row[1] == 'ls'  # project
+            assert row[3] != ''  # shadowed_at is non-empty
+    finally:
+        idx.close()
