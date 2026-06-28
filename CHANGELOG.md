@@ -23,10 +23,12 @@ versions without a migration path until `1.0.0`.
   memory_types/source_files/references filters and grouped Markdown output (ADR-0028 Phase4)
 - ADR-0028 Phase5: save-quality guardrails (`save_lint`) — warn-only validators
   (generic noise, missing subject, secret pattern) for CLI and MCP save_observation.
-  MCP `save_observation` now returns a JSON object
+  MCP `save_observation` now returns a JSON string encoding
   `{observation_id, status, visibility, warnings}` (with optional `supersede_candidates`)
-  instead of plain text. The CLI continues to return plain text
-  `saved: <id> (visibility=...)` unchanged.
+  instead of plain text. Compatibility note: MCP clients must parse the returned
+  string as JSON to access individual fields.
+  The CLI `save` command continues to return plain text `saved: <id> (visibility=...)`
+  unchanged — no parsing required.
 
 ## [0.7.0] - 2026-06-26
 

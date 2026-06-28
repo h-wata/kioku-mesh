@@ -481,7 +481,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(f'observations_shadowed: {status.shadowed}')
     if status.shadowed > 0:
         print(
-            'hint: shadowed observations exist (covered by newer obs, hidden from search but not deleted).'
+            'hint: shadowed observations exist'
+            ' (missing from source-of-truth during rebuild,'
+            ' hidden from search, not yet physically deleted).'
             ' Run `kioku-mesh doctor` for details or `kioku-mesh status --show-shadows` to list them.'
         )
     print(f'count (within limit {MAX_SEARCH}): {len(recent)}{" (limit may be reached)" if truncated else ""}')
