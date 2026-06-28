@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>Shared memory for AI coding agents, across tools and machines.</strong>
+  <strong>A shared memory mesh for AI coding agents — across every tool and machine you own.</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 `kioku` (記憶) means memory.
 
-kioku-mesh gives coding agents a shared memory store. Claude Code, Codex CLI,
+kioku-mesh gives coding agents a shared memory mesh. Claude Code, Codex CLI,
 Gemini CLI, and other MCP clients can save and search the same observations from
 one machine or from several machines on a trusted LAN/VPN mesh.
 
