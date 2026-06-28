@@ -40,7 +40,15 @@ _INGEST_SETTLE = 0.25
 
 
 def _saved_id(text: str) -> str:
-    """Extract the observation id from ``saved: <id> (visibility=...)``."""
+    """Extract observation id from save_observation response (JSON or legacy text)."""
+    import json as _json
+
+    try:
+        data = _json.loads(text)
+        if isinstance(data, dict) and 'observation_id' in data:
+            return data['observation_id']
+    except (ValueError, TypeError):
+        pass
     return text.strip().split()[1]
 
 
@@ -758,3 +766,113 @@ def test_cli_bulk_delete_emits_local_index_hint(
     assert rc == 0
     captured = capsys.readouterr()
     assert 'kioku-mesh --rebuild gc --retention-days 0 --project <name>' in captured.err
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase5: save-lint CLI tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    MESH_MEM_MCP is None,
+    reason='kioku-mesh-mcp console script not installed',
+)
+def test_save_lint_generic_noise_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Subprocess MCP: GENERIC_NOISE warning appears in save_observation response for 'done'."""
+    import json as _json
+
+    async def _go() -> str:
+        env = os.environ.copy()
+        transport = StdioTransport(command=MESH_MEM_MCP, args=[], env=env)
+        async with Client(transport) as client:
+            result = await client.call_tool('save_observation', {'content': 'done', 'project': 'lint-subproc'})
+            assert not result.is_error
+            return result.data
+
+    msg = asyncio.run(_go())
+    data = _json.loads(msg)
+    codes = [w['code'] for w in data['warnings']]
+    assert 'GENERIC_NOISE' in codes
+
+
+@pytest.mark.skipif(
+    MESH_MEM_MCP is None,
+    reason='kioku-mesh-mcp console script not installed',
+)
+def test_save_lint_done_content_save_succeeds_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Subprocess MCP: 'done' content is still persisted despite GENERIC_NOISE warning."""
+    import json as _json
+
+    async def _go() -> str:
+        env = os.environ.copy()
+        transport = StdioTransport(command=MESH_MEM_MCP, args=[], env=env)
+        async with Client(transport) as client:
+            result = await client.call_tool('save_observation', {'content': 'done', 'project': 'lint-subproc-persist'})
+            assert not result.is_error
+            return result.data
+
+    msg = asyncio.run(_go())
+    data = _json.loads(msg)
+    obs_id = data['observation_id']
+    assert len(obs_id) == 32
+
+    time.sleep(_INGEST_SETTLE)
+    found = store.find_observation_by_id(obs_id)
+    assert found is not None
+
+
+@pytest.mark.skipif(
+    MESH_MEM_MCP is None,
+    reason='kioku-mesh-mcp console script not installed',
+)
+def test_save_lint_secret_pattern_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Subprocess MCP: SECRET_PATTERN warning is emitted when content contains API key pattern."""
+    import json as _json
+
+    async def _go() -> str:
+        env = os.environ.copy()
+        transport = StdioTransport(command=MESH_MEM_MCP, args=[], env=env)
+        async with Client(transport) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'token=sk-ABCDEFGHIJKLMNOPQRSTU012345',  # pragma: allowlist secret
+                    'project': 'lint-secret',
+                },
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = asyncio.run(_go())
+    data = _json.loads(msg)
+    codes = [w['code'] for w in data['warnings']]
+    assert 'SECRET_PATTERN' in codes
+
+
+@pytest.mark.skipif(
+    MESH_MEM_MCP is None,
+    reason='kioku-mesh-mcp console script not installed',
+)
+def test_save_lint_no_warning_normal_save_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Subprocess MCP: normal, detailed content produces an empty warnings list."""
+    import json as _json
+
+    async def _go() -> str:
+        env = os.environ.copy()
+        transport = StdioTransport(command=MESH_MEM_MCP, args=[], env=env)
+        async with Client(transport) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'Root cause: zenoh session leaked when two callers shared the session concurrently.',
+                    'memory_type': 'bug',
+                    'subject': 'zenoh_session_leak',
+                    'project': 'lint-no-warn',
+                },
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = asyncio.run(_go())
+    data = _json.loads(msg)
+    assert data['warnings'] == []
