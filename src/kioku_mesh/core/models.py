@@ -149,6 +149,9 @@ class Observation:
                 raw_type,
             )
             parsed['memory_type'] = 'note'
+            # ADR-0028 Phase 6: preserve raw value in _extras so the original
+            # memory_type survives round-trips even when clamped for old readers.
+            parsed['_raw_memory_type'] = raw_type
         raw_visibility = parsed.get('visibility')
         if raw_visibility is not None and raw_visibility not in VALID_VISIBILITIES:
             # A future tier we do not know. Clamp to '' so parsing succeeds;

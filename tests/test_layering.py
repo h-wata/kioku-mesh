@@ -175,6 +175,58 @@ def test_bridge_may_import_messaging_and_memory() -> None:
     ).exists(), 'bridge/message_memory.py が存在しません — Phase 4 bridge が実装されていません'
 
 
+DERIVED_VIEW_MODULES = [
+    'embedding_store',
+    'graph_store',
+    'summary_store',
+    'recall_cache',
+]
+
+DERIVED_VIEW_REBUILD_SYMBOL = 'rebuild_from_raw'
+
+
+def test_derived_view_modules_have_rebuild_path() -> None:
+    """INV-7: Future derived views must expose a rebuild path from raw Observation/Tombstone.
+
+    ADR-0028 invariant 7 states:
+    "Future derived views such as embedding, graph, summary, and recall cache
+    cannot contain non-reconstructable authority."
+
+    Every persisted derived view module in memory/ must expose a function
+    named 'rebuild_from_raw' (or analogous symbol) so the derived state can
+    be reconstructed from raw Observation/Tombstone input. This test passes
+    while none of the derived view modules exist; it FAILS as soon as one is
+    added without the required rebuild symbol.
+    """
+    memory_dir = SRC_ROOT / 'memory'
+    violations: list[str] = []
+    for module_name in DERIVED_VIEW_MODULES:
+        module_file = memory_dir / f'{module_name}.py'
+        if not module_file.exists():
+            continue
+        tree = ast.parse(module_file.read_text(encoding='utf-8'))
+        defined = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        if DERIVED_VIEW_REBUILD_SYMBOL not in defined:
+            violations.append(
+                f'{module_name}.py: missing {DERIVED_VIEW_REBUILD_SYMBOL!r} — '
+                'INV-7 requires every derived view to have a rebuild path from raw Observation/Tombstone'
+            )
+    assert not violations, 'Derived view modules violate INV-7 (non-reconstructable authority):\n' + '\n'.join(
+        violations
+    )
+
+
+def test_derived_view_modules_policy_is_documented() -> None:
+    """INV-7 policy checklist: confirms this file documents the layering gate for derived views.
+
+    This is a permanent policy marker. Removing or weakening the
+    test_derived_view_modules_have_rebuild_path test above violates ADR-0028
+    INV-7 and must be accompanied by an ADR supersession.
+    """
+    assert DERIVED_VIEW_MODULES, 'DERIVED_VIEW_MODULES must list at least one future module name'
+    assert DERIVED_VIEW_REBUILD_SYMBOL, 'DERIVED_VIEW_REBUILD_SYMBOL must be a non-empty string'
+
+
 def test_bridge_does_not_create_memory_messaging_cycle() -> None:
     """ADR-0023 (O1): bridge must not make memory import messaging or vice versa.
 

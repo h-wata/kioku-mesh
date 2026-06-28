@@ -220,6 +220,35 @@ def test_observation_extras_dataclass_field_wins_on_collision() -> None:
     assert result['project'] == 'p1'
 
 
+def test_observation_unknown_memory_type_raw_value_preserved() -> None:
+    """Unknown memory_type is clamped to 'note' but raw value is kept in _extras['_raw_memory_type'].
+
+    ADR-0028 Phase 6: from_json must not irreversibly lose the original
+    memory_type when clamping for old-reader compatibility.
+    """
+    raw = {
+        'content': 'from a future peer',
+        'memory_type': 'future_type',
+        'observation_id': 'a' * 32,
+    }
+    obs = Observation.from_json(json.dumps(raw))
+    assert obs.memory_type == 'note'
+    assert obs._extras['_raw_memory_type'] == 'future_type'
+
+    # Round-trip: from_json → to_json → from_json must still expose the raw value.
+    restored = Observation.from_json(obs.to_json())
+    assert restored.memory_type == 'note'
+    assert restored._extras['_raw_memory_type'] == 'future_type'
+
+
+def test_observation_known_memory_type_does_not_set_raw_extras() -> None:
+    """Known memory_type must not set _extras['_raw_memory_type'] (existing behaviour unchanged)."""
+    for mt in VALID_MEMORY_TYPES:
+        obs = Observation.from_json(json.dumps({'content': 'x', 'memory_type': mt}))
+        assert obs.memory_type == mt
+        assert '_raw_memory_type' not in obs._extras
+
+
 def test_observation_from_json_clamps_unknown_memory_type(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clamp unknown memory_type to 'note' for forward-compat.
 
