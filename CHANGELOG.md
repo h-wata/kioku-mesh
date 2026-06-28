@@ -19,6 +19,8 @@ versions without a migration path until `1.0.0`.
   (live/tombstoned/shadowed/superseded/physical-missing) の表面化。
   `get_memory`(MCP) および `get-memory`(CLI) のレスポンスに `state` フィールドを追加(additive)。
   CLI に `--include-hidden` オプション追加。既存インタフェース変更なし。
+- Add `recall_context` MCP tool for additive filtered context recall with
+  memory_types/source_files/references filters and grouped Markdown output (ADR-0028 Phase4)
 
 ## [0.7.0] - 2026-06-26
 

@@ -424,6 +424,141 @@ def get_memory(observation_id: str) -> str:
     return '\n'.join(lines)
 
 
+def _normalize_list_filter(v: list[str] | None) -> list[str] | None:
+    """Return cleaned list or None (meaning no filter)."""
+    if v is None:
+        return None
+    clean = [s for s in v if s]
+    return clean if clean else None
+
+
+def _resolve_active_index():  # noqa: ANN202
+    """Return the active LocalIndex, or None if the index is disabled."""
+    from .memory.local_index import LocalIndex  # noqa: PLC0415
+
+    backend = get_backend()
+    idx = getattr(backend, '_idx', None) or get_index()
+    if idx is None or (isinstance(idx, LocalIndex) and idx.disabled):
+        return None
+    return idx
+
+
+def _clamp_recall_limit(limit: int) -> int:
+    return max(1, min(limit, 100))
+
+
+def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str:
+    if not hits:
+        return 'No matching current context.'
+    lines = [f'recall_context: {total} result(s)', filters_summary, '']
+    # Group by (project or "-", memory_type) in first-hit order.
+    groups: dict[tuple[str, str], list] = {}
+    for item in hits:
+        obs = item['obs']
+        key = (obs.project or '-', obs.memory_type)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(item)
+    for (proj, mtype), items in groups.items():
+        lines.append(f'### project={proj} / memory_type={mtype}')
+        lines.append('')
+        for item in items:
+            obs = item['obs']
+            state = item.get('state', 'live')
+            lines.append(f'id: {obs.observation_id}')
+            lines.append(f'state: {state}')
+            lines.append(f'importance: {obs.importance}')
+            lines.append(f'created_at: {obs.created_at}')
+            lines.append(f'subject: {obs.subject or "-"}')
+            lines.append(f'summary: {obs.summary or "-"}')
+            lines.append(f'tags: {", ".join(obs.tags) if obs.tags else "-"}')
+            lines.append(f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}')
+            lines.append(f'references: {", ".join(obs.references) if obs.references else "-"}')
+            if obs.supersedes:
+                lines.append(f'supersedes: {", ".join(obs.supersedes)}')
+            superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
+            if superseded_by:
+                lines.append(f'superseded_by: {superseded_by}')
+            lines.append('content:')
+            lines.append(obs.content)
+            lines.append('')
+    return '\n'.join(lines)
+
+
+@mcp.tool()
+def recall_context(
+    query: str = '',
+    project: str = '',
+    memory_types: list[str] | None = None,
+    source_files: list[str] | None = None,
+    references: list[str] | None = None,
+    since_iso: str = '',
+    limit: int = 20,
+    search_mode: str = 'and_or',
+) -> str:
+    """Recall current context with additive filters for memory_types, source_files, and references.
+
+    Returns a deterministic grouped Markdown view of live observations.
+    Hidden states (tombstoned, shadowed, superseded) are excluded by default.
+    Requires the local index (use search_memory as fallback if index is disabled).
+
+    Args:
+        query: recall intent; empty means browse recent context after other filters.
+        project: optional exact project filter.
+        memory_types: optional list of memory_type values (must be in VALID_MEMORY_TYPES).
+        source_files: optional exact-match source_files filter.
+        references: optional exact-match references filter.
+        since_iso: optional lower created_at bound (ISO 8601).
+        limit: maximum results (clamped to 1..100).
+        search_mode: 'and' | 'or' | 'and_or' (default and_or).
+    """
+    if search_mode not in ('and', 'or', 'and_or'):
+        return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"
+    if memory_types is not None:
+        invalid = [t for t in memory_types if t and t not in VALID_MEMORY_TYPES]
+        if invalid:
+            return f'memory_types contains invalid values {invalid}. Must be from {sorted(VALID_MEMORY_TYPES)}.'
+    memory_types_norm = _normalize_list_filter(memory_types)
+    source_files_norm = _normalize_list_filter(source_files)
+    references_norm = _normalize_list_filter(references)
+    idx = _resolve_active_index()
+    if idx is None:
+        return 'recall_context requires the local index; run without KIOKU_MESH_DISABLE_INDEX=1 or use search_memory.'
+    limit = _clamp_recall_limit(limit)
+    hits_obs = idx.search(
+        query=query,
+        project=project,
+        since_iso=since_iso,
+        limit=limit,
+        search_mode=search_mode,
+        include_deleted=False,
+        include_superseded=False,
+        memory_types=memory_types_norm,
+        source_files=source_files_norm,
+        references=references_norm,
+    )
+    hits = []
+    for obs in hits_obs:
+        state_info = idx.inspect_by_id(obs.observation_id)
+        state = state_info['state'] if state_info else 'live'
+        hits.append({'obs': obs, 'state': state})
+    filter_parts = []
+    if project:
+        filter_parts.append(f'project={project!r}')
+    if memory_types_norm:
+        filter_parts.append(f'memory_types={memory_types_norm}')
+    if source_files_norm:
+        filter_parts.append(f'source_files={source_files_norm}')
+    if references_norm:
+        filter_parts.append(f'references={references_norm}')
+    if since_iso:
+        filter_parts.append(f'since={since_iso!r}')
+    if query:
+        filter_parts.append(f'query={query!r}')
+    filters_summary = 'filters: ' + (', '.join(filter_parts) if filter_parts else 'none')
+    return _format_recall_markdown(hits, len(hits), filters_summary)
+
+
 @mcp.tool()
 def delete_memory(observation_id: str, reason: str = '') -> str:
     """Soft-delete an observation by emitting a Tombstone.
