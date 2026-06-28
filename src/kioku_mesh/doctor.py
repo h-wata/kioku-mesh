@@ -554,7 +554,7 @@ def check_shadow_visibility(index: object = None) -> CheckResult:
         status=CheckStatus.WARN,
         summary=(
             f'shadowed observations: {shadowed_count} '
-            '(covered by newer obs, hidden from search, not yet physically deleted)'
+            '(missing from source-of-truth during rebuild, hidden from search, not yet physically deleted)'
         ),
         hint=(
             'Shadowed rows are cleaned up automatically by `kioku-mesh gc --shadows`. '

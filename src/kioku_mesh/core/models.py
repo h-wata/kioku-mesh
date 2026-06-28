@@ -138,8 +138,9 @@ class Observation:
         in this version's :data:`VALID_MEMORY_TYPES`. To preserve forward-
         compat, we clamp such values to ``"note"`` and log at DEBUG so
         full scans of legacy data do not spam WARNING-level logs. The
-        observation is still ingested, just relabelled. The original value
-        is lost on the receiver, which is acceptable for v0.x.
+        observation is still ingested, just relabelled. Unknown memory_type
+        values are clamped to ``"note"``; the raw value is preserved in
+        ``_extras['_raw_memory_type']``.
         """
         parsed = json.loads(data)
         raw_type = parsed.get('memory_type')
