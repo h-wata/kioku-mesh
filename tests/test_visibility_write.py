@@ -221,14 +221,14 @@ def test_save_responses_show_effective_visibility(
     reset_backend()
 
     msg = mcp_server.save_observation(content='legacy save', project='vis-resp')
-    assert '(visibility=legacy)' in msg
+    assert 'legacy' in msg
 
     msg = mcp_server.save_observation(content='mesh save', project='vis-resp', visibility='mesh')
-    assert '(visibility=mesh)' in msg
+    assert 'mesh' in msg
 
     monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
     msg = mcp_server.save_observation(content='user save', project='vis-resp', visibility='user')
-    assert '(visibility=user/hwata)' in msg
+    assert 'user/hwata' in msg
 
     # Project file drives the CLI default; the response surfaces it.
     (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: kioku-mesh\n')

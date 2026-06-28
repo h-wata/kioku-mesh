@@ -42,6 +42,7 @@ from .identity import resolve_agent_family
 from .identity import resolve_client_id
 from .local_index import LocalIndex
 from .mcp_install import MCPClient
+from .memory.save_lint import lint_observation
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .paths import data_share_leaf
@@ -152,6 +153,14 @@ def _cmd_save(args: argparse.Namespace) -> int:
     except ValueError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
+    # ADR-0028 Phase5: save-lint (warn-only)
+    for warning in lint_observation(
+        content=args.content,
+        memory_type=args.memory_type,
+        subject=args.subject or '',
+        source_files=source_files or None,
+    ):
+        print(f'[save-lint] WARNING: {warning.code}: {warning.message}', file=sys.stderr)
     obs = Observation(
         content=args.content,
         project=args.project or '',

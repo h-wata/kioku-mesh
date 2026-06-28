@@ -32,6 +32,7 @@ from .core.identity import state_dir
 from .core.transport import get_session as _get_zenoh_session
 from .identity import get_pc_id
 from .identity import get_session_id
+from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
 from .messaging.local_index import ack_message as _ack_message_internal
 from .messaging.local_index import LocalMessageIndex
@@ -282,6 +283,13 @@ def save_observation(
         effective_visibility, scope_id = resolve_write_visibility(visibility)
     except ValueError as e:
         return str(e)
+    # ADR-0028 Phase5: save-lint (warn-only)
+    lint_warnings = lint_observation(
+        content=content,
+        memory_type=memory_type,
+        subject=subject,
+        source_files=source_files,
+    )
     obs = Observation(
         content=content,
         project=project,
@@ -298,7 +306,12 @@ def save_observation(
     )
     backend = get_backend()
     backend.put_observation(obs)
-    msg = f'saved: {obs.observation_id} (visibility={format_visibility(effective_visibility, scope_id)})'
+    result: dict = {
+        'observation_id': obs.observation_id,
+        'status': 'saved',
+        'visibility': format_visibility(effective_visibility, scope_id),
+        'warnings': [{'code': w.code, 'message': w.message} for w in lint_warnings],
+    }
     # ADR-0026 §A: surface likely-superseded entries so the agent can replace
     # them. Only when ``supersedes`` was not already provided. Suggestion
     # only — nothing is hidden or deleted here.
@@ -306,18 +319,17 @@ def save_observation(
         try:
             candidates = backend.find_supersede_candidates(obs)
             if candidates:
-                listed = '; '.join(
-                    f'{c.observation_id} ({c.created_at[:10]}: {c.summary or c.subject})' for c in candidates
-                )
-                msg += (
-                    f'\nsupersede_candidates: {len(candidates)} live entr'
-                    f'{"y" if len(candidates) == 1 else "ies"} share this subject/type: {listed}.'
-                    ' If this revises them, re-save with supersedes=[...] to hide the stale one,'
-                    ' or call delete_memory on it.'
-                )
+                result['supersede_candidates'] = [
+                    {
+                        'observation_id': c.observation_id,
+                        'created_at': c.created_at[:10],
+                        'summary': c.summary or c.subject,
+                    }
+                    for c in candidates
+                ]
         except Exception:  # noqa: BLE001 — detection must never fail a save
             pass
-    return msg
+    return json.dumps(result, ensure_ascii=False)
 
 
 @mcp.tool()

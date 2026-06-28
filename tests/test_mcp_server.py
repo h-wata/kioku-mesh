@@ -36,7 +36,15 @@ _INGEST_SETTLE = 0.25
 
 
 def _saved_id(text: str) -> str:
-    """Extract the observation id from ``saved: <id> (visibility=...)``."""
+    """Extract observation id from save_observation response (JSON or legacy text)."""
+    import json as _json
+
+    try:
+        data = _json.loads(text)
+        if isinstance(data, dict) and 'observation_id' in data:
+            return data['observation_id']
+    except (ValueError, TypeError):
+        pass
     return text.strip().split()[1]
 
 
@@ -1137,3 +1145,157 @@ def test_recall_context_index_disabled_message(
     text = _run(_go())
     assert 'recall_context requires the local index' in text
     assert 'KIOKU_MESH_DISABLE_INDEX' in text
+
+
+# ---------------------------------------------------------------------------
+# ADR-0028 Phase5: save-lint warn-only guardrails
+# ---------------------------------------------------------------------------
+
+
+def _mock_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch get_backend to avoid real storage; sufficient for lint-only tests."""
+    import kioku_mesh.mcp_server as _mcp_mod  # noqa: PLC0415
+
+    class _NoopBackend:
+        def put_observation(self, obs: Any) -> None:  # noqa: ANN401
+            pass
+
+        def find_supersede_candidates(self, obs: Any) -> list:  # noqa: ANN401
+            return []
+
+        def close(self) -> None:
+            pass
+
+    noop = _NoopBackend()
+    monkeypatch.setattr(_mcp_mod, 'get_backend', lambda: noop)
+
+
+def test_save_lint_warnings_field_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """save_observation always returns a 'warnings' key in the JSON response."""
+    import json as _json
+
+    _mock_backend(monkeypatch)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'A detailed analysis of the write path with mutex lock added',
+                    'memory_type': 'bug',
+                    'subject': 'write_path_race',
+                },
+            )
+            return result.data
+
+    msg = _run(_go())
+    data = _json.loads(msg)
+    assert 'warnings' in data
+    assert isinstance(data['warnings'], list)
+    assert 'observation_id' in data
+    assert data['status'] == 'saved'
+
+
+def test_save_lint_generic_noise_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Generic progress content triggers GENERIC_NOISE warning."""
+    import json as _json
+
+    _mock_backend(monkeypatch)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('save_observation', {'content': 'tests pass'})
+            return result.data
+
+    msg = _run(_go())
+    data = _json.loads(msg)
+    codes = [w['code'] for w in data['warnings']]
+    assert 'GENERIC_NOISE' in codes
+
+
+def test_save_lint_secret_pattern_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Content with an API key pattern triggers SECRET_PATTERN warning."""
+    import json as _json
+
+    _mock_backend(monkeypatch)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {'content': 'config uses sk-ABCDEFGHIJKLMNOPQRST for auth'},  # pragma: allowlist secret
+            )
+            return result.data
+
+    msg = _run(_go())
+    data = _json.loads(msg)
+    codes = [w['code'] for w in data['warnings']]
+    assert 'SECRET_PATTERN' in codes
+
+
+def test_save_lint_missing_subject_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decision memory_type without subject triggers MISSING_SUBJECT warning."""
+    import json as _json
+
+    _mock_backend(monkeypatch)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {'content': 'A non-trivial decision content here', 'memory_type': 'decision', 'subject': ''},
+            )
+            return result.data
+
+    msg = _run(_go())
+    data = _json.loads(msg)
+    codes = [w['code'] for w in data['warnings']]
+    assert 'MISSING_SUBJECT' in codes
+
+
+def test_save_lint_no_warning_for_normal_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Normal, detailed content with proper fields produces no lint warnings."""
+    import json as _json
+
+    _mock_backend(monkeypatch)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'Root cause: race condition in flush path when two sessions write simultaneously.',
+                    'memory_type': 'bug',
+                    'subject': 'flush_race_condition',
+                },
+            )
+            return result.data
+
+    msg = _run(_go())
+    data = _json.loads(msg)
+    assert data['warnings'] == []
+
+
+def test_save_lint_warn_only_save_succeeds(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Warnings do not block saves; observation_id is returned and observation is persisted."""
+    import json as _json
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {'content': 'done', 'project': 'lint-warn-only'},
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = _run(_go())
+    data = _json.loads(msg)
+    obs_id = data['observation_id']
+    assert len(obs_id) == 32
+    assert 'GENERIC_NOISE' in [w['code'] for w in data['warnings']]
+
+    time.sleep(_INGEST_SETTLE)
+    found = store.find_observation_by_id(obs_id)
+    assert found is not None
+    assert found.content == 'done'
