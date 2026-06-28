@@ -22,7 +22,11 @@ versions without a migration path until `1.0.0`.
 - Add `recall_context` MCP tool for additive filtered context recall with
   memory_types/source_files/references filters and grouped Markdown output (ADR-0028 Phase4)
 - ADR-0028 Phase5: save-quality guardrails (`save_lint`) — warn-only validators
-  (generic noise, missing subject, secret pattern) for CLI and MCP save_observation
+  (generic noise, missing subject, secret pattern) for CLI and MCP save_observation.
+  MCP `save_observation` now returns a JSON object
+  `{observation_id, status, visibility, warnings}` (with optional `supersede_candidates`)
+  instead of plain text. The CLI continues to return plain text
+  `saved: <id> (visibility=...)` unchanged.
 
 ## [0.7.0] - 2026-06-26
 
