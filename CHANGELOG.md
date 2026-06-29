@@ -12,6 +12,10 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- `doctor check_legacy_namespace`: legacy namespace (`mem/obs/**`, `mem/tomb/**`)
+  に残存している未マイグレーション observation を検知する preflight check を追加。
+  `visibility_migration.py` の selector を再利用し text/JSON 両出力対応。
+  `--check-legacy-namespace` フラグで個別実行可能 (ADR-0019 Phase D PR(1))
 - Added shadow visibility to `status` output (live/tombstoned/shadowed counts) and
   `doctor` check (`check_shadow_visibility`); added `list_shadowed_obs` to LocalIndex
   and invariant tests for INV-2/INV-3/INV-4/INV-5 (ADR-0028 Phase 1)

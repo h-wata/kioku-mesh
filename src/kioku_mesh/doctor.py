@@ -679,6 +679,135 @@ def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResu
     )
 
 
+# ADR-0019 Phase D: legacy namespace preflight check.
+
+
+def check_legacy_namespace(
+    session: Any | None = None,
+    *,
+    records: list[Any] | None = None,
+) -> CheckResult:
+    """Detect unmigrated legacy namespace observations (ADR-0019 Phase D preflight).
+
+    Scans ``mem/obs/**`` and ``mem/tomb/**`` for observations not yet migrated
+    to visibility-tiered namespaces. Returns WARN if legacy records exist,
+    PASS if the legacy namespace is empty.
+
+    ``records`` is injectable for tests (list of
+    :class:`~kioku_mesh.memory.visibility_migration.RawLegacyRecord`).
+    When ``records`` is ``None``, ``session`` is used to perform a Zenoh scan
+    via :func:`~kioku_mesh.memory.visibility_migration.scan_legacy_visibility`.
+    If both are ``None``, the check attempts to open a transient Zenoh session;
+    if that fails it returns WARN with a skip notice.
+    """
+    from .memory.visibility_migration import scan_legacy_visibility  # noqa: PLC0415
+
+    if records is None:
+        _session = session
+        _opened = False
+        if _session is None:
+            try:
+                import zenoh as _zenoh  # noqa: PLC0415
+
+                cfg = _zenoh.Config()
+                _session = _zenoh.open(cfg)
+                _opened = True
+            except Exception:  # noqa: BLE001
+                return CheckResult(
+                    name='legacy_namespace',
+                    status=CheckStatus.WARN,
+                    summary='legacy namespace check skipped: could not open Zenoh session',
+                    hint='Ensure zenohd is running, then re-run `kioku-mesh doctor`.',
+                    details={'skipped': True},
+                )
+        try:
+            records = scan_legacy_visibility(_session)
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(
+                name='legacy_namespace',
+                status=CheckStatus.WARN,
+                summary='legacy namespace check skipped: scan failed',
+                hint='Check the Zenoh connection and retry `kioku-mesh doctor`.',
+                details={'error': type(exc).__name__},
+            )
+        finally:
+            if _opened:
+                try:
+                    _session.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    obs_records = [r for r in records if r.kind == 'obs']
+    tomb_records = [r for r in records if r.kind == 'tomb']
+    legacy_obs = len(obs_records)
+    legacy_tomb = len(tomb_records)
+
+    samples = [r.key for r in records[:5]]
+
+    # Extract scope hints (client_id/pc_id) from key segments.
+    # Legacy key shape: mem/obs/<client_id>/<pc_id>/...
+    scope_hints: list[str] = []
+    _seen_scopes: set[str] = set()
+    for r in records[:20]:
+        parts = r.key.split('/')
+        if len(parts) >= 4:
+            scope = f'{parts[2]}/{parts[3]}'
+            if scope not in _seen_scopes:
+                _seen_scopes.add(scope)
+                scope_hints.append(scope)
+
+    # Try to extract min/max created_at from JSON payloads.
+    earliest_ts: str | None = None
+    latest_ts: str | None = None
+    for r in records:
+        try:
+            payload_dict = json.loads(r.payload)
+            ts = payload_dict.get('created_at', '')
+            if ts:
+                if earliest_ts is None or ts < earliest_ts:
+                    earliest_ts = ts
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+        except Exception:  # noqa: BLE001
+            pass
+
+    if legacy_obs == 0 and legacy_tomb == 0:
+        return CheckResult(
+            name='legacy_namespace',
+            status=CheckStatus.PASS,
+            summary='legacy namespace: no unmigrated observations found',
+            details={
+                'legacy_obs': 0,
+                'legacy_tomb': 0,
+                'samples': [],
+                'scope_hints': [],
+                'earliest_ts': None,
+                'latest_ts': None,
+            },
+        )
+
+    return CheckResult(
+        name='legacy_namespace',
+        status=CheckStatus.WARN,
+        summary=(
+            f'legacy namespace: {legacy_obs} obs and {legacy_tomb} tombstones '
+            'found in mem/obs/** / mem/tomb/** — run migrate-visibility to clear'
+        ),
+        hint=(
+            'Run `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` to migrate. '
+            'Set KIOKU_MESH_LEGACY_READ_FALLBACK=on as a temporary read-only fallback during migration.'
+        ),
+        details={
+            'legacy_obs': legacy_obs,
+            'legacy_tomb': legacy_tomb,
+            'samples': samples,
+            'scope_hints': scope_hints,
+            'earliest_ts': earliest_ts,
+            'latest_ts': latest_ts,
+        },
+    )
+
+
 # -- Orchestration & rendering -------------------------------------------------
 
 
@@ -699,6 +828,7 @@ def run_all_checks() -> list[CheckResult]:
         check_fts5(),
         check_shadow_visibility(),
         check_conflicting_latest(),
+        check_legacy_namespace(),
     ]
 
 

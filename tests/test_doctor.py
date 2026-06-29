@@ -451,3 +451,113 @@ def test_check_shadow_visibility_text_output(tmp_path: 'Path') -> None:
     result = check_shadow_visibility(index=idx)
     rendered = format_text([result])
     assert '[WARN] shadow_visibility' in rendered
+
+
+# -- check_legacy_namespace ----------------------------------------------------
+
+
+def _make_legacy_records(
+    n_obs: int = 0,
+    n_tomb: int = 0,
+    *,
+    created_at: str = '2026-01-01T00:00:00Z',
+) -> list[object]:
+    """Build a list of RawLegacyRecord-like objects for injection."""
+    from kioku_mesh.memory.visibility_migration import RawLegacyRecord  # noqa: PLC0415
+
+    records = []
+    payload = json.dumps({'created_at': created_at, 'content': 'test'})
+    for i in range(n_obs):
+        records.append(RawLegacyRecord(kind='obs', key=f'mem/obs/cli1/pc1/{i}/0/abc{i}', payload=payload))
+    for i in range(n_tomb):
+        records.append(RawLegacyRecord(kind='tomb', key=f'mem/tomb/cli1/pc1/{i}/0/abc{i}', payload=payload))
+    return records
+
+
+def test_check_legacy_namespace_pass_when_empty() -> None:
+    """No legacy records → PASS."""
+    from kioku_mesh.doctor import check_legacy_namespace  # noqa: PLC0415
+
+    result = check_legacy_namespace(records=[])
+    assert result.status is CheckStatus.PASS
+    assert 'no unmigrated observations' in result.summary
+    assert result.details['legacy_obs'] == 0
+    assert result.details['legacy_tomb'] == 0
+    assert result.details['samples'] == []
+
+
+def test_check_legacy_namespace_warn_when_obs_exist() -> None:
+    """Legacy obs records → WARN with count and hint."""
+    from kioku_mesh.doctor import check_legacy_namespace  # noqa: PLC0415
+
+    records = _make_legacy_records(n_obs=3, n_tomb=1)
+    result = check_legacy_namespace(records=records)
+    assert result.status is CheckStatus.WARN
+    assert result.details['legacy_obs'] == 3
+    assert result.details['legacy_tomb'] == 1
+    assert 'migrate-visibility' in result.hint
+
+
+def test_check_legacy_namespace_details_contain_required_fields() -> None:
+    """Details must contain legacy_obs, legacy_tomb, samples, scope_hints, timestamps."""
+    from kioku_mesh.doctor import check_legacy_namespace  # noqa: PLC0415
+
+    records = _make_legacy_records(n_obs=2, n_tomb=0, created_at='2026-03-15T10:00:00Z')
+    result = check_legacy_namespace(records=records)
+    for key in ('legacy_obs', 'legacy_tomb', 'samples', 'scope_hints', 'earliest_ts', 'latest_ts'):
+        assert key in result.details, f'missing detail key: {key}'
+    assert result.details['earliest_ts'] == '2026-03-15T10:00:00Z'
+    assert result.details['latest_ts'] == '2026-03-15T10:00:00Z'
+    assert len(result.details['samples']) == 2
+
+
+def test_check_legacy_namespace_json_schema() -> None:
+    """to_json includes legacy_namespace with required detail fields."""
+    from kioku_mesh.doctor import check_legacy_namespace  # noqa: PLC0415
+
+    records = _make_legacy_records(n_obs=1, n_tomb=0)
+    result = check_legacy_namespace(records=records)
+    payload = json.loads(to_json([result]))
+    check = next(c for c in payload['checks'] if c['name'] == 'legacy_namespace')
+    assert check['status'] == 'warn'
+    for key in ('legacy_obs', 'legacy_tomb', 'samples', 'scope_hints', 'earliest_ts', 'latest_ts'):
+        assert key in check['details'], f'JSON details missing: {key}'
+
+
+def test_run_all_checks_includes_legacy_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_all_checks must include a check named 'legacy_namespace'."""
+    monkeypatch.setattr(
+        doctor,
+        'check_legacy_namespace',
+        lambda: CheckResult(name='legacy_namespace', status=CheckStatus.PASS, summary='stub'),
+    )
+    names = [r.name for r in doctor.run_all_checks()]
+    assert 'legacy_namespace' in names
+
+
+def test_run_all_checks_legacy_namespace_after_conflicting_latest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """legacy_namespace must appear after 'conflicting_latest' in check order."""
+    monkeypatch.setattr(
+        doctor,
+        'check_legacy_namespace',
+        lambda: CheckResult(name='legacy_namespace', status=CheckStatus.PASS, summary='stub'),
+    )
+    names = [r.name for r in doctor.run_all_checks()]
+    assert names.index('legacy_namespace') > names.index('conflicting_latest')
+
+
+def test_cli_doctor_check_legacy_namespace_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--check-legacy-namespace runs only the legacy namespace check."""
+    from kioku_mesh import doctor as doc_mod  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        doc_mod,
+        'check_legacy_namespace',
+        lambda **_kw: CheckResult(name='legacy_namespace', status=CheckStatus.PASS, summary='ok'),
+    )
+    rc = cli_main(['doctor', '--check-legacy-namespace'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'legacy_namespace' in out
