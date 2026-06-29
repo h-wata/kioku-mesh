@@ -1,0 +1,70 @@
+// kioku-mesh: Docker コンテナ用 zenohd 設定
+//
+// このファイルは docker-compose.yaml から bind mount で読み込まれる。
+// key_expr / strip_prefix / replication パラメータは config/zenohd_home.json5 /
+// zenohd_peer.json5.template と完全一致させること（digest 比較がズレると同期が走らなくなる）。
+//
+// 環境変数:
+//   ZENOH_BACKEND_ROCKSDB_ROOT=/var/lib/zenoh  (docker-compose.yaml で設定)
+//   RocksDB の実パス: /var/lib/zenoh/agent_mem (volume mount: ./data/zenoh)
+//
+// listen:
+//   0.0.0.0:7447 — コンテナ内全インターフェース（docker-compose が host 側 7447 に公開）
+//   他 peer と接続する場合は docker-compose.yaml の ports を拡張し connect に追加する。
+//
+// REST plugin (port 8000):
+//   管理・監視用。docker-compose の ports に "8000:8000" を追加すると host から参照可能。
+//   例: curl http://localhost:8000/mem/obs/**
+
+{
+  mode: "router",
+
+  listen: {
+    endpoints: ["tcp/0.0.0.0:7447"],
+  },
+
+  connect: {
+    endpoints: [],
+  },
+
+  // replication / storage_manager は timestamping が有効でないと動作しない。
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+
+  plugins: {
+    // REST plugin — HTTP 経由で zenoh key/value を参照・更新できる。
+    // ポート 8000 で Listen。他 peer と接続する場合の疎通確認にも使える。
+    rest: {
+      http_port: "8000",
+    },
+
+    storage_manager: {
+      volumes: {
+        rocksdb: {},
+      },
+      storages: {
+        agent_mem: {
+          key_expr: "mem/**",
+          strip_prefix: "mem",
+
+          // 他 peer と接続する場合はこの値を peer 間で完全一致させること。
+          replication: {
+            interval: 10.0,         // 秒 (float 可)
+            sub_intervals: 5,
+            hot: 6,
+            warm: 30,
+            propagation_delay: 250, // ミリ秒
+          },
+
+          volume: {
+            id: "rocksdb",
+            // 実パス: ${ZENOH_BACKEND_ROCKSDB_ROOT}/agent_mem = /var/lib/zenoh/agent_mem
+            dir: "agent_mem",
+            create_db: true,
+          },
+        },
+      },
+    },
+  },
+}

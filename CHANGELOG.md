@@ -33,6 +33,9 @@ versions without a migration path until `1.0.0`.
   string as JSON to access individual fields.
   The CLI `save` command continues to return plain text `saved: <id> (visibility=...)`
   unchanged — no parsing required.
+- docker compose で zenohd を起動可能にする `docker-compose.yaml` と設定ファイル
+  (`config/zenohd.docker.json5`) を追加。`eclipse/zenoh:1.9.0` + `zenoh-backend-rocksdb`
+  musl standalone を使用し、RocksDB を `./data/zenoh/` に永続化する (#253)
 
 ## [0.7.0] - 2026-06-26
 
