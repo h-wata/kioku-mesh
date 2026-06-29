@@ -1,7 +1,7 @@
 # ADR-0019: Observation visibility tier による selective replication
 
 - Status: Accepted
-- Date: 2026-06-06 (Revised: 2026-06-12)
+- Date: 2026-06-06 (Revised: 2026-06-12, 2026-06-29 Phase D addendum)
 - Supersedes: なし
 - Related: ADR-0001, ADR-0004, ADR-0006, ADR-0007, ADR-0010, ADR-0014
 
@@ -318,3 +318,130 @@ user/<id> 形式での直接指定は ADR-0019 の禁則により拒否する。
 - source 削除により SQLite sidecar が一時的に不整合になる可能性があるが、
   target repair PUT と最終 index rebuild により収束する
 - long-lived peer は migration 後に再起動または `--rebuild` を推奨する
+
+## Phase D Addendum: legacy write 廃止 + legacy read 格下げ
+
+- Status: Accepted addendum
+- Date: 2026-06-29
+
+### Context
+
+ADR-0019 Phase A/B により新規書き込みは visibility-tiered namespace に入り、
+Phase C では `migrate-visibility` CLI により既存 legacy データの明示的な移行が可能になった。
+
+しかし、**未設定の writer が依然として legacy layout に書き続けるリスク**が残る。
+`config.resolve_write_visibility` が設定なしの場合に空文字列 `''` を返し、
+`keyspace._namespace_prefix('', '')` が `mem` を返す経路がそのまま残っているためである。
+
+また、**legacy read が常時有効な状態では migration 漏れが見えにくい**という問題もある。
+`subscriber` / `rebuild` / `search` / `find-by-id` がすべて `mem/obs/**` と `mem/tomb/**` を
+読み続けるため、移行が完了しているかどうかを運用者が判断しにくい。
+
+Phase D はこの二つの残存リスクに対処し、legacy namespace への依存を段階的に解消する。
+
+### Decision
+
+#### 1. cut-off: v0.8
+
+legacy write の廃止と legacy read のオプション化は **v0.8** で実施する。
+
+- **v0.7 は too soon**: Phase C (`migrate-visibility` CLI) と同リリースになるため、
+  ユーザーが移行を完了する猶予期間がない。
+- **v1.0 は too late**: 0.x 全期間にわたって未設定 writer が legacy データを生成し続け、
+  migration 対象が増え続ける。
+
+v0.8 は Phase C が出荷されてから少なくとも 1 マイナーリリース分の猶予を確保しつつ、
+v1.0 では互換シムの **削除** に集中できるバランス点である。
+
+#### 2. legacy write: v0.8 で default 廃止
+
+v0.8 以降、CLI save および MCP save は空 visibility を正常系の書き込み先として許可しない。
+`config.resolve_write_visibility` は `''` を返す経路を廃止し、
+設定が未解決の場合はアクションエラーを返す。
+
+**v0.8.x 限定の escape hatch**: `KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on`
+
+- default は `off`
+- 有効にすると legacy layout (`mem/obs/...`) への書き込みが一時的に復活する
+- 起動時に warn ログを出力する（MCP は once-per-process、CLI は save ごと）
+- v1.0 でこの環境変数は削除される
+- 利用後は `kioku-mesh migrate-visibility` の再実行を推奨する
+
+#### 3. legacy read: `KIOKU_MESH_LEGACY_READ_FALLBACK=on|off`
+
+v0.8 cutoff 後の default は **`off`**。
+
+- `on` にすると `subscriber` / `rebuild` / `search` / `find-by-id` が
+  `mem/{obs,tomb}/...` (legacy namespace) を含むようになる
+- fallback が有効になった際に **once-per-process で warn** を出す
+- legacy データが実際にヒットした際にも **once-per-process で warn** を出す
+  （レコード単位の warn は大量のログを生むため禁止）
+- 設定の解決優先順位は既存の visibility 設定と同じ:
+  **環境変数 → グローバル `config.yaml`**
+  （プロジェクト `.kioku-mesh.yaml` は read-only 設定のみ対象であり、
+  この環境依存フラグはグローバル設定で管理する）
+
+#### 4. 未移行データ検知: doctor 拡張 (`check_legacy_namespace`)
+
+新しい top-level コマンドは追加しない。既存の `doctor` に `check_legacy_namespace` を追加する。
+
+- `scan_legacy_visibility` のセレクターを流用し、`obs` / `tomb` の件数を別個に集計する
+- サンプルキーとスコープ要約を JSON / テキストで出力する
+- **cutoff 前**: WARN（移行を促すヒントを表示）
+- **cutoff 後かつ fallback off**: WARN-with-cutoff（見えていないデータがある旨を強調）
+- JSON 出力: `{legacy_obs, legacy_tomb, samples, fallback_enabled}`
+- テキスト出力のヒント: `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>`
+
+#### 5. README 更新は PR(2) で実施
+
+`KIOKU_MESH_DEFAULT_VISIBILITY` の「unset = legacy layout」という記述の差し替えは
+この memo PR では行わない。PR(2) で `resolve_write_visibility` を変更する際に合わせて対応する。
+
+#### 6. ADR-0028: invariant test fixtures は PR(4) で更新
+
+通常の `rebuild` / `shadow` テストは `visibility='mesh'` の Observation を使う。
+legacy 互換テスト (`test_visibility_write.py` 等) は別ファイルに残す。
+
+#### PR 分割案 (依存順)
+
+| # | タイトル | スコープ | 依存 |
+|---|----------|----------|------|
+| (1) | Phase D preflight: doctor legacy namespace check | `doctor` に `check_legacy_namespace` 追加、additive のみ | なし |
+| (2) | Phase D: stop default legacy writes | `resolve_write_visibility` 変更、CLI/MCP save 修正、テスト更新 | (1) |
+| (3) | Phase D: make legacy reads opt-in fallback | `KIOKU_MESH_LEGACY_READ_FALLBACK` 導入、`selector`/`subscriber`/`rebuild`/`search` 分岐 | (2) |
+| (4) | Phase D docs/tests cleanup | README 更新、ADR-0028 fixture tiered 化、cleanup | (3) |
+
+実装の詳細（影響ファイル・行番号・シンボル）は各 PR の commit message / PR description に記載する。
+本 memo PR には要旨のみ載せる。
+
+#### 影響範囲 (要旨)
+
+- `config.resolve_write_visibility` / `config.get_default_visibility`:
+  空 visibility を返す経路を廃止
+- `keyspace._namespace_prefix` / `keyspace.obs_key` / `keyspace.tomb_key`:
+  空 visibility を新規書き込みバリデーションから除外
+- `Observation.visibility` 空文字デフォルト:
+  新規書き込みパスでは非空 visibility を要求する（旧ペイロード読み込みパスは維持）
+- 詳細な file:line リストは TASK-234 設計レポート (`worker4_design_234.yaml`) を参照
+
+#### ロールバック
+
+重大な書き込み回帰が発生した場合は v0.7.x へのバージョンピンを推奨する。
+v0.8.x 限定で `KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on` を使う場合は、
+復旧後に `kioku-mesh migrate-visibility` を再実行すること。
+v1.0 でこの escape hatch は削除される。
+
+#### Migration guide (cutoff 前にやること)
+
+1. `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` を実行する
+2. `kioku-mesh doctor` で `check_legacy_namespace` が 0 件になることを確認する
+3. v0.8 以降は `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` に頼らずに運用する
+
+### Consequences
+
+- 新インストールおよび移行済み mesh が legacy データを蓄積しなくなる。
+- `fallback off` により未移行データが見えなくなるリスクは `doctor` / `migrate-visibility` /
+  `KIOKU_MESH_LEGACY_READ_FALLBACK=on` の三段構えで緩和する。
+- 実装タッチポイントは `config` / `keyspace` / `subscriber` / `rebuild` / `search` /
+  CLI/MCP save / README / test fixtures と広範。詳細は Phase D split PR 4 本の
+  各 PR description に記載する。
