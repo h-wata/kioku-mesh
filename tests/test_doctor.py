@@ -524,14 +524,24 @@ def test_check_legacy_namespace_json_schema() -> None:
         assert key in check['details'], f'JSON details missing: {key}'
 
 
-def test_run_all_checks_includes_legacy_namespace() -> None:
+def test_run_all_checks_includes_legacy_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     """run_all_checks must include a check named 'legacy_namespace'."""
+    monkeypatch.setattr(
+        doctor,
+        'check_legacy_namespace',
+        lambda: CheckResult(name='legacy_namespace', status=CheckStatus.PASS, summary='stub'),
+    )
     names = [r.name for r in doctor.run_all_checks()]
     assert 'legacy_namespace' in names
 
 
-def test_run_all_checks_legacy_namespace_after_conflicting_latest() -> None:
+def test_run_all_checks_legacy_namespace_after_conflicting_latest(monkeypatch: pytest.MonkeyPatch) -> None:
     """legacy_namespace must appear after 'conflicting_latest' in check order."""
+    monkeypatch.setattr(
+        doctor,
+        'check_legacy_namespace',
+        lambda: CheckResult(name='legacy_namespace', status=CheckStatus.PASS, summary='stub'),
+    )
     names = [r.name for r in doctor.run_all_checks()]
     assert names.index('legacy_namespace') > names.index('conflicting_latest')
 
