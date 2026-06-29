@@ -36,7 +36,10 @@ from typing import Iterator
 
 from kioku_mesh.core._env_compat import get_env
 
+from ..core.config import _is_legacy_read_fallback_on
+from ..core.config import _warn_legacy_read_hit_once
 from ..core.identity import state_dir
+from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
 from ..core.keyspace import OBS_READ_KEY_EXPR
 from ..core.keyspace import TOMB_READ_KEY_EXPR
@@ -1097,10 +1100,17 @@ class LocalIndex:
         obs_list: list[Observation] = []
         for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if reply.ok:
+                key_str = str(reply.ok.key_expr)
+                # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+                if is_legacy_key(key_str):
+                    if not _is_legacy_read_fallback_on():
+                        log.debug('rebuild_from_zenoh skip legacy obs key (fallback off): %s', key_str)
+                        continue
+                    _warn_legacy_read_hit_once()
                 # The broadened selector can match non-canonical keys; never
                 # ingest a payload whose key is off-shape or disagrees with
                 # the payload id (Codex review on PR #177).
-                key_id = obs_id_from_key(str(reply.ok.key_expr))
+                key_id = obs_id_from_key(key_str)
                 if key_id is None:
                     log.debug('rebuild_from_zenoh skip non-canonical obs key: %s', reply.ok.key_expr)
                     continue
@@ -1121,9 +1131,16 @@ class LocalIndex:
         tomb_ids: dict[str, str] = {}
         for reply in session.get(TOMB_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if reply.ok:
-                key_id = obs_id_from_key(str(reply.ok.key_expr))
+                key_str = str(reply.ok.key_expr)
+                # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+                if is_legacy_key(key_str):
+                    if not _is_legacy_read_fallback_on():
+                        log.debug('rebuild_from_zenoh skip legacy tomb key (fallback off): %s', key_str)
+                        continue
+                    _warn_legacy_read_hit_once()
+                key_id = obs_id_from_key(key_str)
                 if key_id is None:
-                    log.debug('rebuild_from_zenoh skip non-canonical tomb key: %s', reply.ok.key_expr)
+                    log.debug('rebuild_from_zenoh skip non-canonical tomb key: %s', key_str)
                     continue
                 try:
                     tomb = Tombstone.from_json(reply.ok.payload.to_string())

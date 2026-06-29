@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
+import pytest
 import zenoh
 
 from kioku_mesh import keyspace
+from kioku_mesh.core import config as cfg_mod
 
 _ID = 'a' * 32
 
@@ -126,3 +131,96 @@ def test_broadcast_selectors_cover_all_namespaces() -> None:
     assert obs_sel.intersects(zenoh.KeyExpr(f'mem/user/hwata/obs/f/c/p/s/{_ID}'))
     assert tomb_sel.intersects(zenoh.KeyExpr(f'mem/team/x/tomb/f/c/p/s/{_ID}'))
     assert not obs_sel.intersects(zenoh.KeyExpr(f'mem/obs/f/c/p/s/{"b" * 32}'))
+
+
+# ---------------------------------------------------------------------------
+# ADR-0019 Phase D: is_legacy_key and _is_legacy_read_fallback_on unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_legacy_key_identifies_legacy_obs() -> None:
+    assert keyspace.is_legacy_key(f'mem/obs/f/c/p/s/{_ID}')
+    assert keyspace.is_legacy_key(f'mem/tomb/f/c/p/s/{_ID}')
+
+
+def test_is_legacy_key_rejects_tiered_namespaces() -> None:
+    assert not keyspace.is_legacy_key(f'mem/mesh/obs/f/c/p/s/{_ID}')
+    assert not keyspace.is_legacy_key(f'mem/user/hwata/obs/f/c/p/s/{_ID}')
+    assert not keyspace.is_legacy_key(f'mem/team/kioku/obs/f/c/p/s/{_ID}')
+
+
+def test_is_legacy_key_rejects_non_mem_prefix() -> None:
+    assert not keyspace.is_legacy_key(f'other/obs/f/c/p/s/{_ID}')
+    assert not keyspace.is_legacy_key('obs/f/c/p/s')
+    assert not keyspace.is_legacy_key('')
+
+
+def test_is_legacy_read_fallback_on_returns_false_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    assert cfg_mod._is_legacy_read_fallback_on() is False
+
+
+def test_is_legacy_read_fallback_on_returns_true_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    assert cfg_mod._is_legacy_read_fallback_on() is True
+
+
+def test_is_legacy_read_fallback_on_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'ON')
+    assert cfg_mod._is_legacy_read_fallback_on() is True
+
+
+# ---------------------------------------------------------------------------
+# Thread-safety tests (R1 cross-review finding)
+# ---------------------------------------------------------------------------
+
+
+class _SlowLogger:
+    """Logger stub whose warning() sleeps briefly to expose lock races."""
+
+    def __init__(self, sleep_sec: float = 0.02) -> None:
+        self._sleep_sec = sleep_sec
+        self.calls: list[tuple] = []
+
+    def warning(self, *args: object, **kwargs: object) -> None:
+        time.sleep(self._sleep_sec)
+        self.calls.append(args)
+
+
+def test_warn_legacy_read_hit_once_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_warn_legacy_read_hit_once must emit exactly one WARNING under 20 concurrent calls."""
+    slow_log = _SlowLogger()
+    monkeypatch.setattr(cfg_mod, '_log', slow_log)
+    monkeypatch.setattr(cfg_mod, '_legacy_read_hit_warned', False)
+
+    threads = [threading.Thread(target=cfg_mod._warn_legacy_read_hit_once) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'
+
+
+def test_is_legacy_read_fallback_on_warns_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_is_legacy_read_fallback_on must emit exactly one WARNING under 20 concurrent calls."""
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    slow_log = _SlowLogger()
+    monkeypatch.setattr(cfg_mod, '_log', slow_log)
+    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
+
+    threads = [threading.Thread(target=cfg_mod._is_legacy_read_fallback_on) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'

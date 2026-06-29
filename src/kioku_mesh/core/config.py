@@ -11,6 +11,7 @@ from dataclasses import field
 import logging
 import os
 from pathlib import Path
+import threading
 
 from kioku_mesh.core._env_compat import get_env
 
@@ -18,8 +19,12 @@ from .paths import resolve_app_dir
 
 _log = logging.getLogger(__name__)
 
-# Once-per-process flag to avoid spamming the legacy emergency warning.
+# Once-per-process flags + locks for thread-safe once-only WARNs.
 _legacy_emergency_warned: bool = False
+_legacy_read_fallback_warned: bool = False
+_legacy_read_fallback_warned_lock: threading.Lock = threading.Lock()
+_legacy_read_hit_warned: bool = False
+_legacy_read_hit_warned_lock: threading.Lock = threading.Lock()
 
 try:
     import yaml
@@ -148,6 +153,44 @@ def _is_legacy_emergency_on() -> bool:
             _legacy_emergency_warned = True
         return True
     return False
+
+
+def _is_legacy_read_fallback_on() -> bool:
+    """Check KIOKU_MESH_LEGACY_READ_FALLBACK and warn once per process when on.
+
+    v0.8.x only — will be removed in v1.0.
+    Thread-safe: double-checked locking ensures exactly one WARNING per process.
+    """
+    global _legacy_read_fallback_warned
+    val = get_env('KIOKU_MESH_LEGACY_READ_FALLBACK', '').strip().lower()
+    if val == 'on':
+        if not _legacy_read_fallback_warned:
+            with _legacy_read_fallback_warned_lock:
+                if not _legacy_read_fallback_warned:
+                    _log.warning(
+                        'legacy read fallback enabled (KIOKU_MESH_LEGACY_READ_FALLBACK=on)'
+                        ' — v0.8.x only, will be removed in v1.0'
+                    )
+                    _legacy_read_fallback_warned = True
+        return True
+    return False
+
+
+def _warn_legacy_read_hit_once(count: int = 1) -> None:
+    """Warn once per process when legacy namespace data is actually returned.
+
+    Thread-safe: double-checked locking ensures exactly one WARNING per process.
+    """
+    global _legacy_read_hit_warned
+    if _legacy_read_hit_warned:
+        return
+    with _legacy_read_hit_warned_lock:
+        if not _legacy_read_hit_warned:
+            _log.warning(
+                "legacy namespace read returned data (%d records); run 'kioku-mesh migrate-visibility' to migrate",
+                count,
+            )
+            _legacy_read_hit_warned = True
 
 
 def get_default_visibility() -> str:

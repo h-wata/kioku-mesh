@@ -747,3 +747,43 @@ def test_rebuild_rejects_payload_under_non_canonical_key(single_zenohd: Any) -> 
     store._reset_index()
 
     assert store.search_observations(project='rebuild-noncanon') == []
+
+
+# ---------------------------------------------------------------------------
+# ADR-0019 Phase D: legacy read gate tests
+# ---------------------------------------------------------------------------
+
+
+def test_subscriber_skips_legacy_put_when_fallback_off(single_zenohd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Subscriber must not index a legacy-key obs when KIOKU_MESH_LEGACY_READ_FALLBACK is off."""
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    idx = store.get_index()
+    assert not idx.disabled
+
+    obs = _mk_obs('should-be-skipped', project='sub-gate-off')
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(obs.key_expr, obs.to_json())  # key_expr is legacy mem/obs/...
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    ids = {r.observation_id for r in idx.search(project='sub-gate-off')}
+    assert obs.observation_id not in ids, 'subscriber must skip legacy obs when fallback is off'
+
+
+def test_rebuild_skips_legacy_obs_when_fallback_off(single_zenohd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """rebuild_from_zenoh must not ingest legacy-key obs when fallback is off."""
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    obs = _mk_obs('rebuild-skip-legacy', project='rebuild-gate-off')
+    remote = _remote_session(single_zenohd.endpoint)
+    try:
+        remote.put(obs.key_expr, obs.to_json())  # legacy key
+        time.sleep(_SETTLE)
+    finally:
+        remote.close()
+
+    store._reset_index()
+
+    hits = store.search_observations(project='rebuild-gate-off')
+    assert not hits, 'rebuild must skip legacy obs when fallback is off'

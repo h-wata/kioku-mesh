@@ -790,6 +790,37 @@ def test_search_via_zenoh_and_unchanged_by_refactor(monkeypatch: pytest.MonkeyPa
     assert no_match_obs.observation_id not in ids, 'and-mode: non-substring obs must be excluded'
 
 
+# ---------------------------------------------------------------------------
+# ADR-0019 Phase D: legacy read gate tests
+# ---------------------------------------------------------------------------
+
+
+def test_search_via_zenoh_skips_legacy_obs_when_fallback_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_search_via_zenoh must return nothing for legacy-key obs when fallback is off."""
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    obs = Observation(content='legacy-content', project='gate-off')
+    # _ok_reply generates legacy key mem/obs/fake/k/p/s/{id}
+    fake = _FakeSession([[_ok_reply(obs)], []])  # tomb batch empty, obs batch with legacy key
+    _install_fake_session(monkeypatch, fake)
+    results = store.search_observations(query='legacy-content', project='gate-off')
+    assert not results, 'legacy obs must be skipped when KIOKU_MESH_LEGACY_READ_FALLBACK is off'
+
+
+def test_find_by_id_via_zenoh_skips_legacy_obs_when_fallback_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_find_by_id_via_zenoh must return None for a legacy-key obs when fallback is off."""
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    obs = Observation(content='by-id-legacy')
+    fake = _FakeSession([[_ok_reply(obs)]])
+    monkeypatch.setattr(transport, '_open_session', lambda: fake)
+    store._reset_session()
+    result = store._find_by_id_via_zenoh(obs.observation_id)
+    assert result is None, 'legacy obs must be skipped in find_by_id when fallback is off'
+
+
 def test_facade_reexports_are_plain_aliases() -> None:
     """#172: store's re-exports are aliases of the owning module's functions.
 
