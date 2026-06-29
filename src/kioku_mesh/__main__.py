@@ -1041,7 +1041,10 @@ def _resolve_listen_endpoints(args: argparse.Namespace, detected: list[str]) -> 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Run diagnostic checks and report PASS / WARN / FAIL with hints."""
-    results = doctor_module.run_all_checks()
+    if getattr(args, 'check_legacy_namespace', False):
+        results = [doctor_module.check_legacy_namespace()]
+    else:
+        results = doctor_module.run_all_checks()
     if args.json:
         print(doctor_module.to_json(results))
     else:
@@ -2048,6 +2051,11 @@ def _build_parser() -> argparse.ArgumentParser:
         '--json',
         action='store_true',
         help='emit machine-readable JSON instead of human-readable text',
+    )
+    p_doctor.add_argument(
+        '--check-legacy-namespace',
+        action='store_true',
+        help='run only the legacy-namespace preflight check (ADR-0019 Phase D)',
     )
     p_doctor.set_defaults(func=_cmd_doctor)
 
