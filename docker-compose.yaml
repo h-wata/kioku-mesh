@@ -16,7 +16,7 @@ services:
       ZENOH_BACKEND_ROCKSDB_ROOT: /var/lib/zenoh
     command: ["-c", "/etc/zenoh/config.json5"]
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7447"]
       interval: 10s
       timeout: 5s
       retries: 3
