@@ -39,6 +39,9 @@ _IDENTITY_SEGMENTS = 4  # agent_family / client_id / pc_id / session_id
 
 # '' = legacy (un-tiered) — writes under mem/{obs,tomb}/... as before.
 VALID_VISIBILITIES: frozenset[str] = frozenset({'', 'mesh', 'user', 'team'})
+# Phase D: write-path valid set excludes legacy ('').
+# Use VALID_VISIBILITIES for read-path and deserialization checks.
+VALID_WRITE_VISIBILITIES: frozenset[str] = frozenset({'mesh', 'user', 'team'})
 
 _SCOPE_SLUG_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 

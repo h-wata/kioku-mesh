@@ -10,6 +10,15 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### BREAKING CHANGES
+
+- visibility 未指定の `kioku-mesh save` / MCP `save_observation` / Python API が
+  default で `mesh` に書き込まれるようになった (ADR-0019 Phase D / v0.8)。
+  従来の legacy layout (`mem/obs/**`) への書き込みは
+  `KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on` でのみ可能 (v0.8.x 限定、v1.0 で削除)。
+  migration: `kioku-mesh doctor --check-legacy-namespace` で既存 legacy データを確認後、
+  `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` を実行してください。
+
 ### Added
 
 - `doctor check_legacy_namespace`: legacy namespace (`mem/obs/**`, `mem/tomb/**`)

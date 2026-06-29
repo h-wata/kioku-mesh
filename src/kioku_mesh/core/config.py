@@ -8,12 +8,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field
+import logging
 import os
 from pathlib import Path
 
 from kioku_mesh.core._env_compat import get_env
 
 from .paths import resolve_app_dir
+
+_log = logging.getLogger(__name__)
+
+# Once-per-process flag to avoid spamming the legacy emergency warning.
+_legacy_emergency_warned: bool = False
 
 try:
     import yaml
@@ -126,6 +132,24 @@ def get_team_id() -> str:
     return str(cfg.get('team_id', '') or '').strip()
 
 
+def _is_legacy_emergency_on() -> bool:
+    """Check KIOKU_MESH_LEGACY_WRITE_EMERGENCY and warn once per process when on.
+
+    v0.8.x only — this escape hatch will be removed in v1.0.
+    """
+    global _legacy_emergency_warned
+    val = get_env('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', '').strip().lower()
+    if val == 'on':
+        if not _legacy_emergency_warned:
+            _log.warning(
+                'legacy write emergency mode enabled (KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on)'
+                ' — v0.8.x only, will be removed in v1.0'
+            )
+            _legacy_emergency_warned = True
+        return True
+    return False
+
+
 def get_default_visibility() -> str:
     """Return the default visibility for new writes.
 
@@ -134,7 +158,8 @@ def get_default_visibility() -> str:
       2. ``default_visibility:`` in the nearest project ``.kioku-mesh.yaml``
          (searched from cwd upward — per-directory default, ADR-0019)
       3. ``default_visibility:`` in ``~/.config/kioku-mesh/config.yaml``
-      4. ``''`` (legacy layout — behaves exactly like pre-0.6)
+      4. ``KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on`` → ``''`` (legacy, v0.8.x escape hatch)
+      5. ``'mesh'`` (Phase D default; was ``''`` legacy before v0.8)
     """
     env = get_env('KIOKU_MESH_DEFAULT_VISIBILITY', '').strip()
     if env:
@@ -144,7 +169,13 @@ def get_default_visibility() -> str:
     if val:
         return val
     cfg = _read_yaml(_config_path())
-    return str(cfg.get('default_visibility', '') or '').strip()
+    val = str(cfg.get('default_visibility', '') or '').strip()
+    if val:
+        return val
+    # Phase D: emergency escape hatch for legacy writes (v0.8.x only)
+    if _is_legacy_emergency_on():
+        return ''
+    return 'mesh'
 
 
 def resolve_write_visibility(explicit: str = '') -> tuple[str, str]:

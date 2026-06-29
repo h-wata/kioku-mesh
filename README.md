@@ -111,7 +111,8 @@ Useful environment variables:
 | `KIOKU_MESH_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
 | `KIOKU_MESH_USER_ID` | Your user slug for `--visibility user` (same value on all your machines) |
 | `KIOKU_MESH_TEAM_ID` | Team slug for `--visibility team` |
-| `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = legacy layout) |
+| `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = `mesh` since Phase D / v0.8) |
+| `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` | Set `on` to temporarily restore legacy writes (v0.8.x only; removed in v1.0). See [migration guide](#visibility-migration) |
 
 ### Visibility scopes (experimental)
 
@@ -124,7 +125,7 @@ Useful environment variables:
 - `team` — peers that host the team's storage (requires `team_id`)
 - `mesh` — every peer on the mesh
 - unset — follows `default_visibility` from config; with no config the
-  legacy layout is used and nothing changes
+  default is `mesh` since Phase D / v0.8 (was legacy layout before)
 
 The user/team ids are resolved from server-side configuration, never from
 tool arguments. See ADR-0019 for the design.
