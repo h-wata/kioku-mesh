@@ -42,6 +42,7 @@ def _mk_obs(
         session_id=session_id,
         project=project,
         tags=list(tags or []),
+        visibility='mesh',
     )
 
 

@@ -33,6 +33,21 @@ def _mk_obs(content: str, *, project: str = 'demo', tags: list[str] | None = Non
         client_id='test',
         pc_id='testpc',
         session_id='testsession',
+        visibility='mesh',
+    )
+
+
+def _mk_legacy_obs(content: str, *, project: str = 'demo', tags: list[str] | None = None) -> Observation:
+    """Create an obs with legacy visibility (for ADR-0019 Phase D gate tests only)."""
+    return Observation(
+        content=content,
+        project=project,
+        tags=list(tags or []),
+        agent_family='claude',
+        client_id='test',
+        pc_id='testpc',
+        session_id='testsession',
+        visibility='',
     )
 
 
@@ -650,9 +665,19 @@ class _FakeSession:
     the payload (PR #177 Codex review).
     """
 
-    def __init__(self, obs: list[Observation], tombs: list[Tombstone]) -> None:
+    def __init__(
+        self,
+        obs: list[Observation],
+        tombs: list[Tombstone],
+        *,
+        legacy_tomb_keys: bool = False,
+    ) -> None:
         self._obs_replies = [_FakeReply(o.to_json(), o.key_expr) for o in obs]
-        self._tomb_replies = [_FakeReply(t.to_json(), f'mem/tomb/f/c/p/s/{t.observation_id}') for t in tombs]
+        if legacy_tomb_keys:
+            tomb_key_fmt = 'mem/tomb/f/c/p/s/{id}'
+        else:
+            tomb_key_fmt = 'mem/mesh/tomb/f/c/p/s/{id}'
+        self._tomb_replies = [_FakeReply(t.to_json(), tomb_key_fmt.format(id=t.observation_id)) for t in tombs]
 
     def get(self, key_expr: str, **kwargs: object) -> list[_FakeReply]:  # type: ignore[override]
         # Selectors are namespace-broadened since ADR-0019 Phase A
@@ -1424,6 +1449,7 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
             pc_id='testpc',
             session_id='testsession',
             supersedes=[obs_a.observation_id],
+            visibility='mesh',
         )
         idx.upsert(obs_b)
 
@@ -1434,10 +1460,11 @@ def test_rebuild_from_zenoh_restores_fts_and_superseded(tmp_path: Path) -> None:
         idx._conn.commit()  # noqa: SLF001
 
         # Fake session that returns both obs from "Zenoh".
-        # Key format: mem/obs/{agent_family}/{client_id}/{pc_id}/{session_id}/{obs_id}
+        # Key format: mem/mesh/obs/{agent_family}/{client_id}/{pc_id}/{session_id}/{obs_id}
         class _FakeReply:
             def __init__(self, obs: Observation) -> None:
-                key = f'mem/obs/{obs.agent_family}/{obs.client_id}/{obs.pc_id}/{obs.session_id}/{obs.observation_id}'
+                af, ci, pi, si, oi = (obs.agent_family, obs.client_id, obs.pc_id, obs.session_id, obs.observation_id)
+                key = f'mem/mesh/obs/{af}/{ci}/{pi}/{si}/{oi}'
                 self.ok = type(
                     'Ok',
                     (),
@@ -2307,6 +2334,7 @@ def test_rebuild_preserves_superseded_by(tmp_path: Path) -> None:
             pc_id='testpc',
             session_id='testsession',
             supersedes=[obs_a.observation_id],
+            visibility='mesh',
         )
         # Rebuild from session containing both obs.
         idx.rebuild_from_zenoh(_FakeSession([obs_a, obs_b], []))
@@ -2812,7 +2840,7 @@ def test_rebuild_from_zenoh_skips_legacy_obs_when_fallback_off(
 ) -> None:
     """rebuild_from_zenoh must not ingest legacy obs when KIOKU_MESH_LEGACY_READ_FALLBACK is off."""
     monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
-    obs = _mk_obs('should-be-skipped')
+    obs = _mk_legacy_obs('should-be-skipped')
     session = _FakeSession([obs], [])
     idx = LocalIndex.connect(str(tmp_path / 'gate_off_obs.db'))
     try:
@@ -2827,13 +2855,13 @@ def test_rebuild_from_zenoh_skips_legacy_tomb_when_fallback_off(
 ) -> None:
     """rebuild_from_zenoh must not ingest legacy tombs when fallback is off."""
     monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
-    obs = _mk_obs('pre-existing')
+    obs = _mk_legacy_obs('pre-existing')
     tomb = Tombstone(observation_id=obs.observation_id, deleted_at='2024-01-01T00:00:00Z')
     idx = LocalIndex.connect(str(tmp_path / 'gate_off_tomb.db'))
     try:
         # Pre-populate with a live row so the rebuild has something to tombstone.
         idx.upsert(obs)
-        stats = idx.rebuild_from_zenoh(_FakeSession([], [tomb]))
+        stats = idx.rebuild_from_zenoh(_FakeSession([], [tomb], legacy_tomb_keys=True))
         # The tomb was skipped — marked_deleted stays 0 (no tombstone applied).
         assert stats.marked_deleted == 0, 'legacy tomb must be skipped when fallback is off'
     finally:
@@ -2845,7 +2873,7 @@ def test_rebuild_from_zenoh_includes_legacy_obs_when_fallback_on(
 ) -> None:
     """rebuild_from_zenoh includes legacy obs when KIOKU_MESH_LEGACY_READ_FALLBACK=on."""
     monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
-    obs = _mk_obs('should-be-ingested')
+    obs = _mk_legacy_obs('should-be-ingested')
     session = _FakeSession([obs], [])
     idx = LocalIndex.connect(str(tmp_path / 'gate_on_obs.db'))
     try:

@@ -115,6 +115,24 @@ Useful environment variables:
 | `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` | Set `on` to temporarily restore legacy writes (v0.8.x only; removed in v1.0). See [migration guide](#visibility-migration) |
 | `KIOKU_MESH_LEGACY_READ_FALLBACK` | Set `on` to re-enable reads from the legacy namespace (`mem/obs/**`, `mem/tomb/**`) in search/rebuild/subscriber/find-by-id paths (default: off since v0.8; v0.8.x only, removed in v1.0) |
 
+### Visibility migration
+
+If you have observations written before v0.8 (legacy layout `mem/obs/**`), migrate them with:
+
+```bash
+# 1. Diagnose — check what is still in the legacy namespace
+kioku-mesh doctor --check-legacy-namespace
+
+# 2. Migrate — move observations to the tiered namespace
+kioku-mesh migrate-visibility --from legacy --to mesh
+
+# 3. Confirm — verify no legacy data remains
+kioku-mesh doctor
+```
+
+After migration, reads from the legacy namespace are no longer needed.
+`KIOKU_MESH_LEGACY_READ_FALLBACK` can be removed from your environment.
+
 ### Visibility scopes (experimental)
 
 `save` and the MCP `save_observation` tool accept `--visibility` /

@@ -31,6 +31,7 @@ def _mk_obs(content: str, project: str = 'gc-demo') -> Observation:
         pc_id='gc-pc',
         session_id='gc-sess',
         project=project,
+        visibility='mesh',
     )
 
 

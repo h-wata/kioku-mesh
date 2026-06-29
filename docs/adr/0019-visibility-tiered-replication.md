@@ -433,9 +433,10 @@ v1.0 でこの escape hatch は削除される。
 
 #### Migration guide (cutoff 前にやること)
 
-1. `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` を実行する
-2. `kioku-mesh doctor` で `check_legacy_namespace` が 0 件になることを確認する
-3. v0.8 以降は `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` に頼らずに運用する
+1. `kioku-mesh doctor --check-legacy-namespace` で legacy namespace の残存データを確認する
+2. `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` を実行する
+3. `kioku-mesh doctor` で `check_legacy_namespace` が 0 件になることを確認する (cutoff 確認)
+4. v0.8 以降は `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` に頼らずに運用する
 
 ### Consequences
 
@@ -445,3 +446,16 @@ v1.0 でこの escape hatch は削除される。
 - 実装タッチポイントは `config` / `keyspace` / `subscriber` / `rebuild` / `search` /
   CLI/MCP save / README / test fixtures と広範。詳細は Phase D split PR 4 本の
   各 PR description に記載する。
+
+## Phase D Implementation Status
+
+**Completed** (2026-06-30)
+
+| PR | タイトル | ステータス |
+|---|---|---|
+| #254 | Phase D PR(1): doctor preflight (`check_legacy_namespace` 追加) | merged |
+| #256 | Phase D PR(2): BREAKING — stop default legacy writes | merged |
+| #257 | Phase D PR(3): make legacy reads opt-in fallback (`KIOKU_MESH_LEGACY_READ_FALLBACK`) | merged |
+| #TBD | Phase D PR(4): docs/tests cleanup (Closes #220) | this PR |
+
+Issue #220 はこの PR(4) のマージをもって close される。
