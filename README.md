@@ -228,6 +228,58 @@ kioku-mesh init --mode spoke \
 zenohd -c ~/.config/kioku-mesh/zenohd.json5
 ```
 
+### Docker で zenohd を起動する
+
+Docker / Docker Compose がインストール済みであれば、`kioku-mesh zenohd install` の代わりに
+Docker で zenohd を起動できます。apt インストールよりも環境汚染がなく、ワンコマンドで起動できます。
+Python ソース (`src/kioku_mesh/`) は一切触らず、zenohd + RocksDB 層のみ Docker 化します。
+
+**前提**: Docker Engine および Docker Compose プラグインがインストール済みであること。
+
+```bash
+# 1. リポジトリルートに移動する
+cd /path/to/kioku-mesh
+
+# 2. zenohd + RocksDB バックエンド入り Docker イメージをビルドして起動する
+#    初回はビルド (RocksDB plugin のダウンロードを含む) があるため数分かかる
+docker compose up -d
+
+# 3. MCP クライアントの接続先はデフォルトの tcp/127.0.0.1:7447 のまま変更不要
+#    起動確認:
+docker compose ps
+docker compose logs zenohd
+
+# 4. kioku-mesh CLI で疎通確認する
+kioku-mesh save "Docker 起動テスト" --memory-type note
+kioku-mesh search "Docker"
+
+# 5. 停止する
+docker compose down
+```
+
+**データの永続化**:
+
+RocksDB のデータは `./data/zenoh/` ディレクトリに保存されます。このディレクトリが存在する限り
+`docker compose down` → `docker compose up -d` を繰り返してもデータは保持されます。
+
+```bash
+# バックアップ例
+tar -czf zenoh-backup-$(date +%Y%m%d).tar.gz ./data/zenoh/
+
+# データを完全に削除してゼロから始める場合
+docker compose down
+rm -rf ./data/zenoh/
+```
+
+> **注意**: `./data/zenoh/` を削除すると zenohd が保持していたすべての observation が消えます。
+> `docker compose down -v` は使わないでください (named volume ではないため効果はありませんが習慣として)。
+
+**他 peer と接続する場合**:
+
+Docker で起動した zenohd を mesh の hub または spoke として使うには、
+`config/zenohd.docker.json5` の `connect.endpoints` に対向 peer の IP を追加し、
+`docker compose restart zenohd` します。詳細は `config/zenohd.docker.json5` のコメントを参照してください。
+
 `kioku-mesh zenohd install` auto-detects your arch and OS, fetches the matching
 standalone zip from GitHub Releases, verifies the SHA-256 checksum via the GitHub
 Releases API, and extracts `zenohd` and the RocksDB plugin into the target directory.
