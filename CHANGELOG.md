@@ -10,6 +10,8 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-30
+
 ### BREAKING CHANGES
 
 - visibility 未指定の `kioku-mesh save` / MCP `save_observation` / Python API が
@@ -57,14 +59,6 @@ versions without a migration path until `1.0.0`.
   legacy read が必要なテストのみ個別 monkeypatch に移行。ADR-0028 invariant / shadow テストの
   fixture を `visibility='mesh'` に統一 (cleanup only — behavior 変更なし)。
   README に visibility migration guide セクションを追加。
-
-<!-- Phase D Complete
-ADR-0019 Phase D 完了: PR(1) #254 (doctor preflight) →
-PR(2) #256 (BREAKING default mesh) →
-PR(3) #257 (legacy read fallback gate) →
-PR(4) this PR (docs/tests cleanup, Closes #220)
-v0.8 リリース前に [Unreleased] を v0.8 に move すること
--->
 
 ## [0.7.0] - 2026-06-26
 
