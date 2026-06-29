@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 import zenoh
 
@@ -171,3 +174,53 @@ def test_is_legacy_read_fallback_on_case_insensitive(
 ) -> None:
     monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'ON')
     assert cfg_mod._is_legacy_read_fallback_on() is True
+
+
+# ---------------------------------------------------------------------------
+# Thread-safety tests (R1 cross-review finding)
+# ---------------------------------------------------------------------------
+
+
+class _SlowLogger:
+    """Logger stub whose warning() sleeps briefly to expose lock races."""
+
+    def __init__(self, sleep_sec: float = 0.02) -> None:
+        self._sleep_sec = sleep_sec
+        self.calls: list[tuple] = []
+
+    def warning(self, *args: object, **kwargs: object) -> None:
+        time.sleep(self._sleep_sec)
+        self.calls.append(args)
+
+
+def test_warn_legacy_read_hit_once_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_warn_legacy_read_hit_once must emit exactly one WARNING under 20 concurrent calls."""
+    slow_log = _SlowLogger()
+    monkeypatch.setattr(cfg_mod, '_log', slow_log)
+    monkeypatch.setattr(cfg_mod, '_legacy_read_hit_warned', False)
+
+    threads = [threading.Thread(target=cfg_mod._warn_legacy_read_hit_once) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'
+
+
+def test_is_legacy_read_fallback_on_warns_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_is_legacy_read_fallback_on must emit exactly one WARNING under 20 concurrent calls."""
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    slow_log = _SlowLogger()
+    monkeypatch.setattr(cfg_mod, '_log', slow_log)
+    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
+
+    threads = [threading.Thread(target=cfg_mod._is_legacy_read_fallback_on) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'

@@ -113,6 +113,7 @@ Useful environment variables:
 | `KIOKU_MESH_TEAM_ID` | Team slug for `--visibility team` |
 | `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = `mesh` since Phase D / v0.8) |
 | `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` | Set `on` to temporarily restore legacy writes (v0.8.x only; removed in v1.0). See [migration guide](#visibility-migration) |
+| `KIOKU_MESH_LEGACY_READ_FALLBACK` | Set `on` to re-enable reads from the legacy namespace (`mem/obs/**`, `mem/tomb/**`) in search/rebuild/subscriber/find-by-id paths (default: off since v0.8; v0.8.x only, removed in v1.0) |
 
 ### Visibility scopes (experimental)
 
