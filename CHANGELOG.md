@@ -51,6 +51,21 @@ versions without a migration path until `1.0.0`.
   (`config/zenohd.docker.json5`) を追加。`eclipse/zenoh:1.9.0` + `zenoh-backend-rocksdb`
   musl standalone を使用し、RocksDB を `./data/zenoh/` に永続化する (#253)
 
+### Changed
+
+- Phase D PR(4): `tests/conftest.py` の `KIOKU_MESH_LEGACY_READ_FALLBACK` global enable を解消し、
+  legacy read が必要なテストのみ個別 monkeypatch に移行。ADR-0028 invariant / shadow テストの
+  fixture を `visibility='mesh'` に統一 (cleanup only — behavior 変更なし)。
+  README に visibility migration guide セクションを追加。
+
+<!-- Phase D Complete
+ADR-0019 Phase D 完了: PR(1) #254 (doctor preflight) →
+PR(2) #256 (BREAKING default mesh) →
+PR(3) #257 (legacy read fallback gate) →
+PR(4) this PR (docs/tests cleanup, Closes #220)
+v0.8 リリース前に [Unreleased] を v0.8 に move すること
+-->
+
 ## [0.7.0] - 2026-06-26
 
 **Theme: Full-text search additions and stabilization**

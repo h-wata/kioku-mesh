@@ -49,10 +49,6 @@ def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Itera
     monkeypatch.delenv('KIOKU_MESH_INDEX_DB', raising=False)
     # Clear MESH_MEM_BACKEND so tests that don't set it use the default (zenoh).
     monkeypatch.delenv('KIOKU_MESH_BACKEND', raising=False)
-    # ADR-0019 Phase D: existing tests use legacy-key fixtures; enable the
-    # read fallback so they keep exercising the rebuild/search paths unchanged.
-    # PR(4) will migrate fixtures to tiered keys and remove this line.
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
     identity.reset_caches()
     # store._session / _index may carry stale state from previous tests — clear explicitly.
     store._reset_session()

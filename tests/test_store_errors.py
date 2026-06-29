@@ -31,11 +31,24 @@ from kioku_mesh.store import QueryErrorReply
 
 
 def _ok_reply(obs: Observation) -> SimpleNamespace:
-    """Build a fake ``ok`` reply holding a serialized observation.
+    """Build a fake ``ok`` reply with a mesh-namespace key (ADR-0019 tiered format).
 
     ``key_expr`` is a plain canonical key string because the read paths
     validate ``str(ok.key_expr)`` against the keyspace parser before
     ingesting the payload (PR #177 Codex review).
+    """
+    ok = SimpleNamespace(
+        key_expr=f'mem/mesh/obs/fake/k/p/s/{obs.observation_id}',
+        payload=SimpleNamespace(to_string=lambda o=obs: o.to_json()),
+    )
+    return SimpleNamespace(ok=ok, err=None)
+
+
+def _ok_legacy_reply(obs: Observation) -> SimpleNamespace:
+    """Build a fake ``ok`` reply with a legacy ``mem/obs/...`` key.
+
+    Used only by ADR-0019 Phase D gate tests that verify legacy keys are
+    skipped when KIOKU_MESH_LEGACY_READ_FALLBACK is off.
     """
     ok = SimpleNamespace(
         key_expr=f'mem/obs/fake/k/p/s/{obs.observation_id}',
@@ -801,8 +814,8 @@ def test_search_via_zenoh_skips_legacy_obs_when_fallback_off(
     """_search_via_zenoh must return nothing for legacy-key obs when fallback is off."""
     monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
     obs = Observation(content='legacy-content', project='gate-off')
-    # _ok_reply generates legacy key mem/obs/fake/k/p/s/{id}
-    fake = _FakeSession([[_ok_reply(obs)], []])  # tomb batch empty, obs batch with legacy key
+    # _ok_legacy_reply generates legacy key mem/obs/fake/k/p/s/{id}
+    fake = _FakeSession([[_ok_legacy_reply(obs)], []])  # tomb batch empty, obs batch with legacy key
     _install_fake_session(monkeypatch, fake)
     results = store.search_observations(query='legacy-content', project='gate-off')
     assert not results, 'legacy obs must be skipped when KIOKU_MESH_LEGACY_READ_FALLBACK is off'
@@ -814,7 +827,7 @@ def test_find_by_id_via_zenoh_skips_legacy_obs_when_fallback_off(
     """_find_by_id_via_zenoh must return None for a legacy-key obs when fallback is off."""
     monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
     obs = Observation(content='by-id-legacy')
-    fake = _FakeSession([[_ok_reply(obs)]])
+    fake = _FakeSession([[_ok_legacy_reply(obs)]])
     monkeypatch.setattr(transport, '_open_session', lambda: fake)
     store._reset_session()
     result = store._find_by_id_via_zenoh(obs.observation_id)

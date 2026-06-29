@@ -30,6 +30,20 @@ def _mk_obs(content: str, *, project: str = 'sub-test') -> Observation:
         client_id='test-client',
         pc_id='test-pc',
         session_id='test-session',
+        visibility='mesh',
+    )
+
+
+def _mk_legacy_obs(content: str, *, project: str = 'sub-test') -> Observation:
+    """Create an obs with legacy visibility (for ADR-0019 Phase D gate tests only)."""
+    return Observation(
+        content=content,
+        project=project,
+        agent_family='claude',
+        client_id='test-client',
+        pc_id='test-pc',
+        session_id='test-session',
+        visibility='',
     )
 
 
@@ -291,10 +305,10 @@ def test_subscriber_demotes_non_json_payload_to_debug(
     remote = _remote_session(single_zenohd.endpoint)
     try:
         # Publish gibberish under both keyspaces the subscriber watches.
-        # Keys must be canonical (32-hex leaf) so the samples reach the
-        # JSON-parse branch instead of the non-canonical-key gate.
-        remote.put('mem/obs/x/y/z/sess/' + 'a' * 32, 'not json at all')
-        remote.put('mem/tomb/x/y/z/sess/' + 'b' * 32, '{not json either')
+        # Keys must be canonical (32-hex leaf) and non-legacy so they reach
+        # the JSON-parse branch instead of the legacy-gate or non-canonical-key gate.
+        remote.put('mem/mesh/obs/x/y/z/sess/' + 'a' * 32, 'not json at all')
+        remote.put('mem/mesh/tomb/x/y/z/sess/' + 'b' * 32, '{not json either')
         time.sleep(_SETTLE)
     finally:
         remote.close()
@@ -760,7 +774,7 @@ def test_subscriber_skips_legacy_put_when_fallback_off(single_zenohd: Any, monke
     idx = store.get_index()
     assert not idx.disabled
 
-    obs = _mk_obs('should-be-skipped', project='sub-gate-off')
+    obs = _mk_legacy_obs('should-be-skipped', project='sub-gate-off')
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, obs.to_json())  # key_expr is legacy mem/obs/...
@@ -775,7 +789,7 @@ def test_subscriber_skips_legacy_put_when_fallback_off(single_zenohd: Any, monke
 def test_rebuild_skips_legacy_obs_when_fallback_off(single_zenohd: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """rebuild_from_zenoh must not ingest legacy-key obs when fallback is off."""
     monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
-    obs = _mk_obs('rebuild-skip-legacy', project='rebuild-gate-off')
+    obs = _mk_legacy_obs('rebuild-skip-legacy', project='rebuild-gate-off')
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, obs.to_json())  # legacy key
