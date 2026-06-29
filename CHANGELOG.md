@@ -21,6 +21,11 @@ versions without a migration path until `1.0.0`.
 
 ### Added
 
+- `KIOKU_MESH_LEGACY_READ_FALLBACK=on`: legacy namespace (`mem/obs/**`, `mem/tomb/**`)
+  からの読み取りをオプトインで有効化する env var を追加 (ADR-0019 Phase D PR(3))。
+  デフォルト off — replication subscriber / rebuild scan / fallback search / find-by-id
+  の全パスで legacy キーをスキップ。`on` 設定時は一回限りの WARNING ログを出力し、
+  `kioku-mesh migrate-visibility` への移行を促す。v0.8.x 限定、v1.0 で削除予定。
 - `doctor check_legacy_namespace`: legacy namespace (`mem/obs/**`, `mem/tomb/**`)
   に残存している未マイグレーション observation を検知する preflight check を追加。
   `visibility_migration.py` の selector を再利用し text/JSON 両出力対応。

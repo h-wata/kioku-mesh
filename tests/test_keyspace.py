@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import zenoh
 
 from kioku_mesh import keyspace
+from kioku_mesh.core import config as cfg_mod
 
 _ID = 'a' * 32
 
@@ -126,3 +128,46 @@ def test_broadcast_selectors_cover_all_namespaces() -> None:
     assert obs_sel.intersects(zenoh.KeyExpr(f'mem/user/hwata/obs/f/c/p/s/{_ID}'))
     assert tomb_sel.intersects(zenoh.KeyExpr(f'mem/team/x/tomb/f/c/p/s/{_ID}'))
     assert not obs_sel.intersects(zenoh.KeyExpr(f'mem/obs/f/c/p/s/{"b" * 32}'))
+
+
+# ---------------------------------------------------------------------------
+# ADR-0019 Phase D: is_legacy_key and _is_legacy_read_fallback_on unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_is_legacy_key_identifies_legacy_obs() -> None:
+    assert keyspace.is_legacy_key(f'mem/obs/f/c/p/s/{_ID}')
+    assert keyspace.is_legacy_key(f'mem/tomb/f/c/p/s/{_ID}')
+
+
+def test_is_legacy_key_rejects_tiered_namespaces() -> None:
+    assert not keyspace.is_legacy_key(f'mem/mesh/obs/f/c/p/s/{_ID}')
+    assert not keyspace.is_legacy_key(f'mem/user/hwata/obs/f/c/p/s/{_ID}')
+    assert not keyspace.is_legacy_key(f'mem/team/kioku/obs/f/c/p/s/{_ID}')
+
+
+def test_is_legacy_key_rejects_non_mem_prefix() -> None:
+    assert not keyspace.is_legacy_key(f'other/obs/f/c/p/s/{_ID}')
+    assert not keyspace.is_legacy_key('obs/f/c/p/s')
+    assert not keyspace.is_legacy_key('')
+
+
+def test_is_legacy_read_fallback_on_returns_false_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    assert cfg_mod._is_legacy_read_fallback_on() is False
+
+
+def test_is_legacy_read_fallback_on_returns_true_when_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    assert cfg_mod._is_legacy_read_fallback_on() is True
+
+
+def test_is_legacy_read_fallback_on_case_insensitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'ON')
+    assert cfg_mod._is_legacy_read_fallback_on() is True

@@ -159,6 +159,12 @@ def find_by_id_selector(observation_id: str) -> str:
     return f'mem/**/obs/**/{observation_id}'
 
 
+def is_legacy_key(key_expr: str) -> bool:
+    """Return True when key_expr is in the pre-ADR-0019 legacy namespace (mem/{obs|tomb}/...)."""
+    parts = key_expr.split('/')
+    return len(parts) >= 2 and parts[0] == 'mem' and parts[1] in (OBS_MARKER, TOMB_MARKER)
+
+
 def _is_obs_id(segment: str) -> bool:
     return len(segment) == 32 and all(c in '0123456789abcdef' for c in segment)
 

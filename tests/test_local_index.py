@@ -2800,3 +2800,56 @@ def test_search_composite_memory_types_and_source_files(tmp_path: Path) -> None:
         assert obs_wrong_file.observation_id not in ids
     finally:
         idx.close()
+
+
+# ---------------------------------------------------------------------------
+# ADR-0019 Phase D: legacy read gate tests
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_from_zenoh_skips_legacy_obs_when_fallback_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rebuild_from_zenoh must not ingest legacy obs when KIOKU_MESH_LEGACY_READ_FALLBACK is off."""
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    obs = _mk_obs('should-be-skipped')
+    session = _FakeSession([obs], [])
+    idx = LocalIndex.connect(str(tmp_path / 'gate_off_obs.db'))
+    try:
+        stats = idx.rebuild_from_zenoh(session)
+        assert stats.added == 0, 'legacy obs must be skipped when fallback is off'
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_skips_legacy_tomb_when_fallback_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rebuild_from_zenoh must not ingest legacy tombs when fallback is off."""
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    obs = _mk_obs('pre-existing')
+    tomb = Tombstone(observation_id=obs.observation_id, deleted_at='2024-01-01T00:00:00Z')
+    idx = LocalIndex.connect(str(tmp_path / 'gate_off_tomb.db'))
+    try:
+        # Pre-populate with a live row so the rebuild has something to tombstone.
+        idx.upsert(obs)
+        stats = idx.rebuild_from_zenoh(_FakeSession([], [tomb]))
+        # The tomb was skipped — marked_deleted stays 0 (no tombstone applied).
+        assert stats.marked_deleted == 0, 'legacy tomb must be skipped when fallback is off'
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_includes_legacy_obs_when_fallback_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rebuild_from_zenoh includes legacy obs when KIOKU_MESH_LEGACY_READ_FALLBACK=on."""
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    obs = _mk_obs('should-be-ingested')
+    session = _FakeSession([obs], [])
+    idx = LocalIndex.connect(str(tmp_path / 'gate_on_obs.db'))
+    try:
+        stats = idx.rebuild_from_zenoh(session)
+        assert stats.added == 1, 'legacy obs must be ingested when fallback is on'
+    finally:
+        idx.close()
