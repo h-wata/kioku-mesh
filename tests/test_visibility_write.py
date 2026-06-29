@@ -31,10 +31,43 @@ _SETTLE = 0.4
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_defaults_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_defaults_to_mesh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase D: visibility unset defaults to mesh, not legacy (ADR-0019 Phase D)."""
     monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', raising=False)
     monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
+    assert config.resolve_write_visibility('') == ('mesh', '')
+
+
+def test_legacy_write_emergency_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on restores legacy writes (v0.8.x only)."""
+    import kioku_mesh.core.config as _cfg
+
+    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
+    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
+    _cfg._legacy_emergency_warned = False  # reset once-per-process flag for test isolation
     assert config.resolve_write_visibility('') == ('', '')
+    _cfg._legacy_emergency_warned = False  # reset after test
+
+
+def test_legacy_write_emergency_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KIOKU_MESH_LEGACY_WRITE_EMERGENCY=off (default) → mesh."""
+    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'off')
+    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
+    assert config.resolve_write_visibility('') == ('mesh', '')
+
+
+def test_explicit_default_visibility_wins_over_emergency(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KIOKU_MESH_DEFAULT_VISIBILITY env var overrides emergency mode."""
+    import kioku_mesh.core.config as _cfg
+
+    monkeypatch.setenv('KIOKU_MESH_DEFAULT_VISIBILITY', 'mesh')
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
+    _cfg._legacy_emergency_warned = False
+    assert config.resolve_write_visibility('') == ('mesh', '')
+    _cfg._legacy_emergency_warned = False
 
 
 def test_resolve_explicit_wins_over_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,6 +157,7 @@ def _isolate_visibility_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     escaping into the real filesystem above the test run.
     """
     monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', raising=False)
     monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
     monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
     xdg = tmp_path / 'xdg'
@@ -220,8 +254,9 @@ def test_save_responses_show_effective_visibility(
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
-    msg = mcp_server.save_observation(content='legacy save', project='vis-resp')
-    assert 'legacy' in msg
+    # Phase D: default save goes to mesh, not legacy
+    msg = mcp_server.save_observation(content='mesh default save', project='vis-resp')
+    assert 'mesh' in msg
 
     msg = mcp_server.save_observation(content='mesh save', project='vis-resp', visibility='mesh')
     assert 'mesh' in msg
