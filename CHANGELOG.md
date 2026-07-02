@@ -12,6 +12,8 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-02
+
 ### Removed
 
 - **BREAKING**: `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` escape hatch を削除した
