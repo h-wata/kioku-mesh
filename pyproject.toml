@@ -101,6 +101,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately reach into module-private helpers and mock internals.
 "tests/**" = ["SLF001"]
+# One-off PIL-based image/GIF generator scripts, not shipped package code.
+"docs/assets/gen_*.py" = ["ANN", "D", "N802", "N806"]
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = "single"
