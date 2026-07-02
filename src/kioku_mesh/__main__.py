@@ -1823,8 +1823,7 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=['', 'user', 'team', 'mesh'],
         help='replication scope: user (your machines), team, mesh (all peers); '
         'default follows configured default_visibility (env > project > global). '
-        "Since Phase D / v0.8, an unset default falls back to 'mesh'. "
-        'Set KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on as a v0.8.x-only escape hatch to write to the legacy layout.',
+        "Since Phase D / v0.8, an unset default falls back to 'mesh'.",
     )
     p_save.add_argument('--subject', default='', help='short topic name')
     p_save.add_argument('--summary', default='', help='one-line summary shown in search results')
