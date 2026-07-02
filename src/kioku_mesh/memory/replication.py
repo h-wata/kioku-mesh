@@ -27,12 +27,11 @@ this module's surface, so ``store.set_rebuild_on_init_default`` /
 
 import json
 import logging
+import os
 from types import ModuleType
 from typing import Any
 
 import zenoh
-
-from kioku_mesh.core._env_compat import get_env
 
 from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
@@ -116,9 +115,9 @@ def _should_rebuild_on_init() -> bool:
     """
     if _rebuild_explicit_override is not None:
         return _rebuild_explicit_override
-    if get_env('KIOKU_MESH_FORCE_REBUILD', '').strip() == '1':
+    if os.environ.get('KIOKU_MESH_FORCE_REBUILD', '').strip() == '1':
         return True
-    if get_env('KIOKU_MESH_SKIP_REBUILD', '').strip() == '1':
+    if os.environ.get('KIOKU_MESH_SKIP_REBUILD', '').strip() == '1':
         return False
     return _rebuild_on_init_default
 
@@ -136,7 +135,7 @@ def _empty_index_rebuild_allowed() -> bool:
     """
     if _rebuild_explicit_override is False:
         return False
-    if get_env('KIOKU_MESH_SKIP_REBUILD', '').strip() == '1':
+    if os.environ.get('KIOKU_MESH_SKIP_REBUILD', '').strip() == '1':
         return False
     return True
 

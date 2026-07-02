@@ -351,7 +351,7 @@ def test_doctor_embedded_router_status(tmp_path: Path) -> None:
         doctor_result = subprocess.run(
             [sys.executable, '-m', 'kioku_mesh', 'doctor', '--json'],
             env=_subprocess_env(
-                MESH_MEM_ROUTER_ENDPOINT=listen,
+                KIOKU_MESH_ROUTER_ENDPOINT=listen,
                 KIOKU_MESH_STATE_DIR=state_dir,
             ),
             capture_output=True,

@@ -12,8 +12,6 @@ import logging
 import os
 from pathlib import Path
 
-from kioku_mesh.core._env_compat import get_env
-
 from .paths import resolve_app_dir
 
 _log = logging.getLogger(__name__)
@@ -102,7 +100,7 @@ def get_user_id() -> str:
     must never be able to set it — otherwise anyone cloning a repo could
     have their writes land in (and pollute) someone else's user namespace.
     """
-    env = get_env('KIOKU_MESH_USER_ID', '').strip()
+    env = os.environ.get('KIOKU_MESH_USER_ID', '').strip()
     if env:
         return env
     cfg = _read_yaml(_config_path())
@@ -118,7 +116,7 @@ def get_team_id() -> str:
       3. ``team_id:`` in ``~/.config/kioku-mesh/config.yaml``
       4. ``''`` (unset)
     """
-    env = get_env('KIOKU_MESH_TEAM_ID', '').strip()
+    env = os.environ.get('KIOKU_MESH_TEAM_ID', '').strip()
     if env:
         return env
     project = _read_project_config()
@@ -142,7 +140,7 @@ def get_default_visibility() -> str:
     ADR-0029: the v0.8.x legacy write emergency escape hatch that used to
     fall back to legacy (empty) visibility here was removed in v1.0.
     """
-    env = get_env('KIOKU_MESH_DEFAULT_VISIBILITY', '').strip()
+    env = os.environ.get('KIOKU_MESH_DEFAULT_VISIBILITY', '').strip()
     if env:
         return env
     project = _read_project_config()
@@ -222,7 +220,7 @@ def get_backend_mode() -> str:
       2. ``backend:`` field in ``~/.config/kioku-mesh/config.yaml``
       3. Default: ``'zenoh'``
     """
-    env = get_env('KIOKU_MESH_BACKEND', '').strip()
+    env = os.environ.get('KIOKU_MESH_BACKEND', '').strip()
     if env:
         return env
     cfg = _read_yaml(_config_path())

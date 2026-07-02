@@ -456,7 +456,7 @@ def test_gc_project_filter_falls_back_when_index_disabled(
 ) -> None:
     """Gc fast path silently falls through to the global Zenoh scan when the index is disabled.
 
-    With ``MESH_MEM_DISABLE_INDEX=1`` the SQLite-fast path cannot run;
+    With ``KIOKU_MESH_DISABLE_INDEX=1`` the SQLite-fast path cannot run;
     correctness is preserved by the legacy ``_list_tombstones`` sweep.
     """
     monkeypatch.setenv('KIOKU_MESH_DISABLE_INDEX', '1')

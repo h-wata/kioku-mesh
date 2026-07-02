@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "kioku-mesh"
 version = "0.8.0"
-description = "Cross-agent distributed memory over a mesh transport (currently Zenoh)"
+description = "A shared memory mesh for AI coding agents (Zenoh transport)"
 requires-python = ">=3.10"
 readme = "README.md"
 license = "MIT"
@@ -61,10 +61,10 @@ kioku-mesh = "kioku_mesh.__main__:main"
 kioku-mesh-mcp = "kioku_mesh.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kioku_mesh", "src/mesh_mem"]
+packages = ["src/kioku_mesh"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/kioku_mesh", "src/mesh_mem", "tests", "config", "docs", "scripts", "README.md"]
+include = ["src/kioku_mesh", "tests", "config", "docs", "scripts", "README.md"]
 
 # Style: 親の ~/work/.github/pyproject.toml をベースに、本プロジェクトで CPY (copyright) を除外。
 # 他は google style / 119 桁 / single quotes / LF で揃える。

@@ -4,7 +4,7 @@ Covers:
   - LocalBackend contract (save / search / get / delete / gc)
   - contract parity with ZenohBackend via parametrize (zenoh skipped when unavailable)
   - ``kioku-mesh init --mode local`` writes config.yaml with backend: local
-  - MESH_MEM_BACKEND=local env var selects LocalBackend without config.yaml
+  - KIOKU_MESH_BACKEND=local env var selects LocalBackend without config.yaml
   - zenohd absent from PATH does not error in local mode
 """
 
@@ -401,7 +401,6 @@ def test_contract_drain_returns_int(contract_backend: object) -> None:
 
 def test_preexisting_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(a) Pre-existing index.db is migrated to raw.db when LocalBackend opens."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
@@ -459,7 +458,6 @@ def test_preexisting_migration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_raw_store_rebuild_after_index_deletion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(b) After index.db deletion, LocalBackend rebuilds search state from raw.db."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
@@ -534,7 +532,6 @@ def test_contract_local_backend_raw_store_parity(contract_backend: object) -> No
 
 def test_split_brain_index_failure_recovered_by_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(d) raw write success + index no-op: reopen recovers obs via rebuild_from_raw_records."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
@@ -562,7 +559,6 @@ def test_split_brain_index_failure_recovered_by_rebuild(tmp_path: Path, monkeypa
 
 def test_no_ghost_row_on_raw_write_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(d) raw write failure must not create ghost rows in LocalIndex."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
@@ -588,7 +584,6 @@ def test_no_ghost_row_on_raw_write_failure(tmp_path: Path, monkeypatch: pytest.M
 
 def test_physical_delete_not_resurrected_by_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """(d) Physically deleted obs must not reappear after raw.db rebuild on reopen."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 
@@ -612,7 +607,6 @@ def test_physical_delete_not_resurrected_by_rebuild(tmp_path: Path, monkeypatch:
 
 def test_physical_delete_observation_split_brain_raw_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """B1: physical_delete must remove obs that is in raw.db only (split-brain state)."""
-    monkeypatch.setenv('MESH_MEM_STATE_DIR', str(tmp_path))
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     reset_backend()
 

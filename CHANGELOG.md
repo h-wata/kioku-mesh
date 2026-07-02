@@ -6,7 +6,9 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 kioku-mesh is in `0.x`: APIs and on-disk storage schema may change between minor
-versions without a migration path until `1.0.0`.
+versions without a migration path until `1.0.0`. From `1.0.0` onward, the public
+CLI / MCP / Python API and on-disk schema follow Semantic Versioning: breaking
+changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
@@ -23,6 +25,19 @@ versions without a migration path until `1.0.0`.
   `migrate-visibility` の明示的なスキャナと `doctor --check-legacy-namespace` は
   引き続き legacy namespace を読める (移行経路として維持)。移行手順は下記
   "Upgrade notes for v1.0" を参照。
+- **BREAKING**: `mesh_mem` import compatibility shim (`src/mesh_mem/`) を削除した
+  (ADR-0024 / ADR-0029 PR 4)。`import mesh_mem` / `from mesh_mem import ...` は
+  `ImportError` になる。`import kioku_mesh` に置き換えること。
+- **BREAKING**: `MESH_MEM_*` 環境変数の fallback (`KIOKU_MESH_*` が未設定のとき
+  `MESH_MEM_*` を読む挙動) を削除した (`kioku_mesh.core._env_compat` ごと削除、
+  ADR-0024 / ADR-0029 PR 4)。`MESH_MEM_*` は設定しても無視される。
+  `KIOKU_MESH_*` にリネームすること。
+
+### Versioning
+
+- ADR-0029 の semver 宣言: `1.0.0` 以降、public CLI / MCP / Python API と
+  on-disk schema は Semantic Versioning に従う。breaking change は
+  semver-major bump または明示的な migration path を要する。
 
 ### Upgrade notes for v1.0
 
@@ -37,6 +52,10 @@ ADR-0029 が v1.0 のスコープと deprecation 手順を定義した。v1.0.0 
 - legacy データが残っている場合は
   `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` で移行する。
 - 両方の env var を shell/systemd/MCP 設定から削除する。
+- `mesh_mem` パッケージ経由の import を使っている場合は `kioku_mesh` に置き換える
+  (`import mesh_mem` → `import kioku_mesh`)。
+- `MESH_MEM_*` 環境変数を使っている場合は `KIOKU_MESH_*` にリネームする
+  (例: `MESH_MEM_STATE_DIR` → `KIOKU_MESH_STATE_DIR`)。
 
 ## [0.8.0] - 2026-06-30
 

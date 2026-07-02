@@ -18,8 +18,6 @@ import sys
 
 from fastmcp import FastMCP
 
-from kioku_mesh.core._env_compat import get_env
-
 from . import __version__
 from .backend import get_backend
 from .backend import reset_backend
@@ -984,7 +982,7 @@ def purge_expired_messages() -> str:
 
 def _is_tty_misinvocation() -> bool:
     """Return True when stdin is a TTY and KIOKU_MESH_MCP_ALLOW_TTY is not set."""
-    if get_env('KIOKU_MESH_MCP_ALLOW_TTY') == '1':
+    if os.environ.get('KIOKU_MESH_MCP_ALLOW_TTY', '') == '1':
         return False
     try:
         return sys.stdin.isatty()

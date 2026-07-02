@@ -172,7 +172,7 @@ def test_search_falls_back_to_zenoh_when_index_disabled(
     monkeypatch: Any,
     single_zenohd: Any,  # noqa: ARG001
 ) -> None:
-    """``MESH_MEM_DISABLE_INDEX=1`` routes ``search_observations`` to Zenoh.
+    """``KIOKU_MESH_DISABLE_INDEX=1`` routes ``search_observations`` to Zenoh.
 
     Confirmed by writing a row only to Zenoh (LocalIndex disabled) and
     verifying it is still searchable. The flip side of the test above:
