@@ -16,6 +16,13 @@ versions without a migration path until `1.0.0`.
   (ADR-0029 PR 2)。この env var は無視されるようになり、legacy layout
   (`mem/obs/**`) への書き込みはできなくなった。移行手順は下記
   "Upgrade notes for v1.0" を参照。
+- **BREAKING**: `KIOKU_MESH_LEGACY_READ_FALLBACK` escape hatch を削除した
+  (ADR-0029 PR 3)。この env var は無視されるようになり、
+  search / rebuild / replication subscriber / find-by-id のいずれも、
+  設定値によらず legacy namespace (`mem/obs/**`, `mem/tomb/**`) を読まなくなった。
+  `migrate-visibility` の明示的なスキャナと `doctor --check-legacy-namespace` は
+  引き続き legacy namespace を読める (移行経路として維持)。移行手順は下記
+  "Upgrade notes for v1.0" を参照。
 
 ### Upgrade notes for v1.0
 
@@ -23,7 +30,8 @@ ADR-0029 が v1.0 のスコープと deprecation 手順を定義した。v1.0.0 
 前に以下を確認すること:
 
 - `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` は削除済み (このリリース以降、env var は無視される)。
-- `KIOKU_MESH_LEGACY_READ_FALLBACK=on` は v1.0.0 で削除される。
+- `KIOKU_MESH_LEGACY_READ_FALLBACK` は削除済み (このリリース以降、env var は無視され、
+  `on` に設定しても legacy namespace は読まれない)。
 - アップグレード前に `kioku-mesh doctor --check-legacy-namespace` を実行し、
   legacy obs/tomb が 0 件であることを確認する。
 - legacy データが残っている場合は

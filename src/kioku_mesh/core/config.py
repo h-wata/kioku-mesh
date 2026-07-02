@@ -11,19 +11,12 @@ from dataclasses import field
 import logging
 import os
 from pathlib import Path
-import threading
 
 from kioku_mesh.core._env_compat import get_env
 
 from .paths import resolve_app_dir
 
 _log = logging.getLogger(__name__)
-
-# Once-per-process flags + locks for thread-safe once-only WARNs.
-_legacy_read_fallback_warned: bool = False
-_legacy_read_fallback_warned_lock: threading.Lock = threading.Lock()
-_legacy_read_hit_warned: bool = False
-_legacy_read_hit_warned_lock: threading.Lock = threading.Lock()
 
 try:
     import yaml
@@ -134,50 +127,6 @@ def get_team_id() -> str:
         return val
     cfg = _read_yaml(_config_path())
     return str(cfg.get('team_id', '') or '').strip()
-
-
-def _is_legacy_read_fallback_on() -> bool:
-    """Check KIOKU_MESH_LEGACY_READ_FALLBACK and warn once per process when on.
-
-    Deprecated v0.8.x-only recovery path (ADR-0029): removed in v1.0.0, along
-    with the legacy read behavior it restores.
-    Thread-safe: double-checked locking ensures exactly one WARNING per process.
-    """
-    global _legacy_read_fallback_warned
-    val = get_env('KIOKU_MESH_LEGACY_READ_FALLBACK', '').strip().lower()
-    if val == 'on':
-        if not _legacy_read_fallback_warned:
-            with _legacy_read_fallback_warned_lock:
-                if not _legacy_read_fallback_warned:
-                    _log.warning(
-                        'KIOKU_MESH_LEGACY_READ_FALLBACK=on is a deprecated'
-                        ' v0.8.x-only recovery path. v1.0.0 removes this env var'
-                        ' and does not preserve legacy read behavior. Run'
-                        " 'kioku-mesh doctor --check-legacy-namespace' then"
-                        " 'kioku-mesh migrate-visibility --from legacy --to"
-                        " <user|team|mesh>', and remove KIOKU_MESH_LEGACY_READ_FALLBACK"
-                        ' from your environment before upgrading to v1.0.'
-                    )
-                    _legacy_read_fallback_warned = True
-        return True
-    return False
-
-
-def _warn_legacy_read_hit_once(count: int = 1) -> None:
-    """Warn once per process when legacy namespace data is actually returned.
-
-    Thread-safe: double-checked locking ensures exactly one WARNING per process.
-    """
-    global _legacy_read_hit_warned
-    if _legacy_read_hit_warned:
-        return
-    with _legacy_read_hit_warned_lock:
-        if not _legacy_read_hit_warned:
-            _log.warning(
-                "legacy namespace read returned data (%d records); run 'kioku-mesh migrate-visibility' to migrate",
-                count,
-            )
-            _legacy_read_hit_warned = True
 
 
 def get_default_visibility() -> str:
