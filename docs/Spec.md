@@ -35,8 +35,8 @@ Observation は保存されるメモリ本体で、原則 immutable です。内
 | フィールド | 型 | 既定値 / 仕様 |
 | --- | --- | --- |
 | `content` | `str` | 本文。必須。 |
-| `agent_family` | `str` | `MESH_MEM_AGENT_FAMILY`。未設定時は `unknown`。 |
-| `client_id` | `str` | `MESH_MEM_CLIENT_ID`。未設定時は `unknown`。 |
+| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY`。未設定時は `unknown`。 |
+| `client_id` | `str` | `KIOKU_MESH_CLIENT_ID`。未設定時は `unknown`。 |
 | `pc_id` | `str` | ホスト単位の永続 UUID。 |
 | `session_id` | `str` | プロセス単位 ID。 |
 | `project` | `str` | 任意のプロジェクト名。 |
@@ -93,18 +93,18 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 | 識別子 | 解決方法 |
 | --- | --- |
-| `agent_family` | `MESH_MEM_AGENT_FAMILY`。未設定時 `unknown`。 |
-| `client_id` | `MESH_MEM_CLIENT_ID`。未設定時 `unknown`。 |
-| `pc_id` | `MESH_MEM_STATE_DIR/pc_id` に永続化。なければ UUID4 を生成。 |
-| `session_id` | `MESH_MEM_SESSION_ID`。未設定時は `{YYYYMMDDTHHMMSSZ}-{uuid8}` を生成し、プロセス内でキャッシュ。 |
+| `agent_family` | `KIOKU_MESH_AGENT_FAMILY`。未設定時 `unknown`。 |
+| `client_id` | `KIOKU_MESH_CLIENT_ID`。未設定時 `unknown`。 |
+| `pc_id` | `KIOKU_MESH_STATE_DIR/pc_id` に永続化。なければ UUID4 を生成。 |
+| `session_id` | `KIOKU_MESH_SESSION_ID`。未設定時は `{YYYYMMDDTHHMMSSZ}-{uuid8}` を生成し、プロセス内でキャッシュ。 |
 
-`pc_id` の初回生成は一時ファイルと hard link publish により、複数プロセスの同時起動でも空ファイルや不一致 ID を避けます。`MESH_MEM_STATE_DIR` は POSIX hard link をサポートするファイルシステム上に置く必要があります。
+`pc_id` の初回生成は一時ファイルと hard link publish により、複数プロセスの同時起動でも空ファイルや不一致 ID を避けます。`KIOKU_MESH_STATE_DIR` は POSIX hard link をサポートするファイルシステム上に置く必要があります。
 
 複数 agent を 1 ホストで同時に動かす場合の `agent_family` / `client_id` の付け方、`direnv` でのスコープ化、MCP-launched agent への env 渡し方は [docs/multi-agent.md](multi-agent.md) を参照。
 
 状態ディレクトリ:
 
-- `MESH_MEM_STATE_DIR` が非空ならそれを使用。
+- `KIOKU_MESH_STATE_DIR` が非空ならそれを使用。
 - Linux は `~/.local/share/kioku-mesh` 固定。`XDG_DATA_HOME` は互換性維持のため無視。legacy の `~/.local/share/mesh-mem` だけが存在する場合は互換 fallback する。
 - macOS は `~/Library/Application Support/kioku-mesh` 相当を `platformdirs` で解決。
 - Windows は `%LOCALAPPDATA%\kioku-mesh` 相当を `platformdirs` で解決。
@@ -126,7 +126,7 @@ CLI の `kioku-mesh save` と MCP の `save_observation` は、どちらも `Obs
 - `limit` は 1 以上、最大 `MAX_SEARCH=10000` に丸める。これは返却件数上限であり、Zenoh fallback 時の走査件数上限ではない。
 - SQLite 経路の `query` は `payload_json` 全体への case-insensitive substring match。本文だけでなく project、tags、subject、summary などにも一致しうる。
 
-`MESH_MEM_DISABLE_INDEX=1` の場合、検索は Zenoh fallback 経路になります。この経路では `mem/obs/...` と `mem/tomb/...` を取得し、Python 側で project / since / query をフィルタします。Zenoh selector で絞れるのは identity 階層のみです。
+`KIOKU_MESH_DISABLE_INDEX=1` の場合、検索は Zenoh fallback 経路になります。この経路では `mem/obs/...` と `mem/tomb/...` を取得し、Python 側で project / since / query をフィルタします。Zenoh selector で絞れるのは identity 階層のみです。
 
 ### 単一取得
 
@@ -141,7 +141,7 @@ Tombstone 済み Observation も、物理削除や監査用途のため単一取
 
 ## 6. ローカル SQLite インデックス
 
-Zenoh backend の SQLite index は `MESH_MEM_INDEX_DB` があればそのパス、なければ `state_dir()/index.db` に作られます。`MESH_MEM_INDEX_DB=:memory:` も指定できます。Local backend は Zenoh sidecar と物理的に分離した `state_dir()/local/` ディレクトリを使い、`MESH_MEM_INDEX_DB` の影響を受けません。ADR-0028 Phase2 以降、`local` backend における永続化の正本は `state_dir()/local/raw.db` です。`state_dir()/local/index.db` は raw.db から再構築される派生ビューで、破損や欠落があっても raw.db から復元できます。LocalBackend の初期化時に `migrate_from_index` (pre-Phase2 index.db からの copy-only 移行) および `rebuild_from_raw_records` (raw.db を走査して index.db を再構築) が実行されます。
+Zenoh backend の SQLite index は `KIOKU_MESH_INDEX_DB` があればそのパス、なければ `state_dir()/index.db` に作られます。`KIOKU_MESH_INDEX_DB=:memory:` も指定できます。Local backend は Zenoh sidecar と物理的に分離した `state_dir()/local/` ディレクトリを使い、`KIOKU_MESH_INDEX_DB` の影響を受けません。ADR-0028 Phase2 以降、`local` backend における永続化の正本は `state_dir()/local/raw.db` です。`state_dir()/local/index.db` は raw.db から再構築される派生ビューで、破損や欠落があっても raw.db から復元できます。LocalBackend の初期化時に `migrate_from_index` (pre-Phase2 index.db からの copy-only 移行) および `rebuild_from_raw_records` (raw.db を走査して index.db を再構築) が実行されます。
 
 テーブルは `obs_index` で、主な列は以下です。
 
@@ -185,11 +185,11 @@ SQLite は WAL モード、`synchronous=NORMAL`、`busy_timeout=5000` で開か�
 優先順位:
 
 1. 明示 override (`kioku-mesh --rebuild ...`)
-2. `MESH_MEM_FORCE_REBUILD=1`
-3. `MESH_MEM_SKIP_REBUILD=1`
+2. `KIOKU_MESH_FORCE_REBUILD=1`
+3. `KIOKU_MESH_SKIP_REBUILD=1`
 4. モジュール既定値
 
-`--rebuild` は `MESH_MEM_SKIP_REBUILD=1` より優先されます。
+`--rebuild` は `KIOKU_MESH_SKIP_REBUILD=1` より優先されます。
 
 ## 8. 削除と GC
 
@@ -224,7 +224,7 @@ wildcard delete の対応状況は Zenoh backend に依存するため、失敗�
 
 Backend mode の解決順序:
 
-1. `MESH_MEM_BACKEND` 環境変数。
+1. `KIOKU_MESH_BACKEND` 環境変数。
 2. `~/.config/kioku-mesh/config.yaml` の `backend:`。legacy の `~/.config/mesh-mem/config.yaml` だけが存在する場合は互換 fallback する。
 3. 既定値 `zenoh`。
 
@@ -311,15 +311,15 @@ MCP tool は identity を引数に持ちません。検索 tool だけは narrow
 | --- | --- |
 | `ZENOH_CONNECT` | Python client が接続する Zenoh endpoint。既定 `tcp/localhost:7447`。 |
 | `ZENOH_BACKEND_ROCKSDB_ROOT` | zenohd RocksDB backend の保存先。zenohd 側設定で使用。 |
-| `MESH_MEM_AGENT_FAMILY` | 保存時の `agent_family`。 |
-| `MESH_MEM_CLIENT_ID` | 保存時の `client_id`。 |
-| `MESH_MEM_SESSION_ID` | 保存時の `session_id` を固定する。 |
-| `MESH_MEM_STATE_DIR` | `pc_id` と SQLite index の既定配置先。 |
-| `MESH_MEM_BACKEND` | `local` / `zenoh` の backend mode override。 |
-| `MESH_MEM_INDEX_DB` | SQLite index DB の明示パス。 |
-| `MESH_MEM_DISABLE_INDEX` | `1` で SQLite index を無効化し、Zenoh fallback を使う。 |
-| `MESH_MEM_SKIP_REBUILD` | `1` で起動時 rebuild を skip。 |
-| `MESH_MEM_FORCE_REBUILD` | `1` で起動時 rebuild を強制。 |
+| `KIOKU_MESH_AGENT_FAMILY` | 保存時の `agent_family`。 |
+| `KIOKU_MESH_CLIENT_ID` | 保存時の `client_id`。 |
+| `KIOKU_MESH_SESSION_ID` | 保存時の `session_id` を固定する。 |
+| `KIOKU_MESH_STATE_DIR` | `pc_id` と SQLite index の既定配置先。 |
+| `KIOKU_MESH_BACKEND` | `local` / `zenoh` の backend mode override。 |
+| `KIOKU_MESH_INDEX_DB` | SQLite index DB の明示パス。 |
+| `KIOKU_MESH_DISABLE_INDEX` | `1` で SQLite index を無効化し、Zenoh fallback を使う。 |
+| `KIOKU_MESH_SKIP_REBUILD` | `1` で起動時 rebuild を skip。 |
+| `KIOKU_MESH_FORCE_REBUILD` | `1` で起動時 rebuild を強制。 |
 
 ## 14. 制約
 

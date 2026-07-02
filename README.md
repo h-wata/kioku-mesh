@@ -109,6 +109,10 @@ Useful environment variables (the `MESH_MEM_` prefix was renamed to
 | `KIOKU_MESH_TEAM_ID` | Team slug for `--visibility team` |
 | `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = `mesh` since Phase D / v0.8) |
 
+Troubleshooting variables (`KIOKU_MESH_FORCE_REBUILD`, `KIOKU_MESH_DISABLE_INDEX`,
+`KIOKU_MESH_SKIP_REBUILD`, `KIOKU_MESH_INDEX_DB`) are documented in
+[docs/Spec.md](docs/Spec.md#13-環境変数).
+
 ### Visibility migration
 
 If you have observations written before v0.8 (legacy layout `mem/obs/**`):
