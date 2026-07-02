@@ -10,24 +10,34 @@ import os
 
 from PIL import Image
 from PIL import ImageDraw
+from PIL import ImageFont
+
+FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+
+
+def font(size, bold=False):
+    return ImageFont.truetype(FONT_BOLD if bold else FONT_PATH, size)
+
 
 # ─── canvas ─────────────────────────────────────────────────────────────────
 W, H = 520, 320
-BG = (14, 18, 32)
-C_EDGE = (40, 60, 110)
-C_NODE = (55, 85, 155)
-C_HUB = (30, 120, 220)
-C_ACTIVE = (80, 200, 255)
-C_PULSE = (160, 230, 255)
-C_OFFLINE = (35, 38, 55)
-C_RECOVER = (60, 180, 100)
-C_NEW = (200, 160, 50)
-C_TEXT = (180, 210, 255)
-C_LABEL = (120, 160, 210)
+BG = (16, 20, 36)
+C_EDGE = (80, 105, 170)
+C_NODE = (85, 120, 200)
+C_HUB = (45, 145, 235)
+C_ACTIVE = (110, 220, 255)
+C_PULSE = (170, 235, 255)
+C_OFFLINE = (80, 85, 105)
+C_RECOVER = (75, 205, 125)
+C_NEW = (230, 180, 65)
+C_TEXT = (230, 238, 255)
+C_LABEL = (185, 208, 240)
 
 R_HUB = 22
 R_LEAF = 16
-FONT_SIZE = 11
+TITLE_SIZE = 14
+LABEL_SIZE = 13
 
 OUT_DIR = os.path.dirname(__file__)
 
@@ -50,7 +60,7 @@ def draw_node(draw, x, y, r, fill, outline=None, label='', label_color=C_LABEL):
     draw.ellipse((x - glow_r, y - glow_r, x + glow_r, y + glow_r), fill=glow_color)
     draw.ellipse((x - r, y - r, x + r, y + r), fill=fill, outline=outline or fill)
     if label:
-        draw.text((x, y + r + 6), label, fill=label_color, anchor='mt')
+        draw.text((x, y + r + 6), label, fill=label_color, anchor='mt', font=font(LABEL_SIZE, bold=True))
 
 
 def draw_edge(draw, p1, p2, color=C_EDGE, width=2):
@@ -64,7 +74,7 @@ def draw_packet(draw, p1, p2, t, color=C_ACTIVE, r=5):
 
 
 def draw_title(draw, text):
-    draw.text((W // 2, 14), text, fill=C_TEXT, anchor='mm')
+    draw.text((W // 2, 14), text, fill=C_TEXT, anchor='mm', font=font(TITLE_SIZE, bold=True))
 
 
 def new_frame():
@@ -145,10 +155,13 @@ def base_frame(highlight=None, offline=None, new_node=None, new_edges=None, puls
 
     if pulse_nodes:
         for n in pulse_nodes:
-            pr = int((R_HUB if n in HUBS else R_LEAF) * (1 + pulse_t * 1.5))
-            alpha = max(0.0, 0.5 - pulse_t * 0.5)
-            c = alpha_blend(BG, C_PULSE, alpha)
-            draw.ellipse((n[0] - pr, n[1] - pr, n[0] + pr, n[1] + pr), fill=c)
+            base_r = R_HUB if n in HUBS else R_LEAF
+            # stay within a tight halo around the node rim so the ring never
+            # sweeps over the label drawn just below (label starts at r + 6).
+            pr = base_r + int(pulse_t * 5)
+            alpha = max(0.0, 0.65 - pulse_t * 0.65)
+            ring_color = alpha_blend(BG, C_PULSE, alpha)
+            draw.ellipse((n[0] - pr, n[1] - pr, n[0] + pr, n[1] + pr), outline=ring_color, width=3)
 
     if new_node:
         draw_node(draw, new_node[0], new_node[1], R_LEAF, C_NEW, label=new_node[2] if len(new_node) > 2 else 'New')

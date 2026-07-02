@@ -52,7 +52,7 @@ draw = ImageDraw.Draw(img)
 draw.text((W // 2, 30), 'kioku-mesh', fill=C_TITLE, anchor='mm', font=font(22, bold=True))
 draw.text(
     (W // 2, 54),
-    'Distributed Claude agent memory over a Zenoh mesh',
+    'A shared memory mesh for your AI coding agents',
     fill=C_SUB,
     anchor='mm',
     font=font(13),
@@ -65,6 +65,14 @@ NODES = {
     'C': (400, 248, 'Laptop'),
     'D': (268, 338, 'Raspi'),
     'E': (535, 328, 'Cloud VM'),
+}
+# cross-tool agents (Claude Code / Codex CLI / Gemini CLI), not a Claude-only mesh.
+AGENTS = {
+    'A': ('Claude', 'Code'),
+    'B': ('Codex', 'CLI'),
+    'C': ('Claude', 'Code'),
+    'D': ('Gemini', 'CLI'),
+    'E': ('Codex', 'CLI'),
 }
 KEYS = list(NODES.keys())
 EDGES = [(KEYS[i], KEYS[j]) for i in range(len(KEYS)) for j in range(i + 1, len(KEYS))]
@@ -118,8 +126,9 @@ for key, (x, y, label) in NODES.items():
         (x - R_INNER, y - R_INNER, x + R_INNER, y + R_INNER),
         fill=lerp_color(C_AGENT_BG, C_AGENT_RIM, 0.12),
     )
-    draw.text((x, y - 6), 'Claude', fill=C_AGENT_TXT, anchor='mm', font=font(11, bold=True))
-    draw.text((x, y + 8), 'Code', fill=lerp_color(C_AGENT_TXT, BG, 0.35), anchor='mm', font=font(10))
+    agent_line1, agent_line2 = AGENTS[key]
+    draw.text((x, y - 6), agent_line1, fill=C_AGENT_TXT, anchor='mm', font=font(11, bold=True))
+    draw.text((x, y + 8), agent_line2, fill=lerp_color(C_AGENT_TXT, BG, 0.35), anchor='mm', font=font(10))
     draw.text((x, y + R_NODE + 9), label, fill=C_SUB, anchor='mt', font=font(11))
 
 # ── "No X" badge (top right) ─────────────────────────────────────────────────
