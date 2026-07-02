@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kioku-mesh"
-version = "0.8.0"
+version = "1.0.0"
 description = "A shared memory mesh for AI coding agents (Zenoh transport)"
 requires-python = ">=3.10"
 readme = "README.md"
@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "h-wata" },
 ]
-keywords = ["mesh", "distributed-memory", "zenoh", "mcp", "agent", "memory"]
+keywords = ["mesh", "shared-memory-mesh", "zenoh", "mcp", "agent", "memory"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
