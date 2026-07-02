@@ -10,6 +10,19 @@ versions without a migration path until `1.0.0`.
 
 ## [Unreleased]
 
+### Upgrade notes for v1.0
+
+ADR-0029 が v1.0 のスコープと deprecation 手順を定義した。v1.0.0 へのアップグレード
+前に以下を確認すること:
+
+- `KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on` は v1.0.0 で削除される。
+- `KIOKU_MESH_LEGACY_READ_FALLBACK=on` は v1.0.0 で削除される。
+- アップグレード前に `kioku-mesh doctor --check-legacy-namespace` を実行し、
+  legacy obs/tomb が 0 件であることを確認する。
+- legacy データが残っている場合は
+  `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` で移行する。
+- 両方の env var を shell/systemd/MCP 設定から削除する。
+
 ## [0.8.0] - 2026-06-30
 
 ### BREAKING CHANGES

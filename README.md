@@ -133,6 +133,18 @@ kioku-mesh doctor
 After migration, reads from the legacy namespace are no longer needed.
 `KIOKU_MESH_LEGACY_READ_FALLBACK` can be removed from your environment.
 
+#### Upgrade notes for v1.0
+
+ADR-0029 defines v1.0 scope and the deprecation timeline for both legacy escape
+hatches. Before upgrading to v1.0.0:
+
+1. `KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on` is removed in v1.0.0.
+2. `KIOKU_MESH_LEGACY_READ_FALLBACK=on` is removed in v1.0.0.
+3. Run `kioku-mesh doctor --check-legacy-namespace` and confirm zero legacy obs/tomb.
+4. If legacy entries remain, migrate with
+   `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>`.
+5. Remove both env vars from your shell/systemd/MCP configuration.
+
 ### Visibility scopes (experimental)
 
 `save` and the MCP `save_observation` tool accept `--visibility` /

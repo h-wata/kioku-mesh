@@ -140,15 +140,21 @@ def get_team_id() -> str:
 def _is_legacy_emergency_on() -> bool:
     """Check KIOKU_MESH_LEGACY_WRITE_EMERGENCY and warn once per process when on.
 
-    v0.8.x only — this escape hatch will be removed in v1.0.
+    Deprecated v0.8.x-only recovery path (ADR-0029): removed in v1.0.0, along
+    with the legacy write behavior it restores.
     """
     global _legacy_emergency_warned
     val = get_env('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', '').strip().lower()
     if val == 'on':
         if not _legacy_emergency_warned:
             _log.warning(
-                'legacy write emergency mode enabled (KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on)'
-                ' — v0.8.x only, will be removed in v1.0'
+                'KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on is a deprecated v0.8.x-only'
+                ' recovery path. v1.0.0 removes this env var and does not preserve'
+                " legacy write behavior. Run 'kioku-mesh doctor"
+                " --check-legacy-namespace' then 'kioku-mesh migrate-visibility"
+                " --from legacy --to <user|team|mesh>', and remove"
+                ' KIOKU_MESH_LEGACY_WRITE_EMERGENCY from your environment before'
+                ' upgrading to v1.0.'
             )
             _legacy_emergency_warned = True
         return True
@@ -158,7 +164,8 @@ def _is_legacy_emergency_on() -> bool:
 def _is_legacy_read_fallback_on() -> bool:
     """Check KIOKU_MESH_LEGACY_READ_FALLBACK and warn once per process when on.
 
-    v0.8.x only — will be removed in v1.0.
+    Deprecated v0.8.x-only recovery path (ADR-0029): removed in v1.0.0, along
+    with the legacy read behavior it restores.
     Thread-safe: double-checked locking ensures exactly one WARNING per process.
     """
     global _legacy_read_fallback_warned
@@ -168,8 +175,13 @@ def _is_legacy_read_fallback_on() -> bool:
             with _legacy_read_fallback_warned_lock:
                 if not _legacy_read_fallback_warned:
                     _log.warning(
-                        'legacy read fallback enabled (KIOKU_MESH_LEGACY_READ_FALLBACK=on)'
-                        ' — v0.8.x only, will be removed in v1.0'
+                        'KIOKU_MESH_LEGACY_READ_FALLBACK=on is a deprecated'
+                        ' v0.8.x-only recovery path. v1.0.0 removes this env var'
+                        ' and does not preserve legacy read behavior. Run'
+                        " 'kioku-mesh doctor --check-legacy-namespace' then"
+                        " 'kioku-mesh migrate-visibility --from legacy --to"
+                        " <user|team|mesh>', and remove KIOKU_MESH_LEGACY_READ_FALLBACK"
+                        ' from your environment before upgrading to v1.0.'
                     )
                     _legacy_read_fallback_warned = True
         return True
