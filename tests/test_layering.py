@@ -175,41 +175,64 @@ def test_bridge_may_import_messaging_and_memory() -> None:
     ).exists(), 'bridge/message_memory.py が存在しません — Phase 4 bridge が実装されていません'
 
 
-DERIVED_VIEW_MODULES = [
-    'embedding_store',
-    'graph_store',
-    'summary_store',
-    'recall_cache',
-]
+# INV-7 gate policy (Issue #249): rather than an allowlist of known derived-view
+# *names* (which silently skips anything not on the list — the bug this test
+# used to have), this is a denylist of modules known NOT to be derived views.
+# Every other module found by scanning memory/*.py is treated as a derived-view
+# candidate and MUST expose DERIVED_VIEW_REBUILD_SYMBOL. Adding a new module to
+# memory/ without adding it here means it is checked automatically; a real
+# derived view fails loudly until it implements the rebuild path, and a real
+# non-derived-view module must be added here with a one-line reason.
+RAW_AND_INFRA_MODULES = {
+    'store.py': 'raw write/read path to Zenoh — this IS the rebuild source, not a derived view',
+    'local_raw_store.py': 'raw Observation/Tombstone persistence itself — rebuild source, not a derived view',
+    'local_index.py': (
+        'SQLite read cache; already implements its own rebuild_from_zenoh and is covered by test_memory_files_exist'
+    ),
+    'backend.py': 'orchestrates local/zenoh MemoryBackend selection — no persisted derived state of its own',
+    'pending_queue.py': 'transient outbox queue for pending puts — not a persisted view',
+    'purge.py': 'gc/tombstone physical purge over the raw store — not a persisted view',
+    'replication.py': 'replication bookkeeping — not a persisted view',
+    'save_lint.py': 'stateless save-time lint checks — not a persisted view',
+    'supersede.py': 'supersede/tombstone logic operating on the raw store — not a persisted view',
+    'visibility_migration.py': 'one-off migration CLI helper — not a persisted view',
+}
 
 DERIVED_VIEW_REBUILD_SYMBOL = 'rebuild_from_raw'
+
+
+def _discover_derived_view_candidates() -> list[Path]:
+    """Every memory/*.py module not explicitly exempted in RAW_AND_INFRA_MODULES."""
+    memory_dir = SRC_ROOT / 'memory'
+    return sorted(
+        p for p in memory_dir.glob('*.py') if p.name != '__init__.py' and p.name not in RAW_AND_INFRA_MODULES
+    )
 
 
 def test_derived_view_modules_have_rebuild_path() -> None:
     """INV-7: Future derived views must expose a rebuild path from raw Observation/Tombstone.
 
-    ADR-0028 invariant 7 states:
-    "Future derived views such as embedding, graph, summary, and recall cache
-    cannot contain non-reconstructable authority."
+    ADR-0028 states derived views (embedding, graph, summary, recall cache, ...)
+    must be reconstructable from raw Observation/Tombstone and must not hold
+    non-reconstructable authority.
 
-    Every persisted derived view module in memory/ must expose a function
-    named 'rebuild_from_raw' (or analogous symbol) so the derived state can
-    be reconstructed from raw Observation/Tombstone input. This test passes
-    while none of the derived view modules exist; it FAILS as soon as one is
-    added without the required rebuild symbol.
+    This scans memory/*.py dynamically (see RAW_AND_INFRA_MODULES) instead of
+    matching a fixed list of expected names, so a derived view added under any
+    module name is caught — not just the four names originally anticipated.
+    Every module found this way must expose a function or method named
+    'rebuild_from_raw' (or analogous symbol). This test passes while no such
+    module exists yet; it FAILS as soon as one is added without the required
+    rebuild symbol, or added without being exempted in RAW_AND_INFRA_MODULES.
     """
-    memory_dir = SRC_ROOT / 'memory'
     violations: list[str] = []
-    for module_name in DERIVED_VIEW_MODULES:
-        module_file = memory_dir / f'{module_name}.py'
-        if not module_file.exists():
-            continue
+    for module_file in _discover_derived_view_candidates():
         tree = ast.parse(module_file.read_text(encoding='utf-8'))
         defined = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
         if DERIVED_VIEW_REBUILD_SYMBOL not in defined:
             violations.append(
-                f'{module_name}.py: missing {DERIVED_VIEW_REBUILD_SYMBOL!r} — '
-                'INV-7 requires every derived view to have a rebuild path from raw Observation/Tombstone'
+                f'{module_file.name}: missing {DERIVED_VIEW_REBUILD_SYMBOL!r} — '
+                'INV-7 requires every derived view to have a rebuild path from raw Observation/Tombstone '
+                '(or add it to RAW_AND_INFRA_MODULES with a reason if it is not a derived view)'
             )
     assert not violations, 'Derived view modules violate INV-7 (non-reconstructable authority):\n' + '\n'.join(
         violations
@@ -223,8 +246,12 @@ def test_derived_view_modules_policy_is_documented() -> None:
     test_derived_view_modules_have_rebuild_path test above violates ADR-0028
     INV-7 and must be accompanied by an ADR supersession.
     """
-    assert DERIVED_VIEW_MODULES, 'DERIVED_VIEW_MODULES must list at least one future module name'
+    assert RAW_AND_INFRA_MODULES, 'RAW_AND_INFRA_MODULES must document at least the known raw/infra modules'
     assert DERIVED_VIEW_REBUILD_SYMBOL, 'DERIVED_VIEW_REBUILD_SYMBOL must be a non-empty string'
+    memory_dir = SRC_ROOT / 'memory'
+    actual = {f.name for f in memory_dir.glob('*.py') if f.name != '__init__.py'}
+    stale = set(RAW_AND_INFRA_MODULES) - actual
+    assert not stale, f'RAW_AND_INFRA_MODULES references modules that no longer exist: {stale}'
 
 
 def test_bridge_does_not_create_memory_messaging_cycle() -> None:
