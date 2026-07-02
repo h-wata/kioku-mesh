@@ -10,7 +10,7 @@ QueryErrorReply / _iter_ok_replies / with_retry path:
 
 Phase 3 routes ``search_observations`` through the SQLite local index by
 default; the zenoh retry path that these tests exercise is only entered
-when ``MESH_MEM_DISABLE_INDEX=1``. Tests below force that env var so the
+when ``KIOKU_MESH_DISABLE_INDEX=1``. Tests below force that env var so the
 retry semantics under test are actually reachable.
 """
 
@@ -82,7 +82,7 @@ class _FakeSession:
 def _install_fake_session(monkeypatch: pytest.MonkeyPatch, session: _FakeSession) -> None:
     """Redirect ``_open_session`` so ``get_session`` / ``_reset_session`` cycle uses the fake.
 
-    Also forces ``MESH_MEM_DISABLE_INDEX=1`` so ``search_observations`` falls
+    Also forces ``KIOKU_MESH_DISABLE_INDEX=1`` so ``search_observations`` falls
     back to the legacy zenoh path being exercised by these tests, and resets
     the cached LocalIndex so the env var takes effect on the next call.
     """
@@ -624,7 +624,7 @@ def test_search_via_zenoh_cursor_strict_tuple_walks_same_timestamp(monkeypatch: 
     The bulk-delete cursor contract (#66) requires the fallback to apply
     the same strict ``(created_at, observation_id) < cursor`` filter and
     return results in ``(created_at, observation_id)`` DESC order. Without
-    this, ``MESH_MEM_DISABLE_INDEX=1`` would stall the iterator on rows
+    this, ``KIOKU_MESH_DISABLE_INDEX=1`` would stall the iterator on rows
     that share a single ``created_at``.
     """
     ts = '2025-06-01T00:00:00.000000Z'

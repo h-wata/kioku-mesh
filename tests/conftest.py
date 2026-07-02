@@ -1,7 +1,7 @@
 """pytest fixtures for mesh-mem tests.
 
 Layered fixtures:
-    - ``isolated_state_dir``: redirects ``MESH_MEM_STATE_DIR`` at tmp path and
+    - ``isolated_state_dir``: redirects ``KIOKU_MESH_STATE_DIR`` at tmp path and
       resets identity / store caches. Always active.
     - ``single_zenohd`` (scope=session): launches one zenohd router on a random
       loopback port so integration tests share a single transport. Multicast
@@ -42,12 +42,12 @@ from kioku_mesh.backend import reset_backend
 
 @pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """Redirect MESH_MEM_STATE_DIR per test and reset identity / store / index caches."""
+    """Redirect KIOKU_MESH_STATE_DIR per test and reset identity / store / index caches."""
     monkeypatch.setenv('KIOKU_MESH_STATE_DIR', str(tmp_path))
-    # MESH_MEM_INDEX_DB normally resolves under state_dir(), but if the env var
+    # KIOKU_MESH_INDEX_DB normally resolves under state_dir(), but if the env var
     # points elsewhere the test would write into the real state_dir — clear it.
     monkeypatch.delenv('KIOKU_MESH_INDEX_DB', raising=False)
-    # Clear MESH_MEM_BACKEND so tests that don't set it use the default (zenoh).
+    # Clear KIOKU_MESH_BACKEND so tests that don't set it use the default (zenoh).
     monkeypatch.delenv('KIOKU_MESH_BACKEND', raising=False)
     identity.reset_caches()
     # store._session / _index may carry stale state from previous tests — clear explicitly.

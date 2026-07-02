@@ -345,7 +345,7 @@ def test_unknown_future_visibility_clamps_to_legacy() -> None:
 
 
 def test_resolve_rejects_malformed_scope_slug(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A bad MESH_MEM_USER_ID fails at resolution time with ValueError.
+    """A bad KIOKU_MESH_USER_ID fails at resolution time with ValueError.
 
     Codex P2 on PR #179: failing later inside the key builder would bypass
     the MCP/CLI error handling around resolve_write_visibility.

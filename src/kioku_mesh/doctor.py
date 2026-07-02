@@ -26,8 +26,6 @@ import shutil
 import socket
 from typing import Any, Callable
 
-from kioku_mesh.core._env_compat import get_env
-
 from . import __version__
 from .identity import state_dir
 from .paths import resolve_app_dir
@@ -300,7 +298,11 @@ def check_embedded_router(
     A missing router is WARN (not FAIL) because zenohd or a remote router
     may serve the same role.
     """
-    raw = endpoint if endpoint is not None else get_env('KIOKU_MESH_ROUTER_ENDPOINT', MESH_ROUTER_DEFAULT_ENDPOINT)
+    raw = (
+        endpoint
+        if endpoint is not None
+        else os.environ.get('KIOKU_MESH_ROUTER_ENDPOINT', MESH_ROUTER_DEFAULT_ENDPOINT)
+    )
     parsed = _parse_zenoh_endpoint(raw)
     if parsed is None:
         return CheckResult(

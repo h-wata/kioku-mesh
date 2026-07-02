@@ -29,12 +29,11 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 from pathlib import Path
 import sqlite3
 import threading
 from typing import Iterator
-
-from kioku_mesh.core._env_compat import get_env
 
 from ..core.identity import state_dir
 from ..core.keyspace import is_legacy_key
@@ -149,7 +148,7 @@ def _validate_search_mode(search_mode: str) -> str:
 
 
 def _disabled_via_env() -> bool:
-    return get_env('KIOKU_MESH_DISABLE_INDEX', '').strip() == '1'
+    return os.environ.get('KIOKU_MESH_DISABLE_INDEX', '').strip() == '1'
 
 
 def _shadow_now_iso() -> str:
@@ -186,7 +185,7 @@ def _resolve_db_path() -> str:
     Returns the literal ``:memory:`` if explicitly requested so callers can
     short-circuit to an in-process DB without touching disk.
     """
-    override = get_env('KIOKU_MESH_INDEX_DB', '').strip()
+    override = os.environ.get('KIOKU_MESH_INDEX_DB', '').strip()
     if override:
         return override
     return str(state_dir() / 'index.db')

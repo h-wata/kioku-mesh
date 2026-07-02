@@ -97,8 +97,10 @@ kioku-mesh doctor
 
 Useful environment variables:
 
-> **Note (ADR-0024):** The env var prefix was renamed from `MESH_MEM_` to `KIOKU_MESH_`.
-> The old `MESH_MEM_*` names are still accepted as a deprecated fallback until v1.0.0.
+> **Note (ADR-0024 / ADR-0029):** The env var prefix was renamed from `MESH_MEM_` to
+> `KIOKU_MESH_`. The old `MESH_MEM_*` names were accepted as a deprecated fallback
+> through the `0.x` series; that fallback has been removed ahead of `v1.0.0`, and
+> only `KIOKU_MESH_*` is read now.
 
 | Variable | Purpose |
 |---|---|
@@ -424,7 +426,9 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
 - macOS support is not verified yet.
 - `delete` writes a tombstone. `gc` performs physical cleanup.
 - `0.x` releases are experimental; breaking changes can happen in minor
-  versions.
+  versions. From `1.0.0` onward, the public CLI / MCP / Python API and
+  on-disk schema follow Semantic Versioning: breaking changes require a
+  semver-major bump or an explicit migration path (ADR-0029).
 
 More detail lives in [docs/Spec.md](docs/Spec.md), [CHANGELOG.md](CHANGELOG.md),
 and the design records under [docs/adr/](docs/adr/).

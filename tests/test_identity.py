@@ -195,7 +195,7 @@ def test_agent_family_default_is_unknown(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_agent_family_treats_empty_env_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Empty MESH_MEM_AGENT_FAMILY falls through to the default rather than producing an empty key segment."""
+    """Empty KIOKU_MESH_AGENT_FAMILY falls through to the default rather than producing an empty key segment."""
     monkeypatch.setenv('KIOKU_MESH_AGENT_FAMILY', '   ')
     value, source = resolve_agent_family()
     assert value == 'unknown'

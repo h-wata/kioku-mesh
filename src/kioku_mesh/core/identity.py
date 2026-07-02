@@ -29,8 +29,6 @@ import socket
 import sys
 import uuid
 
-from kioku_mesh.core._env_compat import get_env
-
 _pc_id_cache: str | None = None
 _session_id_cache: str | None = None
 
@@ -117,7 +115,7 @@ def state_dir() -> pathlib.Path:
     from .paths import APP_DIR
     from .paths import resolve_app_dir
 
-    override = get_env('KIOKU_MESH_STATE_DIR')
+    override = os.environ.get('KIOKU_MESH_STATE_DIR', '')
     if override:
         d = pathlib.Path(override)
     elif sys.platform == 'linux':
@@ -212,7 +210,7 @@ def resolve_agent_family() -> tuple[str, IdentitySource]:
     higher than the cost of an uninformative default. Launcher detection
     is a follow-up that will produce :attr:`IdentitySource.DETECTED`.
     """
-    v = get_env('KIOKU_MESH_AGENT_FAMILY', '').strip()
+    v = os.environ.get('KIOKU_MESH_AGENT_FAMILY', '').strip()
     if v:
         return v, IdentitySource.ENV
     return 'unknown', IdentitySource.DEFAULT
@@ -226,7 +224,7 @@ def resolve_client_id() -> tuple[str, IdentitySource]:
     plays the opaque-UUID role. Falls back to safe placeholders when user
     or hostname can't be resolved (e.g. in minimal containers).
     """
-    v = get_env('KIOKU_MESH_CLIENT_ID', '').strip()
+    v = os.environ.get('KIOKU_MESH_CLIENT_ID', '').strip()
     if v:
         return v, IdentitySource.ENV
     user = _sanitize_key_segment(_default_user_name(), 'user')
@@ -254,7 +252,7 @@ def get_session_id() -> str:
     global _session_id_cache
     if _session_id_cache is not None:
         return _session_id_cache
-    sid = get_env('KIOKU_MESH_SESSION_ID')
+    sid = os.environ.get('KIOKU_MESH_SESSION_ID', '')
     if not sid:
         ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         sid = f'{ts}-{uuid.uuid4().hex[:8]}'

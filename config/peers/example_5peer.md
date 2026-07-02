@@ -169,7 +169,7 @@ peers see it, check (in order):
    §Time sync, and
    [`docs/poc-reports/topology-2026-05-10.md`](../../docs/poc-reports/topology-2026-05-10.md) §B
    for the WSL2 manual-step recipe).
-5. **Index disabled** — if the receiving peer has `MESH_MEM_DISABLE_INDEX=1`
+5. **Index disabled** — if the receiving peer has `KIOKU_MESH_DISABLE_INDEX=1`
    the search reads via Zenoh full scan; results should still match.
 6. **Storage volume mismatch** — confirm every peer's config has the same
    `key_expr`, `strip_prefix`, and replication block byte-for-byte.

@@ -26,8 +26,6 @@ import socket
 import threading
 from typing import Any
 
-from kioku_mesh.core._env_compat import get_env
-
 from ..core.config import get_team_id
 from ..core.config import get_user_id
 from ..core.identity import get_agent_family
@@ -59,7 +57,7 @@ def _publication_scopes() -> list[str]:
     team_id = get_team_id()
     if team_id:
         scopes.append(f'team/{team_id}')
-    if get_env('KIOKU_MESH_MESSAGING_PRESENCE_MESH') == '1':
+    if os.environ.get('KIOKU_MESH_MESSAGING_PRESENCE_MESH', '') == '1':
         scopes.append('mesh')
     return scopes
 
