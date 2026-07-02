@@ -804,34 +804,45 @@ def test_search_via_zenoh_and_unchanged_by_refactor(monkeypatch: pytest.MonkeyPa
 
 
 # ---------------------------------------------------------------------------
-# ADR-0019 Phase D: legacy read gate tests
+# ADR-0029 PR 3: legacy read is always skipped (KIOKU_MESH_LEGACY_READ_FALLBACK
+# escape hatch removed in v1.0; the env var is now inert under any value).
 # ---------------------------------------------------------------------------
 
 
-def test_search_via_zenoh_skips_legacy_obs_when_fallback_off(
+@pytest.mark.parametrize('legacy_read_fallback_env', [None, 'on'])
+def test_search_via_zenoh_always_skips_legacy_obs(
     monkeypatch: pytest.MonkeyPatch,
+    legacy_read_fallback_env: str | None,
 ) -> None:
-    """_search_via_zenoh must return nothing for legacy-key obs when fallback is off."""
-    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    """_search_via_zenoh must never surface legacy-key obs, regardless of the (now-inert) env var."""
+    if legacy_read_fallback_env is None:
+        monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    else:
+        monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', legacy_read_fallback_env)
     obs = Observation(content='legacy-content', project='gate-off')
     # _ok_legacy_reply generates legacy key mem/obs/fake/k/p/s/{id}
     fake = _FakeSession([[_ok_legacy_reply(obs)], []])  # tomb batch empty, obs batch with legacy key
     _install_fake_session(monkeypatch, fake)
     results = store.search_observations(query='legacy-content', project='gate-off')
-    assert not results, 'legacy obs must be skipped when KIOKU_MESH_LEGACY_READ_FALLBACK is off'
+    assert not results, 'legacy obs must never be surfaced (v1.0 removed the read fallback escape hatch)'
 
 
-def test_find_by_id_via_zenoh_skips_legacy_obs_when_fallback_off(
+@pytest.mark.parametrize('legacy_read_fallback_env', [None, 'on'])
+def test_find_by_id_via_zenoh_always_skips_legacy_obs(
     monkeypatch: pytest.MonkeyPatch,
+    legacy_read_fallback_env: str | None,
 ) -> None:
-    """_find_by_id_via_zenoh must return None for a legacy-key obs when fallback is off."""
-    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    """_find_by_id_via_zenoh must never resolve a legacy-key obs, regardless of the (now-inert) env var."""
+    if legacy_read_fallback_env is None:
+        monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
+    else:
+        monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', legacy_read_fallback_env)
     obs = Observation(content='by-id-legacy')
     fake = _FakeSession([[_ok_legacy_reply(obs)]])
     monkeypatch.setattr(transport, '_open_session', lambda: fake)
     store._reset_session()
     result = store._find_by_id_via_zenoh(obs.observation_id)
-    assert result is None, 'legacy obs must be skipped in find_by_id when fallback is off'
+    assert result is None, 'legacy obs must never be resolved (v1.0 removed the read fallback escape hatch)'
 
 
 def test_facade_reexports_are_plain_aliases() -> None:

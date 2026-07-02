@@ -36,8 +36,6 @@ from typing import Iterator
 
 from kioku_mesh.core._env_compat import get_env
 
-from ..core.config import _is_legacy_read_fallback_on
-from ..core.config import _warn_legacy_read_hit_once
 from ..core.identity import state_dir
 from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
@@ -1101,12 +1099,10 @@ class LocalIndex:
         for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if reply.ok:
                 key_str = str(reply.ok.key_expr)
-                # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+                # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
                 if is_legacy_key(key_str):
-                    if not _is_legacy_read_fallback_on():
-                        log.debug('rebuild_from_zenoh skip legacy obs key (fallback off): %s', key_str)
-                        continue
-                    _warn_legacy_read_hit_once()
+                    log.debug('rebuild_from_zenoh skip legacy obs key: %s', key_str)
+                    continue
                 # The broadened selector can match non-canonical keys; never
                 # ingest a payload whose key is off-shape or disagrees with
                 # the payload id (Codex review on PR #177).
@@ -1132,12 +1128,10 @@ class LocalIndex:
         for reply in session.get(TOMB_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
             if reply.ok:
                 key_str = str(reply.ok.key_expr)
-                # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+                # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
                 if is_legacy_key(key_str):
-                    if not _is_legacy_read_fallback_on():
-                        log.debug('rebuild_from_zenoh skip legacy tomb key (fallback off): %s', key_str)
-                        continue
-                    _warn_legacy_read_hit_once()
+                    log.debug('rebuild_from_zenoh skip legacy tomb key: %s', key_str)
+                    continue
                 key_id = obs_id_from_key(key_str)
                 if key_id is None:
                     log.debug('rebuild_from_zenoh skip non-canonical tomb key: %s', key_str)

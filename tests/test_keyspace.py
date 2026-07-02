@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import threading
-import time
-
-import pytest
 import zenoh
 
 from kioku_mesh import keyspace
@@ -134,7 +130,13 @@ def test_broadcast_selectors_cover_all_namespaces() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ADR-0019 Phase D: is_legacy_key and _is_legacy_read_fallback_on unit tests
+# ADR-0019 Phase D / ADR-0029 PR 3: is_legacy_key unit tests.
+#
+# The KIOKU_MESH_LEGACY_READ_FALLBACK escape hatch and its
+# _is_legacy_read_fallback_on / _warn_legacy_read_hit_once helpers were
+# removed in v1.0 (ADR-0029 PR 3); see
+# test_legacy_read_fallback_env_var_is_ignored below for the removal
+# regression test.
 # ---------------------------------------------------------------------------
 
 
@@ -155,111 +157,7 @@ def test_is_legacy_key_rejects_non_mem_prefix() -> None:
     assert not keyspace.is_legacy_key('')
 
 
-def test_is_legacy_read_fallback_on_returns_false_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv('KIOKU_MESH_LEGACY_READ_FALLBACK', raising=False)
-    assert cfg_mod._is_legacy_read_fallback_on() is False
-
-
-def test_is_legacy_read_fallback_on_returns_true_when_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
-    assert cfg_mod._is_legacy_read_fallback_on() is True
-
-
-def test_is_legacy_read_fallback_on_case_insensitive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'ON')
-    assert cfg_mod._is_legacy_read_fallback_on() is True
-
-
-# ---------------------------------------------------------------------------
-# Thread-safety tests (R1 cross-review finding)
-# ---------------------------------------------------------------------------
-
-
-class _SlowLogger:
-    """Logger stub whose warning() sleeps briefly to expose lock races."""
-
-    def __init__(self, sleep_sec: float = 0.02) -> None:
-        self._sleep_sec = sleep_sec
-        self.calls: list[tuple] = []
-
-    def warning(self, *args: object, **kwargs: object) -> None:
-        time.sleep(self._sleep_sec)
-        self.calls.append(args)
-
-
-def test_warn_legacy_read_hit_once_is_thread_safe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_warn_legacy_read_hit_once must emit exactly one WARNING under 20 concurrent calls."""
-    slow_log = _SlowLogger()
-    monkeypatch.setattr(cfg_mod, '_log', slow_log)
-    monkeypatch.setattr(cfg_mod, '_legacy_read_hit_warned', False)
-
-    threads = [threading.Thread(target=cfg_mod._warn_legacy_read_hit_once) for _ in range(20)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'
-
-
-def test_is_legacy_read_fallback_on_warns_once_under_concurrency(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_is_legacy_read_fallback_on must emit exactly one WARNING under 20 concurrent calls."""
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
-    slow_log = _SlowLogger()
-    monkeypatch.setattr(cfg_mod, '_log', slow_log)
-    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
-
-    threads = [threading.Thread(target=cfg_mod._is_legacy_read_fallback_on) for _ in range(20)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'
-
-
-# ---------------------------------------------------------------------------
-# ADR-0029 PR 1: strengthened deprecation warning content
-# ---------------------------------------------------------------------------
-
-
-def test_legacy_read_fallback_warning_mentions_v1_and_migration_commands(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Warning must cover v1.0 removal and the doctor/migrate-visibility commands (ADR-0029)."""
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
-    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
-
-    with caplog.at_level('WARNING'):
-        cfg_mod._is_legacy_read_fallback_on()
-
-    messages = [r.message for r in caplog.records]
-    assert len(messages) == 1, f'expected exactly 1 WARNING record, got {len(messages)}'
-    msg = messages[0]
-    assert 'v1.0' in msg
-    assert 'doctor --check-legacy-namespace' in msg
-    assert 'migrate-visibility' in msg
-
-
-def test_legacy_read_fallback_warning_still_once_per_process(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Calling twice must still emit exactly one WARNING record (no per-record regression)."""
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
-    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
-
-    with caplog.at_level('WARNING'):
-        cfg_mod._is_legacy_read_fallback_on()
-        cfg_mod._is_legacy_read_fallback_on()
-
-    assert len(caplog.records) == 1
+def test_legacy_read_fallback_helpers_removed() -> None:
+    """ADR-0029 PR 3: the v0.8.x-only helpers must not exist post-removal."""
+    assert not hasattr(cfg_mod, '_is_legacy_read_fallback_on')
+    assert not hasattr(cfg_mod, '_warn_legacy_read_hit_once')

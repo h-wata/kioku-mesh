@@ -112,7 +112,6 @@ Useful environment variables:
 | `KIOKU_MESH_USER_ID` | Your user slug for `--visibility user` (same value on all your machines) |
 | `KIOKU_MESH_TEAM_ID` | Team slug for `--visibility team` |
 | `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = `mesh` since Phase D / v0.8) |
-| `KIOKU_MESH_LEGACY_READ_FALLBACK` | Set `on` to re-enable reads from the legacy namespace (`mem/obs/**`, `mem/tomb/**`) in search/rebuild/subscriber/find-by-id paths (default: off since v0.8; v0.8.x only, removed in v1.0) |
 
 ### Visibility migration
 
@@ -130,7 +129,6 @@ kioku-mesh doctor
 ```
 
 After migration, reads from the legacy namespace are no longer needed.
-`KIOKU_MESH_LEGACY_READ_FALLBACK` can be removed from your environment.
 
 #### Upgrade notes for v1.0
 
@@ -139,7 +137,9 @@ hatches. Before upgrading to v1.0.0:
 
 1. `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` has been removed (ADR-0029 PR 2); the env
    var is no longer read and legacy writes are no longer possible.
-2. `KIOKU_MESH_LEGACY_READ_FALLBACK=on` is removed in v1.0.0.
+2. `KIOKU_MESH_LEGACY_READ_FALLBACK` has been removed (ADR-0029 PR 3); the env
+   var is no longer read, and search/rebuild/subscriber/find-by-id no longer
+   fall back to the legacy namespace under any setting.
 3. Run `kioku-mesh doctor --check-legacy-namespace` and confirm zero legacy obs/tomb.
 4. If legacy entries remain, migrate with
    `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>`.

@@ -34,8 +34,6 @@ import zenoh
 
 from kioku_mesh.core._env_compat import get_env
 
-from ..core.config import _is_legacy_read_fallback_on
-from ..core.config import _warn_legacy_read_hit_once
 from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
 from ..core.keyspace import OBS_READ_KEY_EXPR
@@ -173,11 +171,9 @@ def start_index_subscriber(session: zenoh.Session) -> list:
 
     def on_obs(sample: Any) -> None:
         key_str = str(sample.key_expr)
-        # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+        # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(key_str):
-            if not _is_legacy_read_fallback_on():
-                return
-            _warn_legacy_read_hit_once()
+            return
         if sample.kind == zenoh.SampleKind.DELETE:
             obs_id = _obs_id_from_key(str(sample.key_expr))
             if obs_id is None:
@@ -219,11 +215,9 @@ def start_index_subscriber(session: zenoh.Session) -> list:
 
     def on_tomb(sample: Any) -> None:
         key_str = str(sample.key_expr)
-        # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+        # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(key_str):
-            if not _is_legacy_read_fallback_on():
-                return
-            _warn_legacy_read_hit_once()
+            return
         if sample.kind == zenoh.SampleKind.DELETE:
             # A tombstone DELETE upstream means the tomb (and its mirrored
             # obs) was physically purged — typically by retention gc or by

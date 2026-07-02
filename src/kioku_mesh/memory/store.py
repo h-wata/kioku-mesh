@@ -30,8 +30,6 @@ from datetime import datetime
 from datetime import timezone
 import logging
 
-from ..core.config import _is_legacy_read_fallback_on
-from ..core.config import _warn_legacy_read_hit_once
 from ..core.keyspace import find_by_id_selector
 from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
@@ -354,11 +352,9 @@ def _search_via_zenoh(
 
     tombs: set[str] = set()
     for ok in _iter_ok_replies(session, tomb_expr):
-        # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+        # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(str(ok.key_expr)):
-            if not _is_legacy_read_fallback_on():
-                continue
-            _warn_legacy_read_hit_once()
+            continue
         # Canonical-key gate (Codex review on PR #177): the broadened
         # selector can match non-canonical keys; only a well-formed tomb
         # key may hide an observation.
@@ -374,11 +370,9 @@ def _search_via_zenoh(
     # produce duplicates (#12). Last-writer-wins within a single GET scan.
     candidates: dict[str, Observation] = {}
     for ok in _iter_ok_replies(session, key_expr):
-        # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+        # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(str(ok.key_expr)):
-            if not _is_legacy_read_fallback_on():
-                continue
-            _warn_legacy_read_hit_once()
+            continue
         key_id = obs_id_from_key(str(ok.key_expr))
         if key_id is None:
             log.debug('skip non-canonical obs key in fallback scan: %s', ok.key_expr)
@@ -497,11 +491,9 @@ def _find_by_id_via_zenoh(observation_id: str) -> Observation | None:
         return None
     session = get_session()
     for ok in _iter_ok_replies(session, find_by_id_selector(observation_id)):
-        # ADR-0019 Phase D: skip legacy namespace when fallback is off.
+        # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(str(ok.key_expr)):
-            if not _is_legacy_read_fallback_on():
-                continue
-            _warn_legacy_read_hit_once()
+            continue
         if obs_id_from_key(str(ok.key_expr)) != observation_id:
             continue
         try:

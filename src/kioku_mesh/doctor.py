@@ -793,10 +793,7 @@ def check_legacy_namespace(
             f'legacy namespace: {legacy_obs} obs and {legacy_tomb} tombstones '
             'found in mem/obs/** / mem/tomb/** — run migrate-visibility to clear'
         ),
-        hint=(
-            'Run `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` to migrate. '
-            'Set KIOKU_MESH_LEGACY_READ_FALLBACK=on as a temporary read-only fallback during migration.'
-        ),
+        hint='Run `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>` to migrate.',
         details={
             'legacy_obs': legacy_obs,
             'legacy_tomb': legacy_tomb,
