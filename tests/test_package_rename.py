@@ -52,13 +52,8 @@ class TestLegacyEnvVarIgnored:
 
         monkeypatch.delenv('KIOKU_MESH_STATE_DIR', raising=False)
         monkeypatch.setenv('MESH_MEM_STATE_DIR', '/tmp/legacy-should-be-ignored')
-        importlib.reload(identity)
-        try:
-            resolved = identity.state_dir()
-            assert str(resolved) != '/tmp/legacy-should-be-ignored'
-        finally:
-            monkeypatch.delenv('MESH_MEM_STATE_DIR', raising=False)
-            importlib.reload(identity)
+        resolved = identity.state_dir()
+        assert str(resolved) != '/tmp/legacy-should-be-ignored'
 
     def test_legacy_user_id_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from kioku_mesh.core import config
