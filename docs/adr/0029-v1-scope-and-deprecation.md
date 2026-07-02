@@ -12,8 +12,10 @@ namespace, legacy writes are only available via `KIOKU_MESH_LEGACY_WRITE_EMERGEN
 and legacy reads are only available via `KIOKU_MESH_LEGACY_READ_FALLBACK=on`.
 Both flags were documented as v0.8.x-only and removed in v1.0.
 
-ADR-0024 also left compatibility shims for the old `mesh_mem` import path and
-`MESH_MEM_*` environment variable prefix until v1.0. Meanwhile ADR-0028 defines
+ADR-0024 introduced compatibility shims for the old `mesh_mem` import path and
+`MESH_MEM_*` environment variable prefix; current implementation/docs
+(`src/mesh_mem/__init__.py`, `src/kioku_mesh/core/_env_compat.py`, README, CHANGELOG)
+mark them for removal in v1.0.0. Meanwhile ADR-0028 defines
 the long-term memory model: raw observations are the source of truth, derived views
 are rebuildable, and stale decision/config entries should be superseded rather than
 deleted.
