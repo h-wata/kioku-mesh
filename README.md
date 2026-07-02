@@ -95,12 +95,8 @@ kioku-mesh gc --retention-days 30
 kioku-mesh doctor
 ```
 
-Useful environment variables:
-
-> **Note (ADR-0024 / ADR-0029):** The env var prefix was renamed from `MESH_MEM_` to
-> `KIOKU_MESH_`. The old `MESH_MEM_*` names were accepted as a deprecated fallback
-> through the `0.x` series; that fallback has been removed ahead of `v1.0.0`, and
-> only `KIOKU_MESH_*` is read now.
+Useful environment variables (the `MESH_MEM_` prefix was renamed to
+`KIOKU_MESH_` in ADR-0024; only `KIOKU_MESH_*` is read as of `v1.0.0`):
 
 | Variable | Purpose |
 |---|---|
@@ -109,73 +105,35 @@ Useful environment variables:
 | `KIOKU_MESH_SESSION_ID` | Optional stable session id |
 | `KIOKU_MESH_STATE_DIR` | State directory; defaults under the user data dir |
 | `KIOKU_MESH_BACKEND` | Override the backend selected by `~/.config/kioku-mesh/config.yaml`; set `local` or `zenoh` |
-| `KIOKU_MESH_FORCE_REBUILD=1` | Rebuild the local index at CLI startup |
-| `KIOKU_MESH_DISABLE_INDEX=1` | Use the legacy Zenoh scan path instead of SQLite index |
 | `KIOKU_MESH_USER_ID` | Your user slug for `--visibility user` (same value on all your machines) |
 | `KIOKU_MESH_TEAM_ID` | Team slug for `--visibility team` |
 | `KIOKU_MESH_DEFAULT_VISIBILITY` | Default scope for new saves: `user`, `team`, `mesh` (unset = `mesh` since Phase D / v0.8) |
 
 ### Visibility migration
 
-If you have observations written before v0.8 (legacy layout `mem/obs/**`), migrate them with:
+If you have observations written before v0.8 (legacy layout `mem/obs/**`):
 
 ```bash
-# 1. Diagnose — check what is still in the legacy namespace
-kioku-mesh doctor --check-legacy-namespace
-
-# 2. Migrate — move observations to the tiered namespace
-kioku-mesh migrate-visibility --from legacy --to mesh
-
-# 3. Confirm — verify no legacy data remains
-kioku-mesh doctor
+kioku-mesh doctor --check-legacy-namespace              # 1. check what remains
+kioku-mesh migrate-visibility --from legacy --to mesh   # 2. migrate
+kioku-mesh doctor                                       # 3. confirm zero legacy obs/tomb
 ```
 
-After migration, reads from the legacy namespace are no longer needed.
+As of `v1.0.0` (ADR-0029), `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` and
+`KIOKU_MESH_LEGACY_READ_FALLBACK` are removed and have no effect.
 
-#### Upgrade notes for v1.0
+### Visibility scopes
 
-ADR-0029 defines v1.0 scope and the deprecation timeline for both legacy escape
-hatches. Before upgrading to v1.0.0:
+`--visibility` (CLI) / `visibility` (MCP `save_observation`) controls how far
+a memory replicates: `user` (your machines only, needs `user_id`), `team`
+(peers hosting that team's storage, needs `team_id`), or `mesh` (every peer,
+the default). Ids are resolved server-side, never from tool args — see ADR-0019.
 
-1. `KIOKU_MESH_LEGACY_WRITE_EMERGENCY` has been removed (ADR-0029 PR 2); the env
-   var is no longer read and legacy writes are no longer possible.
-2. `KIOKU_MESH_LEGACY_READ_FALLBACK` has been removed (ADR-0029 PR 3); the env
-   var is no longer read, and search/rebuild/subscriber/find-by-id no longer
-   fall back to the legacy namespace under any setting.
-3. Run `kioku-mesh doctor --check-legacy-namespace` and confirm zero legacy obs/tomb.
-4. If legacy entries remain, migrate with
-   `kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>`.
-5. Remove both env vars from your shell/systemd/MCP configuration.
-
-### Visibility scopes (experimental)
-
-`save` and the MCP `save_observation` tool accept `--visibility` /
-`visibility` to choose how far a memory replicates:
-
-- `user` — only this user's machines (requires `user_id`, set via
-  `KIOKU_MESH_USER_ID` or `user_id:` in `~/.config/kioku-mesh/config.yaml`;
-  use the same value on every machine you own)
-- `team` — peers that host the team's storage (requires `team_id`)
-- `mesh` — every peer on the mesh
-- unset — follows `default_visibility` from config; with no config the
-  default is `mesh` since Phase D / v0.8 (was legacy layout before)
-
-The user/team ids are resolved from server-side configuration, never from
-tool arguments. See ADR-0019 for the design.
-
-A per-project default can be set with a `.kioku-mesh.yaml` in the repository
-(found by searching upward from the current directory; env vars still win,
-the global config is the fallback):
-
-```yaml
-# .kioku-mesh.yaml — project-local defaults
-default_visibility: team
-team_id: kioku-mesh
-```
-
-`user_id` is intentionally **not** read from this file (a committed file must
-never set a personal namespace), and every save response echoes the effective
-scope, e.g. `saved: <id> (visibility=team/kioku-mesh)`.
+A per-project default can be set via `.kioku-mesh.yaml` (searched upward from
+the cwd; env vars win, the global config is the fallback). Only
+`default_visibility` / `team_id` may be set this way, never `user_id` — a
+committed file must not set a personal namespace. Every save response echoes
+the effective scope, e.g. `saved: <id> (visibility=team/kioku-mesh)`.
 
 ## MCP Clients
 
@@ -188,13 +146,12 @@ kioku-mesh mcp install --client codex-cli
 
 For Claude Desktop, Gemini CLI, ChatGPT Desktop, manual JSON/TOML examples,
 SessionStart hooks, and multi-agent identity recipes, see
-[docs/mcp-clients.md](docs/mcp-clients.md) and
-[docs/multi-agent.md](docs/multi-agent.md).
+[docs/mcp-clients.md](docs/mcp-clients.md) and [docs/multi-agent.md](docs/multi-agent.md).
 
 ## Multi-Host Mesh
 
-Each host serves its agents from a fast local SQLite read index, backed by a
-Zenoh router + RocksDB store, and hosts replicate to each other over the mesh:
+Each host serves agents from a local SQLite read index backed by a Zenoh
+router + RocksDB store, and hosts replicate to each other over the mesh:
 
 ```mermaid
 flowchart LR
@@ -221,8 +178,7 @@ flowchart LR
   AZ <==>|"Zenoh mesh replication<br/>LAN / VPN / Tailscale · TCP 7447"| BZ
 ```
 
-The recommended topology is one hub and any number of spokes. The hub listens on
-addresses reachable from the spokes; every spoke dials only the hub.
+The recommended topology is one hub and any number of spokes: every spoke dials only the hub.
 
 ```mermaid
 flowchart TB
@@ -240,147 +196,34 @@ flowchart TB
 ```bash
 # 1. Install zenohd + zenoh-backend-rocksdb (default: ~/.local/share/kioku-mesh/bin/)
 kioku-mesh zenohd install
+export PATH="$HOME/.local/share/kioku-mesh/bin:$PATH"  # persist in ~/.bashrc or ~/.zshrc
 
-# 2. Add to PATH (the command prints the exact export line after install)
-export PATH="$HOME/.local/share/kioku-mesh/bin:$PATH"
-# Persist: add the line above to ~/.bashrc or ~/.zshrc
+# 2. Generate config (add --install-systemd for a login-time auto-start unit)
+kioku-mesh init --mode hub --listen 127.0.0.1 --listen 192.168.3.10     # hub
+kioku-mesh init --mode spoke --listen 127.0.0.1 --connect 192.168.3.10 # spoke
 
-# 3. Generate config and, optionally, a systemd user unit for login auto-start
-# hub
-kioku-mesh init --mode hub \
-  --listen 127.0.0.1 \
-  --listen 192.168.3.10 \
-  [--install-systemd]
-
-# spoke
-kioku-mesh init --mode spoke \
-  --listen 127.0.0.1 \
-  --connect 192.168.3.10 \
-  [--install-systemd]
-
-# Without --install-systemd, start zenohd manually:
+# 3. Without --install-systemd, start zenohd manually:
 zenohd -c ~/.config/kioku-mesh/zenohd.json5
 ```
 
-### Docker で zenohd を起動する
+### Docker (zenohd)
 
-Docker / Docker Compose がインストール済みであれば、`kioku-mesh zenohd install` の代わりに
-Docker で zenohd を起動できます。apt インストールよりも環境汚染がなく、ワンコマンドで起動できます。
-Python ソース (`src/kioku_mesh/`) は一切触らず、zenohd + RocksDB 層のみ Docker 化します。
+If Docker is available, `docker compose up -d` starts zenohd + RocksDB
+without an apt install or touching `src/kioku_mesh/`. Data persists under
+`./data/zenoh/`; the default `docker-compose.yaml` publishes ports on all
+interfaces (`0.0.0.0`) — restrict to `127.0.0.1` or a trusted network.
+Backups, connecting other peers, and upgrading Zenoh are covered in
+[docs/zenohd-docker.ja.md](docs/zenohd-docker.ja.md).
 
-**前提**: Docker Engine および Docker Compose プラグインがインストール済みであること。
+Prefer not to use Docker? `kioku-mesh zenohd install` auto-detects your
+arch/OS and installs a checksum-verified `zenohd` + RocksDB plugin (or place
+the binaries on `PATH` yourself for an offline install). `kioku-mesh mesh
+start` runs an in-process Zenoh router for a smoke test — no binary required.
 
-```bash
-# 1. リポジトリルートに移動する
-cd /path/to/kioku-mesh
-
-# 2. zenohd + RocksDB バックエンド入り Docker イメージをビルドして起動する
-#    初回はビルド (RocksDB plugin のダウンロードを含む) があるため数分かかる
-docker compose up -d
-
-# 3. MCP クライアントの接続先はデフォルトの tcp/127.0.0.1:7447 のまま変更不要
-#    起動確認:
-docker compose ps
-docker compose logs zenohd
-
-# 4. kioku-mesh CLI で疎通確認する
-kioku-mesh save "Docker 起動テスト" --memory-type note
-kioku-mesh search "Docker"
-
-# 5. 停止する
-docker compose down
-```
-
-**データの永続化**:
-
-RocksDB のデータは `./data/zenoh/` ディレクトリに保存されます。このディレクトリが存在する限り
-`docker compose down` → `docker compose up -d` を繰り返してもデータは保持されます。
-
-```bash
-# バックアップ例
-tar -czf zenoh-backup-$(date +%Y%m%d).tar.gz ./data/zenoh/
-
-# データを完全に削除してゼロから始める場合
-docker compose down
-rm -rf ./data/zenoh/
-```
-
-> **注意**: `./data/zenoh/` を削除すると zenohd が保持していたすべての observation が消えます。
-> `docker compose down -v` は使わないでください (named volume ではないため効果はありませんが習慣として)。
-
-**他 peer と接続する場合**:
-
-Docker で起動した zenohd を mesh の hub または spoke として使うには、
-`config/zenohd.docker.json5` の `connect.endpoints` に対向 peer の IP を追加し、
-`docker compose restart zenohd` します。詳細は `config/zenohd.docker.json5` のコメントを参照してください。
-
-**セキュリティ注意**:
-
-デフォルトの `docker-compose.yaml` は port 7447/8000 をすべてのインターフェース (`0.0.0.0`) に公開します。
-ローカル開発・テストのみで使う場合は、外部に公開しないよう ports を制限してください:
-
-```yaml
-# ローカルのみに制限する場合 (docker-compose.yaml を編集)
-ports:
-  - "127.0.0.1:7447:7447"
-  - "127.0.0.1:8000:8000"
-```
-
-mesh peer として LAN に公開する場合は、信頼できるネットワーク内でのみ使用してください
-(ファイアウォールや Tailscale / WireGuard での制限を推奨します)。
-詳細は [Multi-Host Mesh](#multi-host-mesh) のセキュリティ注意を参照してください。
-
-**zenoh バージョンを上げる場合**:
-
-`ZENOH_VERSION` を変更したときは `Dockerfile` の `ROCKSDB_SHA256` も更新が必要です。
-新しい digest は GitHub Releases API で取得できます:
-
-```bash
-# x86_64 (musl) の sha256 を取得する
-gh api repos/eclipse-zenoh/zenoh-backend-rocksdb/releases/tags/<new_version> \
-  --jq '.assets[] | select(.name | contains("x86_64-unknown-linux-musl-standalone")) | .digest'
-
-# aarch64 (musl) の sha256 を取得する
-gh api repos/eclipse-zenoh/zenoh-backend-rocksdb/releases/tags/<new_version> \
-  --jq '.assets[] | select(.name | contains("aarch64-unknown-linux-musl-standalone")) | .digest'
-```
-
-取得した `sha256:` プレフィックス付き文字列の **プレフィックスを除いた部分** を
-`Dockerfile` の `ARG ROCKSDB_SHA256=` に設定してください。
-
-**aarch64 (ARM64) でビルドする場合**:
-
-デフォルトは x86_64 向けです。aarch64 ホストでビルドする際は build-arg を上書きします:
-
-```bash
-# aarch64 ビルド (Raspberry Pi 5 / Apple Silicon Docker など)
-docker compose build \
-  --build-arg ZENOH_TARGET=aarch64-unknown-linux-musl \
-  --build-arg ROCKSDB_SHA256=298734a4f50dfa12c27337cbafeb7d99949f4f3fda4c330ff6891d39fdd97112
-
-# 以降は通常通り
-docker compose up -d
-```
-
-> aarch64 digest (v1.9.0): `298734a4f50dfa12c27337cbafeb7d99949f4f3fda4c330ff6891d39fdd97112`
-> x86_64 digest (v1.9.0): `88b13af5ddaadff9ec55c61765db6344666ae38731257877023b07c59a0c4bd1`
-
-`kioku-mesh zenohd install` auto-detects your arch and OS, fetches the matching
-standalone zip from GitHub Releases, verifies the SHA-256 checksum via the GitHub
-Releases API, and extracts `zenohd` and the RocksDB plugin into the target directory.
-Options: `--version 1.9.0` (default), `--bin-dir DIR`, `--verbose`.
-
-For a smoke test without installing anything, `kioku-mesh mesh start` runs an
-in-process Zenoh router (no `zenohd` binary required).
-
-Advanced / offline: if you prefer to obtain the binaries yourself, place `zenohd`
-and the RocksDB plugin on `PATH` manually and then run `kioku-mesh init` as above.
-
-kioku-mesh is designed to run inside a closed, trusted network. Keep port
-`7447/tcp` reachable only between trusted peers. Do not expose it to the
-internet or an untrusted LAN. By default kioku-mesh relies on network
-admission (Tailscale, WireGuard, firewall rules, or a trusted LAN) rather than
-transport-level authentication.
+kioku-mesh is designed to run inside a closed, trusted network — keep port
+`7447/tcp` reachable only between trusted peers, never an untrusted LAN or
+the internet. By default it relies on network admission (Tailscale,
+WireGuard, firewall rules) rather than transport-level auth.
 
 When network admission alone is not enough, enable **mutual TLS**: every peer
 presents a certificate signed by your own private CA, and zenohd refuses any
@@ -409,12 +252,7 @@ procedures, and smoke tests, see
 ```bash
 pip install -e '.[dev,test]'
 pytest tests/ -q
-```
-
-Run focused MCP checks with:
-
-```bash
-pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v
+pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v  # focused MCP checks
 ```
 
 ## Notes
