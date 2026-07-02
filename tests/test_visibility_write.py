@@ -39,84 +39,21 @@ def test_resolve_defaults_to_mesh(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.resolve_write_visibility('') == ('mesh', '')
 
 
-def test_legacy_write_emergency_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on restores legacy writes (v0.8.x only)."""
-    import kioku_mesh.core.config as _cfg
-
-    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
-    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
-    _cfg._legacy_emergency_warned = False  # reset once-per-process flag for test isolation
-    assert config.resolve_write_visibility('') == ('', '')
-    _cfg._legacy_emergency_warned = False  # reset after test
-
-
-def test_legacy_write_emergency_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    """KIOKU_MESH_LEGACY_WRITE_EMERGENCY=off (default) → mesh."""
-    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'off')
-    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
-    assert config.resolve_write_visibility('') == ('mesh', '')
-
-
-def test_explicit_default_visibility_wins_over_emergency(monkeypatch: pytest.MonkeyPatch) -> None:
-    """KIOKU_MESH_DEFAULT_VISIBILITY env var overrides emergency mode."""
-    import kioku_mesh.core.config as _cfg
-
-    monkeypatch.setenv('KIOKU_MESH_DEFAULT_VISIBILITY', 'mesh')
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
-    _cfg._legacy_emergency_warned = False
-    assert config.resolve_write_visibility('') == ('mesh', '')
-    _cfg._legacy_emergency_warned = False
-
-
 # ---------------------------------------------------------------------------
-# ADR-0029 PR 1: strengthened deprecation warning content
+# ADR-0029 PR 2: KIOKU_MESH_LEGACY_WRITE_EMERGENCY escape hatch removed
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_write_emergency_warning_mentions_v1_and_migration_commands(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Warning must cover v1.0 removal and the doctor/migrate-visibility commands (ADR-0029)."""
-    import kioku_mesh.core.config as _cfg
+def test_legacy_write_emergency_env_var_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on no longer restores legacy writes (v1.0, ADR-0029 PR 2).
 
+    Regression test for accidental legacy dependence: the env var must be a
+    plain no-op now, resolving to the same 'mesh' default as if it were unset.
+    """
     monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
     monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
     monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
-    _cfg._legacy_emergency_warned = False
-
-    with caplog.at_level('WARNING'):
-        config.resolve_write_visibility('')
-
-    _cfg._legacy_emergency_warned = False
-    messages = [r.message for r in caplog.records]
-    assert len(messages) == 1, f'expected exactly 1 WARNING record, got {len(messages)}'
-    msg = messages[0]
-    assert 'v1.0' in msg
-    assert 'doctor --check-legacy-namespace' in msg
-    assert 'migrate-visibility' in msg
-
-
-def test_legacy_write_emergency_warning_still_once_per_process(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Calling twice must still emit exactly one WARNING record (no per-record regression)."""
-    import kioku_mesh.core.config as _cfg
-
-    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
-    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
-    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
-    _cfg._legacy_emergency_warned = False
-
-    with caplog.at_level('WARNING'):
-        config.resolve_write_visibility('')
-        config.resolve_write_visibility('')
-
-    _cfg._legacy_emergency_warned = False
-    assert len(caplog.records) == 1
+    assert config.resolve_write_visibility('') == ('mesh', '')
 
 
 def test_resolve_explicit_wins_over_default(monkeypatch: pytest.MonkeyPatch) -> None:

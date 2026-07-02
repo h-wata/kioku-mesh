@@ -20,7 +20,6 @@ from .paths import resolve_app_dir
 _log = logging.getLogger(__name__)
 
 # Once-per-process flags + locks for thread-safe once-only WARNs.
-_legacy_emergency_warned: bool = False
 _legacy_read_fallback_warned: bool = False
 _legacy_read_fallback_warned_lock: threading.Lock = threading.Lock()
 _legacy_read_hit_warned: bool = False
@@ -137,30 +136,6 @@ def get_team_id() -> str:
     return str(cfg.get('team_id', '') or '').strip()
 
 
-def _is_legacy_emergency_on() -> bool:
-    """Check KIOKU_MESH_LEGACY_WRITE_EMERGENCY and warn once per process when on.
-
-    Deprecated v0.8.x-only recovery path (ADR-0029): removed in v1.0.0, along
-    with the legacy write behavior it restores.
-    """
-    global _legacy_emergency_warned
-    val = get_env('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', '').strip().lower()
-    if val == 'on':
-        if not _legacy_emergency_warned:
-            _log.warning(
-                'KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on is a deprecated v0.8.x-only'
-                ' recovery path. v1.0.0 removes this env var and does not preserve'
-                " legacy write behavior. Run 'kioku-mesh doctor"
-                " --check-legacy-namespace' then 'kioku-mesh migrate-visibility"
-                " --from legacy --to <user|team|mesh>', and remove"
-                ' KIOKU_MESH_LEGACY_WRITE_EMERGENCY from your environment before'
-                ' upgrading to v1.0.'
-            )
-            _legacy_emergency_warned = True
-        return True
-    return False
-
-
 def _is_legacy_read_fallback_on() -> bool:
     """Check KIOKU_MESH_LEGACY_READ_FALLBACK and warn once per process when on.
 
@@ -213,8 +188,10 @@ def get_default_visibility() -> str:
       2. ``default_visibility:`` in the nearest project ``.kioku-mesh.yaml``
          (searched from cwd upward — per-directory default, ADR-0019)
       3. ``default_visibility:`` in ``~/.config/kioku-mesh/config.yaml``
-      4. ``KIOKU_MESH_LEGACY_WRITE_EMERGENCY=on`` → ``''`` (legacy, v0.8.x escape hatch)
-      5. ``'mesh'`` (Phase D default; was ``''`` legacy before v0.8)
+      4. ``'mesh'`` (Phase D default; was ``''`` legacy before v0.8)
+
+    ADR-0029: the v0.8.x legacy write emergency escape hatch that used to
+    fall back to legacy (empty) visibility here was removed in v1.0.
     """
     env = get_env('KIOKU_MESH_DEFAULT_VISIBILITY', '').strip()
     if env:
@@ -227,9 +204,6 @@ def get_default_visibility() -> str:
     val = str(cfg.get('default_visibility', '') or '').strip()
     if val:
         return val
-    # Phase D: emergency escape hatch for legacy writes (v0.8.x only)
-    if _is_legacy_emergency_on():
-        return ''
     return 'mesh'
 
 
