@@ -224,3 +224,42 @@ def test_is_legacy_read_fallback_on_warns_once_under_concurrency(
         t.join()
 
     assert len(slow_log.calls) == 1, f'expected exactly 1 WARNING, got {len(slow_log.calls)}'
+
+
+# ---------------------------------------------------------------------------
+# ADR-0029 PR 1: strengthened deprecation warning content
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_read_fallback_warning_mentions_v1_and_migration_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Warning must cover v1.0 removal and the doctor/migrate-visibility commands (ADR-0029)."""
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
+
+    with caplog.at_level('WARNING'):
+        cfg_mod._is_legacy_read_fallback_on()
+
+    messages = [r.message for r in caplog.records]
+    assert len(messages) == 1, f'expected exactly 1 WARNING record, got {len(messages)}'
+    msg = messages[0]
+    assert 'v1.0' in msg
+    assert 'doctor --check-legacy-namespace' in msg
+    assert 'migrate-visibility' in msg
+
+
+def test_legacy_read_fallback_warning_still_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Calling twice must still emit exactly one WARNING record (no per-record regression)."""
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_READ_FALLBACK', 'on')
+    monkeypatch.setattr(cfg_mod, '_legacy_read_fallback_warned', False)
+
+    with caplog.at_level('WARNING'):
+        cfg_mod._is_legacy_read_fallback_on()
+        cfg_mod._is_legacy_read_fallback_on()
+
+    assert len(caplog.records) == 1

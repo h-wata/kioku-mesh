@@ -70,6 +70,55 @@ def test_explicit_default_visibility_wins_over_emergency(monkeypatch: pytest.Mon
     _cfg._legacy_emergency_warned = False
 
 
+# ---------------------------------------------------------------------------
+# ADR-0029 PR 1: strengthened deprecation warning content
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_write_emergency_warning_mentions_v1_and_migration_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Warning must cover v1.0 removal and the doctor/migrate-visibility commands (ADR-0029)."""
+    import kioku_mesh.core.config as _cfg
+
+    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
+    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
+    _cfg._legacy_emergency_warned = False
+
+    with caplog.at_level('WARNING'):
+        config.resolve_write_visibility('')
+
+    _cfg._legacy_emergency_warned = False
+    messages = [r.message for r in caplog.records]
+    assert len(messages) == 1, f'expected exactly 1 WARNING record, got {len(messages)}'
+    msg = messages[0]
+    assert 'v1.0' in msg
+    assert 'doctor --check-legacy-namespace' in msg
+    assert 'migrate-visibility' in msg
+
+
+def test_legacy_write_emergency_warning_still_once_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Calling twice must still emit exactly one WARNING record (no per-record regression)."""
+    import kioku_mesh.core.config as _cfg
+
+    monkeypatch.delenv('KIOKU_MESH_DEFAULT_VISIBILITY', raising=False)
+    monkeypatch.setenv('KIOKU_MESH_LEGACY_WRITE_EMERGENCY', 'on')
+    monkeypatch.setenv('XDG_CONFIG_HOME', '/nonexistent-kioku-test')
+    _cfg._legacy_emergency_warned = False
+
+    with caplog.at_level('WARNING'):
+        config.resolve_write_visibility('')
+        config.resolve_write_visibility('')
+
+    _cfg._legacy_emergency_warned = False
+    assert len(caplog.records) == 1
+
+
 def test_resolve_explicit_wins_over_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('KIOKU_MESH_DEFAULT_VISIBILITY', 'mesh')
     monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
