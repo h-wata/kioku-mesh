@@ -1715,6 +1715,159 @@ def test_search_dedupes_observation_id_before_limit(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_search_query_limit_not_capped_by_fixed_overfetch(tmp_path: Path) -> None:
+    """PR #270 Codex review (R1): limit must not be silently capped below MAX_SEARCH.
+
+    A prior fix used a fixed ``min(2000, limit * 5)`` over-fetch to dedupe
+    in Python, which meant any query-mode search — even with zero
+    duplicates — was silently truncated at 2000 rows regardless of the
+    caller's requested ``limit``. This inserts more than 2000 unique
+    observations and asserts a ``limit=10000`` query-mode search returns
+    all of them.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'no_overfetch_cap.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        total = 2001
+        for i in range(total):
+            idx.upsert(_mk_obs(f'overfetch cap keyword item {i}', project='overfetch'))
+
+        results = idx.search(query='overfetch cap keyword', project='overfetch', limit=10_000)
+        assert len(results) == total, f'expected all {total} unique observations, got {len(results)}'
+    finally:
+        idx.close()
+
+
+def test_search_dedupe_survives_duplicates_beyond_old_overfetch_factor(tmp_path: Path) -> None:
+    """PR #270 Codex review (R1): dedupe must not depend on a bounded duplicate count.
+
+    The prior fix's over-fetch factor was a fixed 5x multiple, so more
+    than 5 duplicate ``obs_fts`` rows for the first-ranked observation_id
+    could still starve ``limit`` of a distinct result. This seeds 10
+    duplicate rows (double the old factor) and asserts the distinct
+    observation still appears within ``limit``.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _FTS_UPSERT_SQL  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'beyond_overfetch_factor.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        dup_obs = _mk_obs('heavy duplicate keyword target', project='heavydup')
+        other_obs = _mk_obs('heavy duplicate keyword other', project='heavydup')
+        idx.upsert(dup_obs)
+        idx.upsert(other_obs)
+
+        with idx._lock:  # noqa: SLF001
+            for _ in range(10):
+                idx._conn.execute(  # noqa: SLF001
+                    _FTS_UPSERT_SQL,
+                    (dup_obs.observation_id, dup_obs.content, '', '', '', 'heavydup'),
+                )
+            idx._conn.commit()  # noqa: SLF001
+
+        results = idx.search(query='heavy duplicate keyword', project='heavydup', limit=2)
+        result_ids = [r.observation_id for r in results]
+        assert result_ids.count(dup_obs.observation_id) == 1
+        assert (
+            other_obs.observation_id in result_ids
+        ), 'a distinct observation must still fill the limit slot despite 10 duplicate rows for another id'
+        assert len(results) == 2
+    finally:
+        idx.close()
+
+
+def test_get_memory_status_truncated_reflects_actual_truncation(tmp_path: Path) -> None:
+    """PR #270 Codex review (R1): the browse-mode (no-query) path must also honor ``limit``.
+
+    ``get_memory_status`` computes ``truncated = len(recent) >= MAX_SEARCH``
+    from ``search_observations(limit=MAX_SEARCH)`` with no query, which
+    hits the non-FTS browse branch. The prior fix's fixed-multiple
+    over-fetch was applied uniformly across all branches, so this
+    browse-mode call was also silently capped (at 2000) regardless of the
+    requested ``limit``, making ``truncated`` look false — and the
+    ``by_family``/``by_pc`` counts under-reported — even when far more
+    rows existed. This seeds more rows than a small requested ``limit``
+    and asserts the browse path returns exactly ``limit`` rows (so
+    ``len(recent) >= limit`` correctly evaluates to truncated=True),
+    not a value capped below it by an internal constant.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'truncated_check.db'))
+    try:
+        for i in range(75):
+            idx.upsert(_mk_obs(f'browse mode row {i}', project='truncchk'))
+
+        results = idx.search(project='truncchk', limit=50)
+        assert len(results) == 50, 'browse-mode (no query) search must honor the full requested limit'
+    finally:
+        idx.close()
+
+
+def test_upsert_rolls_back_on_fts_insert_failure(tmp_path: Path) -> None:
+    """PR #270 Codex review (R2): a failed FTS INSERT must not leave torn state.
+
+    ``upsert()`` runs an ``obs_fts`` DELETE followed by an INSERT inside
+    sqlite3's implicit transaction. Before the fix, an exception raised by
+    the INSERT (e.g. malformed FTS state) was caught and logged without a
+    ``rollback()``, so the preceding DELETE stayed applied-but-uncommitted
+    on this connection — same-connection reads would see the row as gone
+    even though no new row replaced it, while the previously committed
+    row was still intact for any other connection. Injects a failure by
+    temporarily pointing the FTS insert statement at a nonexistent table
+    and asserts the old row survives untouched afterward.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    import kioku_mesh.memory.local_index as local_index_module  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'rollback_injection.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('rollback must preserve prior fts row', project='rollback')
+        idx.upsert(obs)
+        (before,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert before == 1
+
+        original_sql = local_index_module._FTS_UPSERT_SQL
+        local_index_module._FTS_UPSERT_SQL = 'INSERT INTO obs_fts_nonexistent_table(observation_id) VALUES (?)'
+        try:
+            idx.upsert(obs)  # DELETE succeeds, INSERT fails -> must rollback
+        finally:
+            local_index_module._FTS_UPSERT_SQL = original_sql
+
+        (after,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert after == 1, 'a failed upsert must roll back the preceding obs_fts DELETE, not leave 0 rows'
+
+        (idx_count,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_index WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert idx_count == 1, 'obs_index upsert must also be rolled back alongside the failed obs_fts insert'
+
+        # A subsequent successful upsert must still work normally (connection not left broken).
+        idx.upsert(obs)
+        (after2,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert after2 == 1
+    finally:
+        idx.close()
+
+
 def test_rebuild_incremental_fts_net_delete(tmp_path: Path) -> None:
     """Same observation_id in both obs scan and tombstone scan nets to delete in FTS (C1).
 

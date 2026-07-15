@@ -63,14 +63,6 @@ _CHECKPOINT_EVERY_N_UPSERTS = 256
 # Issue #218: valid values for the search_mode parameter.
 SEARCH_MODES = frozenset({'and', 'or', 'and_or'})
 
-# TASK-272: over-fetch factor/cap used to dedupe-before-limit in search().
-# A bounded multiple of the requested limit is fetched from SQL so that,
-# even if the same observation_id appears more than once in the raw rows
-# (e.g. stale duplicate obs_fts rows from before the upsert() fix), dedup
-# does not shrink the result below the caller's requested ``limit``.
-_DEDUPE_OVERFETCH_FACTOR = 5
-_DEDUPE_OVERFETCH_CAP = 2000
-
 
 @dataclasses.dataclass
 class RebuildStats:
@@ -443,6 +435,20 @@ class LocalIndex:
                 self._conn.commit()
                 self._maybe_checkpoint_locked()
             except sqlite3.Error as e:
+                # PR #270 Codex review (R2): the DELETE + UPDATE + FTS INSERT
+                # above share sqlite3's implicit transaction. If a later
+                # statement (e.g. the FTS INSERT) fails after an earlier one
+                # (e.g. the obs_fts DELETE) already ran, leaving the
+                # transaction open would strand a half-applied, uncommitted
+                # DELETE on this connection: same-connection readers would
+                # see it as already gone while other connections still see
+                # the old committed row, until some unrelated later commit
+                # accidentally flushes it. Roll back so a failed upsert never
+                # leaves torn state behind.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error as rollback_err:
+                    log.warning('LocalIndex.upsert rollback failed for %s: %s', obs.observation_id, rollback_err)
                 log.warning('LocalIndex.upsert failed for %s: %s', obs.observation_id, e)
 
     def mark_deleted(self, observation_id: str, deleted_at: str) -> None:
@@ -695,22 +701,26 @@ class LocalIndex:
         rank_by_importance = bool(query_terms) and not cursor_observation_id
         imp_plain = 'importance DESC, ' if rank_by_importance else ''
 
-        # Issue TASK-272: dedupe by observation_id happens after the SQL
-        # fetch but must not shrink the effective result below ``limit``
-        # just because legacy/stale duplicate ``obs_fts`` rows (see
-        # ``upsert``) or any other join anomaly returned the same id more
-        # than once. Over-fetch a bounded multiple of ``limit`` so dedupe
-        # has enough rows to still deliver ``limit`` unique results, then
-        # trim to ``limit`` after dedup — dedup happens before the limit
-        # is "spent", not after.
-        fetch_limit = min(_DEDUPE_OVERFETCH_CAP, max(1, limit) * _DEDUPE_OVERFETCH_FACTOR)
+        # PR #270 Codex review (R1): a fixed-multiple over-fetch-then-dedupe-
+        # in-Python cannot honor the public ``limit`` (up to ``MAX_SEARCH``)
+        # contract — it silently caps every query at the over-fetch ceiling,
+        # and provides no correctness guarantee once duplicate obs_fts rows
+        # for one observation_id outnumber the multiple. Instead, the two
+        # FTS-JOIN branches below dedupe *inside* SQL with a
+        # ``ROW_NUMBER() OVER (PARTITION BY observation_id ...)`` CTE that
+        # keeps only the best-ranked row per id, so ``ORDER BY``/``LIMIT``
+        # apply to already-unique rows — dedupe happens before limit is
+        # applied, with no over-fetch or duplicate-count assumption needed.
+        # The non-FTS branches read straight from ``obs_index``
+        # (``observation_id`` PRIMARY KEY), which can never contain
+        # duplicate rows for one id, so they use ``limit`` directly too.
         if rank_by_importance:
             # importance first, then bm25 relevance as the in-bucket tiebreak.
-            fts_and_order = 'o.importance DESC, f.rank'
-            fts_or_order = '(f.rank IS NULL), o.importance DESC, f.rank'
+            fts_and_order = 'importance DESC, rank'
+            fts_or_order = '(rank IS NULL), importance DESC, rank'
         else:
-            fts_and_order = 'f.rank'
-            fts_or_order = '(f.rank IS NULL), f.rank'
+            fts_and_order = 'rank'
+            fts_or_order = '(rank IS NULL), rank'
 
         if search_mode == 'and':
             for term in like_terms:
@@ -718,18 +728,27 @@ class LocalIndex:
                 params.append(f'%{_escape_like(term.lower())}%')
 
             if use_fts:
-                # FTS5 path: CTE join for bm25 ranking.
+                # FTS5 path: CTE join for bm25 ranking. ``obs_fts`` can hold
+                # more than one row per observation_id (legacy duplicate rows
+                # from before the upsert() dedupe fix), so the JOIN could
+                # otherwise surface the same observation more than once;
+                # ``ranked`` collapses each observation_id to its single
+                # best-ranked row (``rn = 1``) before ORDER BY/LIMIT apply.
                 fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
                 match_expr = ' AND '.join(_quote_fts_term(term) for term in fts_terms)
                 sql = (
-                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
-                    'SELECT o.payload_json '
+                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?), '
+                    'ranked AS ('
+                    'SELECT o.payload_json, o.created_at, o.observation_id, o.importance, f.rank, '
+                    'ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY f.rank) AS rn '
                     'FROM obs_index o '
                     'JOIN fts_match f ON f.observation_id = o.observation_id'
-                    f'{fts_where} '
-                    f'ORDER BY {fts_and_order}, o.created_at DESC, o.observation_id DESC LIMIT ?'
+                    f'{fts_where}'
+                    ') '
+                    'SELECT payload_json FROM ranked WHERE rn = 1 '
+                    f'ORDER BY {fts_and_order}, created_at DESC, observation_id DESC LIMIT ?'
                 )
-                rows_params: list[object] = [match_expr, *params, fetch_limit]
+                rows_params: list[object] = [match_expr, *params, max(1, limit)]
             else:
                 sql = 'SELECT payload_json FROM obs_index'
                 if where:
@@ -739,7 +758,7 @@ class LocalIndex:
                 # rows that share the same ``created_at`` (#66). ``imp_plain`` is
                 # empty on the cursor / browse paths (see rank_by_importance).
                 sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                rows_params = [*params, fetch_limit]
+                rows_params = [*params, max(1, limit)]
 
         else:  # search_mode == 'or'
             # OR behavior: query terms combined with OR; base filters remain AND.
@@ -755,15 +774,22 @@ class LocalIndex:
                     combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
                 else:
                     combined_where = ' WHERE ' + term_or
+                # Same ROW_NUMBER dedupe rationale as the 'and' FTS branch above:
+                # the LEFT JOIN can surface one observation_id more than once
+                # if obs_fts holds duplicate rows for it.
                 sql = (
-                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?) '
-                    'SELECT o.payload_json '
+                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?), '
+                    'ranked AS ('
+                    'SELECT o.payload_json, o.created_at, o.observation_id, o.importance, f.rank, '
+                    'ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY (f.rank IS NULL), f.rank) AS rn '
                     'FROM obs_index o '
                     'LEFT JOIN fts_match f ON f.observation_id = o.observation_id'
-                    f'{combined_where} '
-                    f'ORDER BY {fts_or_order}, o.created_at DESC, o.observation_id DESC LIMIT ?'
+                    f'{combined_where}'
+                    ') '
+                    'SELECT payload_json FROM ranked WHERE rn = 1 '
+                    f'ORDER BY {fts_or_order}, created_at DESC, observation_id DESC LIMIT ?'
                 )
-                rows_params = [match_expr, *params, *like_or_params, fetch_limit]
+                rows_params = [match_expr, *params, *like_or_params, max(1, limit)]
             else:
                 if like_or_preds:
                     term_or = '(' + ' OR '.join(like_or_preds) + ')'
@@ -777,7 +803,7 @@ class LocalIndex:
                 sql = 'SELECT payload_json FROM obs_index'
                 sql += combined_where
                 sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                rows_params = [*params, *like_or_params, fetch_limit]
+                rows_params = [*params, *like_or_params, max(1, limit)]
 
         with self._lock:
             try:
@@ -797,7 +823,7 @@ class LocalIndex:
                         if like_where:
                             like_sql += ' WHERE ' + ' AND '.join(like_where)
                         like_sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                        like_params.append(fetch_limit)
+                        like_params.append(max(1, limit))
                     else:  # 'or' fallback: all terms become OR LIKE.
                         all_or_terms = [*fts_terms, *like_terms]
                         or_fallback_preds = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in all_or_terms]
@@ -812,7 +838,7 @@ class LocalIndex:
                         elif or_fallback_preds:
                             like_sql += ' WHERE (' + ' OR '.join(or_fallback_preds) + ')'
                         like_sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                        like_params = [*params, *or_fallback_p, fetch_limit]
+                        like_params = [*params, *or_fallback_p, max(1, limit)]
                     try:
                         rows = self._conn.execute(like_sql, like_params).fetchall()
                     except sqlite3.Error as e2:
@@ -822,6 +848,14 @@ class LocalIndex:
                     log.warning('LocalIndex.search failed: %s', e)
                     return []
         out: list[Observation] = []
+        # Defense-in-depth dedupe (PR #270 Codex review, R1): the FTS-JOIN
+        # branches above already dedupe by observation_id in SQL via the
+        # ``ranked`` CTE, and the non-FTS branches read straight from the
+        # PRIMARY KEY-unique ``obs_index`` table, so ``rows`` should already
+        # be unique per id. This loop is a cheap backstop against any future
+        # regression or unforeseen join path, not the primary dedupe
+        # mechanism — it must never need to shrink the result below
+        # ``limit``, since dedupe already happened before the SQL LIMIT.
         seen_ids: set[str] = set()
         for (payload,) in rows:
             try:
@@ -829,10 +863,10 @@ class LocalIndex:
             except Exception as e:  # noqa: BLE001 — malformed payload should not crash search
                 log.warning('LocalIndex skip malformed payload: %s', e)
                 continue
-            # Dedupe by observation_id before the caller's limit is spent (TASK-272):
-            # a duplicate row (e.g. a stale obs_fts row from before the upsert() fix)
-            # must not eat a limit slot that a distinct observation could have filled.
             if obs.observation_id in seen_ids:
+                log.warning(
+                    'LocalIndex.search unexpected duplicate observation_id after SQL dedupe: %s', obs.observation_id
+                )
                 continue
             seen_ids.add(obs.observation_id)
             out.append(obs)
