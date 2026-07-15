@@ -1632,6 +1632,89 @@ def test_rebuild_incremental_fts_unchanged_not_retokenized(tmp_path: Path) -> No
         idx.close()
 
 
+def test_upsert_repeated_does_not_duplicate_fts_row(tmp_path: Path) -> None:
+    """TASK-272: re-upserting the same observation must not grow ``obs_fts``.
+
+    Before the fix, ``INSERT OR REPLACE INTO obs_fts`` never found a
+    conflict to replace (FTS5 tables have no UNIQUE/PRIMARY KEY on
+    ``observation_id``), so every repeated ``upsert()`` call for an
+    already-indexed id (e.g. a self-echo of this peer's own PUT replayed
+    back through the replication subscriber) appended a fresh FTS row.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'repeated_upsert.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        obs = _mk_obs('repeated upsert must not duplicate fts', project='dedupe')
+        idx.upsert(obs)
+        idx.upsert(obs)
+        idx.upsert(obs)
+
+        (fts_count,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (obs.observation_id,),
+        ).fetchone()
+        assert fts_count == 1, 'repeated upsert() must leave exactly one obs_fts row per observation_id'
+    finally:
+        idx.close()
+
+
+def test_search_dedupes_observation_id_before_limit(tmp_path: Path) -> None:
+    """TASK-272: a query-mode search must return each observation_id at most once.
+
+    Simulates a pre-fix database where ``obs_fts`` already accumulated
+    duplicate rows for one observation_id (the historical bug), and
+    asserts the search-time dedupe absorbs it: the duplicate must not
+    appear twice, and must not eat a ``limit`` slot that a distinct
+    observation could have used.
+    """
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+    from kioku_mesh.local_index import _FTS_UPSERT_SQL  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'dedupe_search.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('obs_fts unavailable without FTS5')
+
+        dup_obs = _mk_obs('dedupe target keyword', project='dedupe')
+        other_obs = _mk_obs('dedupe target keyword also matches', project='dedupe')
+        idx.upsert(dup_obs)
+        idx.upsert(other_obs)
+
+        # Directly seed extra duplicate obs_fts rows for dup_obs to simulate
+        # a database still carrying pre-fix bloat.
+        with idx._lock:  # noqa: SLF001
+            for _ in range(2):
+                idx._conn.execute(  # noqa: SLF001
+                    _FTS_UPSERT_SQL,
+                    (
+                        dup_obs.observation_id,
+                        dup_obs.content,
+                        dup_obs.subject or '',
+                        dup_obs.summary or '',
+                        '',
+                        'dedupe',
+                    ),
+                )
+            idx._conn.commit()  # noqa: SLF001
+        (fts_count,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (dup_obs.observation_id,),
+        ).fetchone()
+        assert fts_count == 3, 'test setup must seed 3 duplicate obs_fts rows for dup_obs'
+
+        results = idx.search(query='dedupe target keyword', project='dedupe', limit=2)
+        result_ids = [r.observation_id for r in results]
+        assert result_ids.count(dup_obs.observation_id) == 1, 'duplicate observation_id must appear at most once'
+        assert other_obs.observation_id in result_ids, 'dedupe must not waste the limit slot on a duplicate row'
+        assert len(results) == 2
+    finally:
+        idx.close()
+
+
 def test_rebuild_incremental_fts_net_delete(tmp_path: Path) -> None:
     """Same observation_id in both obs scan and tombstone scan nets to delete in FTS (C1).
 

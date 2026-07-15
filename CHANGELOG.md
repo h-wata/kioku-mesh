@@ -12,6 +12,19 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+### Fixed
+
+- `search_memory` / `recall_context` が同一 `observation_id` を複数回返す
+  ことがあったバグを修正した。根本原因は `LocalIndex.upsert()` が
+  `obs_fts` (FTS5) へ `INSERT OR REPLACE` していたが、FTS5 の仮想テーブルは
+  `observation_id` に `UNIQUE`/`PRIMARY KEY` 制約を持てないため実質的に
+  常に新規 INSERT として扱われ、同じ observation を再度 `upsert()` するたび
+  (例: 自分自身の PUT が replication subscriber 経由でエコーバックされた
+  場合) に `obs_fts` へ重複行が積み重なっていた。`upsert()` を挿入前に
+  既存行を削除するよう修正し、加えて `LocalIndex.search()` に
+  `observation_id` ベースの dedupe (limit 適用前に実施) を追加して、
+  すでに重複行が溜まった既存 DB に対しても安全側に倒した。
+
 ## [1.0.0] - 2026-07-02
 
 ### Removed
