@@ -51,6 +51,12 @@ _INSTRUCTIONS = """\
 kioku-mesh provides a Zenoh-backed shared memory across coding agents and hosts.
 Treat this as ACTIVE PROTOCOL — do not wait for the user to ask.
 
+PROACTIVE READ — before starting work, call ``recall_context`` once with
+{project, limit} to restore prior context for this project. Do this at the
+start of a session, not only when the user explicitly asks to recall
+something; skipping it means you re-derive decisions and conventions that
+were already saved.
+
 PROACTIVE SAVE — call ``save_observation`` IMMEDIATELY after ANY of these:
 - Architecture / convention / workflow / tool-choice decision is made
 - Bug fixed (include root cause; memory_type="bug")
@@ -74,6 +80,11 @@ SKIP saving when the entry would mostly duplicate another source of truth:
 - Restatement of content already captured in a PR description, Issue body, ADR, CHANGELOG, or commit message
 - Per-step implementation progress inside one conversation; use plan / todo tracking instead
 - Generic status like "tests pass" or "build is green" without a non-obvious cause or decision
+Before calling ``save_observation`` with ``memory_type="summary"``, self-check
+that the entry states a *chosen direction*, not an activity log. "PR merged",
+"issues closed", "review posted", or "migration/test ping" style statements
+are not, by themselves, worth saving as a summary — apply the SKIP rules above
+to your own summary candidates too, not only to other memory_types.
 
 SKIP exception — save the WHY even when the conclusion lives in a SoR:
 A PR / ADR / commit captures the *decision*, but rarely its *rationale*. When
@@ -87,6 +98,11 @@ elsewhere:
   options
 These cannot be reconstructed from the SoR later, so they are NOT duplicates.
 
+When updating or correcting an existing memory on the same topic, do not save
+an independent new entry — pass the prior observation_id(s) in
+``save_observation``'s ``supersedes`` argument so the store records the
+replacement instead of accumulating duplicates.
+
 Self-check after every task: "Did the user or I just make a decision, confirm a
 recommendation, fix a bug, learn something, or establish a convention? If yes →
 ``save_observation`` NOW." Skip transient notes, status checks, and routine
@@ -98,6 +114,14 @@ SEARCH MEMORY (``search_memory`` → ``get_memory``) when:
 - The user references a topic you have no context on
 - The user's first message names a feature, file, or problem — search before answering
 
+Search pattern: first query with a ``project`` filter and a generous ``limit``,
+keeping the query terms to one or two proper nouns / IDs. If that returns zero
+results, do not conclude "nothing is stored" yet — retry with (1) the same
+concept's key terms in the other language (EN <-> JA/ZH/KO) and (2)
+``search_mode='or'``. Only after both retries come up empty is "no prior
+memory" a safe conclusion. For broad "what's the context here" recall, prefer
+``recall_context`` over ``search_memory``.
+
 Identity (agent_family / client_id / pc_id / session_id) is resolved on the
 server side from environment + state. Do not pass these as tool arguments;
 they are intentionally not parameters of ``save_observation``.
@@ -105,10 +129,25 @@ they are intentionally not parameters of ``save_observation``.
 Use ``memory_type`` accurately — one of: note, decision, bug, pattern, config,
 summary. Prefer decision / bug / pattern / config over summary; use summary only
 for a session conclusion with a chosen direction, not as a log of what happened.
-Set ``importance`` 1–5 with care: 4-5 for project-wide or durable changes in
-assumptions, 3 for reusable but local lessons, and 1-2 only when the entry is
-still worth saving after the SKIP rules. Prefer adding ``subject`` + ``summary``
-so search results stay scannable.
+Set ``importance`` 1–5 with care: 5 = changes a project-wide assumption or
+durable rule, 4 = a decision reused across future sessions, 3 = a local,
+reusable lesson, 1-2 = barely worth saving at all (only after the SKIP rules
+still say to save it). A single inconclusive experiment's result is usually a
+3, not a 5. If most of your entries land at 4-5, you are over-rating them.
+Prefer adding ``subject`` + ``summary`` so search results stay scannable. Put
+the proper nouns a future searcher would actually type into ``subject`` /
+``summary``. FTS only matches the language an entry was saved in, so a
+project-specific term should be written in both English and Japanese (e.g.
+subject: "Dispatcher default model / opus 既定") — a Japanese-only entry is
+invisible to this mesh's English-speaking agents searching in English, and
+vice versa.
+
+``get_memory_status`` reports a ``family <name>: N`` breakdown, but this is an
+aggregate over recently *saved* observations, not the current session's live
+identity — it cannot confirm the current session is resolved correctly, and a
+past unknown entry can linger in the count even after identity is fixed. If
+``family unknown`` keeps showing up there, past sessions likely failed to
+resolve identity; check the ``KIOKU_MESH_*`` identity environment variables.
 """
 
 mcp = FastMCP('kioku-mesh', instructions=_INSTRUCTIONS)
