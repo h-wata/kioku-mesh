@@ -1743,13 +1743,29 @@ def test_search_query_limit_not_capped_by_fixed_overfetch(tmp_path: Path) -> Non
 
 
 def test_search_dedupe_survives_duplicates_beyond_old_overfetch_factor(tmp_path: Path) -> None:
-    """PR #270 Codex review (R1): dedupe must not depend on a bounded duplicate count.
+    """PR #270 Codex re-review: dedupe must not depend on a bounded duplicate count.
 
-    The prior fix's over-fetch factor was a fixed 5x multiple, so more
-    than 5 duplicate ``obs_fts`` rows for the first-ranked observation_id
-    could still starve ``limit`` of a distinct result. This seeds 10
-    duplicate rows (double the old factor) and asserts the distinct
-    observation still appears within ``limit``.
+    The prior fix's over-fetch factor was a fixed 5x multiple: for
+    ``limit=2`` it fetched only the top 10 raw SQL rows before deduping in
+    Python. An earlier version of this test seeded 10 duplicate rows for
+    one id but did not pin the SQL ordering, so ``other_obs`` could still
+    land inside that top-10 window by ordering coincidence (e.g. via the
+    ``created_at DESC`` tie-break) and the test passed against the old
+    implementation too — it wasn't actually exercising the bug (Codex
+    re-review on PR #270).
+
+    Fixed by using ``importance`` as the top-priority sort key: the query
+    path ranks ``importance DESC`` before bm25 relevance, so setting
+    ``dup_obs`` to importance 5 and ``other_obs`` to importance 1
+    deterministically forces every one of ``dup_obs``'s 11 duplicate
+    ``obs_fts`` rows ahead of ``other_obs``'s single row in the raw SQL
+    order — regardless of bm25 score or created_at. Under the old fixed
+    top-10 fetch window, the fetched rows are therefore *guaranteed* to be
+    11 copies of ``dup_obs`` and nothing else, so ``other_obs`` cannot
+    reach the caller's ``limit`` slot at all: the old implementation must
+    fail this test. The current ``ROW_NUMBER()``-based SQL dedupe joins
+    the full match set (all 12 rows) before applying ``ORDER BY``/
+    ``LIMIT``, so both ids survive regardless of raw-row ordering.
     """
     from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
     from kioku_mesh.local_index import _FTS_UPSERT_SQL  # noqa: PLC0415
@@ -1759,8 +1775,26 @@ def test_search_dedupe_survives_duplicates_beyond_old_overfetch_factor(tmp_path:
         if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
             pytest.skip('obs_fts unavailable without FTS5')
 
-        dup_obs = _mk_obs('heavy duplicate keyword target', project='heavydup')
-        other_obs = _mk_obs('heavy duplicate keyword other', project='heavydup')
+        dup_obs = Observation(
+            content='heavy duplicate keyword target',
+            project='heavydup',
+            importance=5,
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        other_obs = Observation(
+            content='heavy duplicate keyword other',
+            project='heavydup',
+            importance=1,
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
         idx.upsert(dup_obs)
         idx.upsert(other_obs)
 
@@ -1771,40 +1805,57 @@ def test_search_dedupe_survives_duplicates_beyond_old_overfetch_factor(tmp_path:
                     (dup_obs.observation_id, dup_obs.content, '', '', '', 'heavydup'),
                 )
             idx._conn.commit()  # noqa: SLF001
+        (dup_fts_count,) = idx._conn.execute(  # noqa: SLF001
+            'SELECT COUNT(*) FROM obs_fts WHERE observation_id = ?',
+            (dup_obs.observation_id,),
+        ).fetchone()
+        assert dup_fts_count == 11, 'test setup must seed 11 duplicate obs_fts rows for dup_obs (importance 5)'
 
         results = idx.search(query='heavy duplicate keyword', project='heavydup', limit=2)
         result_ids = [r.observation_id for r in results]
         assert result_ids.count(dup_obs.observation_id) == 1
-        assert (
-            other_obs.observation_id in result_ids
-        ), 'a distinct observation must still fill the limit slot despite 10 duplicate rows for another id'
+        assert other_obs.observation_id in result_ids, (
+            'a distinct observation must still fill the limit slot despite 11 duplicate, '
+            'higher-importance rows for another id occupying the raw SQL ordering ahead of it'
+        )
         assert len(results) == 2
     finally:
         idx.close()
 
 
 def test_get_memory_status_truncated_reflects_actual_truncation(tmp_path: Path) -> None:
-    """PR #270 Codex review (R1): the browse-mode (no-query) path must also honor ``limit``.
+    """PR #270 Codex re-review: the browse-mode (no-query) path must also honor ``limit``.
 
     ``get_memory_status`` computes ``truncated = len(recent) >= MAX_SEARCH``
     from ``search_observations(limit=MAX_SEARCH)`` with no query, which
-    hits the non-FTS browse branch. The prior fix's fixed-multiple
-    over-fetch was applied uniformly across all branches, so this
-    browse-mode call was also silently capped (at 2000) regardless of the
-    requested ``limit``, making ``truncated`` look false — and the
-    ``by_family``/``by_pc`` counts under-reported — even when far more
-    rows existed. This seeds more rows than a small requested ``limit``
-    and asserts the browse path returns exactly ``limit`` rows (so
-    ``len(recent) >= limit`` correctly evaluates to truncated=True),
-    not a value capped below it by an internal constant.
-    """
-    idx = LocalIndex.connect(str(tmp_path / 'truncated_check.db'))
-    try:
-        for i in range(75):
-            idx.upsert(_mk_obs(f'browse mode row {i}', project='truncchk'))
+    hits the non-FTS browse branch. An earlier version of this test only
+    requested ``limit=50`` against 75 rows, which the old fixed-multiple
+    over-fetch (``min(2000, limit * 5)`` = ``min(2000, 250)`` = 250) could
+    still satisfy — so it passed against the old implementation too and
+    did not actually exercise the bug (Codex re-review on PR #270).
 
-        results = idx.search(project='truncchk', limit=50)
-        assert len(results) == 50, 'browse-mode (no query) search must honor the full requested limit'
+    The old over-fetch cap saturates at exactly 2000 once
+    ``limit * 5 >= 2000`` (i.e. any ``limit >= 400``), independent of how
+    many rows actually exist. This requests ``limit=2500`` (using an
+    unbounded ``project`` filter so the SQL ``WHERE`` clause matches all
+    seeded rows) against 2500 available unique rows: the old
+    implementation can only ever return 2000 of them, silently truncating
+    below the caller's real ``limit`` and making ``truncated`` look
+    unreached even though far more rows exist. The current implementation
+    reads ``obs_index`` (``observation_id`` PRIMARY KEY, so no join-
+    induced duplicates) directly with ``LIMIT ?`` bound to the real
+    ``limit``, and must return the full requested count.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'browse_limit_check.db'))
+    try:
+        total = 2500
+        for i in range(total):
+            idx.upsert(_mk_obs(f'browse mode row {i}', project='truncbrowse'))
+
+        results = idx.search(project='truncbrowse', limit=2500)
+        assert (
+            len(results) == total
+        ), f'browse-mode search must honor the full requested limit ({total}), got {len(results)}'
     finally:
         idx.close()
 
