@@ -12,6 +12,31 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+### Fixed
+
+- `search_memory` / `recall_context` が同一 `observation_id` を複数回返す
+  ことがあったバグを修正した。根本原因は `LocalIndex.upsert()` が
+  `obs_fts` (FTS5) へ `INSERT OR REPLACE` していたが、FTS5 の仮想テーブルは
+  `observation_id` に `UNIQUE`/`PRIMARY KEY` 制約を持てないため実質的に
+  常に新規 INSERT として扱われ、同じ observation を再度 `upsert()` するたび
+  (例: 自分自身の PUT が replication subscriber 経由でエコーバックされた
+  場合) に `obs_fts` へ重複行が積み重なっていた。`upsert()` を挿入前に
+  既存行を削除するよう修正し、加えて `LocalIndex.search()` に
+  `observation_id` ベースの dedupe (limit 適用前に実施) を追加して、
+  すでに重複行が溜まった既存 DB に対しても安全側に倒した。
+- 上記修正の Codex cross-review (PR #270) で指摘された2件の major issue を
+  追加修正した。(1) `LocalIndex.search()` の dedupe が固定倍率 (`limit * 5`,
+  上限2000件) の over-fetch + Python側dedupe だったため、重複が無い通常検索
+  でも公開契約上の上限 `MAX_SEARCH=10000` 件を返せず2000件で頭打ちになり、
+  `get_memory_status` の `truncated` 判定・family/pc 集計も過少表示になって
+  いた問題を修正した。FTS5 结合を伴う検索経路を
+  `ROW_NUMBER() OVER (PARTITION BY observation_id ORDER BY rank)` を使った
+  SQL側のdedupe(limit適用前に一意化)に置き換え、over-fetchの倍率に依存しない
+  方式にした。(2) `LocalIndex.upsert()` の `obs_fts` DELETE→INSERTで、
+  INSERT が `sqlite3.Error` を投げた場合に rollback していなかったため、
+  DELETE 済みの中間状態がコミットされないまま残ってしまう問題を修正し、
+  失敗時は明示的に `rollback()` するようにした。
+
 ## [1.0.0] - 2026-07-02
 
 ### Removed
