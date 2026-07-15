@@ -142,10 +142,12 @@ subject: "Dispatcher default model / opus 既定") — a Japanese-only entry is
 invisible to this mesh's English-speaking agents searching in English, and
 vice versa.
 
-At the start of a session, call ``get_memory_status`` once and check that
-``agent_family`` in its output is not ``unknown`` (look for a line like
-``family unknown: N``) — if it is, the ``KIOKU_MESH_*`` identity environment
-variables need to be set before observations can be attributed correctly.
+``get_memory_status`` reports a ``family <name>: N`` breakdown, but this is an
+aggregate over recently *saved* observations, not the current session's live
+identity — it cannot confirm the current session is resolved correctly, and a
+past unknown entry can linger in the count even after identity is fixed. If
+``family unknown`` keeps showing up there, past sessions likely failed to
+resolve identity; check the ``KIOKU_MESH_*`` identity environment variables.
 """
 
 mcp = FastMCP('kioku-mesh', instructions=_INSTRUCTIONS)
