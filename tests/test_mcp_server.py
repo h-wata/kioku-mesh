@@ -1299,3 +1299,111 @@ def test_save_lint_warn_only_save_succeeds(single_zenohd: Any) -> None:  # noqa:
     found = store.find_observation_by_id(obs_id)
     assert found is not None
     assert found.content == 'done'
+
+
+# ---------------------------------------------------------------------------
+# Cross-PC origin markers (#: host-local details must be attributable)
+# ---------------------------------------------------------------------------
+
+
+def test_instructions_document_cross_pc_origin(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Instructions must warn that other-pc entries carry host-local details."""
+
+    async def _go() -> str | None:
+        async with Client(mcp) as client:
+            init_result = client.initialize_result
+            return init_result.instructions if init_result else None
+
+    instructions = _run(_go())
+    assert instructions
+    assert 'CROSS-PC ORIGIN' in instructions
+    assert 'tmux pane' in instructions
+
+
+def test_get_memory_marks_other_pc_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry saved under a different pc_id is labeled (other pc)."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('written on the office machine', project='origin-get')
+    backend.put_observation(obs)
+    monkeypatch.setattr(mcp_server_module, 'get_pc_id', lambda: 'another-pc')
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'origin: claude-code (other pc)' in text
+
+
+def test_get_memory_marks_this_pc_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entry whose pc_id matches the current host is labeled (this pc)."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('written locally', project='origin-get-local')
+    backend.put_observation(obs)
+    monkeypatch.setattr(mcp_server_module, 'get_pc_id', lambda: 'mcp-pc')
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory', {'observation_id': obs.observation_id})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'origin: claude-code (this pc)' in text
+
+
+def test_search_memory_origin_suffix_only_for_other_pc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search_memory appends [origin: ...] only when the entry came from another pc."""
+    backend = _mk_local_backend(monkeypatch)
+    local = _mk_obs_full('local origin needle', project='origin-search')
+    remote = Observation(
+        content='remote origin needle',
+        agent_family='claude',
+        client_id='gisen@office',
+        pc_id='remote-pc',
+        session_id='mcp-sess',
+        project='origin-search',
+    )
+    backend.put_observation(local)
+    backend.put_observation(remote)
+    monkeypatch.setattr(mcp_server_module, 'get_pc_id', lambda: 'mcp-pc')
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory', {'query': 'needle', 'project': 'origin-search', 'limit': 20}
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert '[origin: gisen@office, other pc]' in text
+    local_block = next(b for b in text.split('---') if local.observation_id in b)
+    assert '[origin:' not in local_block
+
+
+def test_recall_context_shows_origin_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recall_context output carries an origin line for every entry."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('recalled with origin', project='origin-recall')
+    backend.put_observation(obs)
+    monkeypatch.setattr(mcp_server_module, 'get_pc_id', lambda: 'another-pc')
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'origin-recall'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'origin: claude-code (other pc)' in text

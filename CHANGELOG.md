@@ -12,6 +12,21 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+### Added
+
+- 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
+  全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
+  現在のホストのものと誤認して引き継いでしまう問題があった。
+  `recall_context` / `get_memory` は各エントリに
+  `origin: <client_id> (this pc|other pc|unknown pc)` 行を出力し、
+  `search_memory` は別ホスト由来のエントリにのみ
+  `[origin: <client_id>, other pc]` サフィックスを付ける。判定は保存済み
+  `pc_id` と現ホストの `get_pc_id()` の比較で行う (スキーマ変更なし)。
+  あわせて MCP `_INSTRUCTIONS` に CROSS-PC ORIGIN 節を追加し、
+  ホスト固有情報 (絶対パス / tmux pane / ポート / PID / 実行中状態) は
+  origin ホストのものであり、ローカルで検証してから使うようエージェントに
+  指示するようにした。
+
 ### Fixed
 
 - `search_memory` / `recall_context` が同一 `observation_id` を複数回返す

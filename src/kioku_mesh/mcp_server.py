@@ -126,6 +126,17 @@ Identity (agent_family / client_id / pc_id / session_id) is resolved on the
 server side from environment + state. Do not pass these as tool arguments;
 they are intentionally not parameters of ``save_observation``.
 
+CROSS-PC ORIGIN — memories replicate across every host in the mesh. An entry
+marked ``other pc`` (``origin:`` line in ``recall_context`` / ``get_memory``,
+``[origin: ...]`` suffix in ``search_memory``) was written on a DIFFERENT
+machine: absolute file paths, tmux pane/session/window targets, ports, PIDs,
+and "currently running" state in it describe the ORIGIN host, not this one.
+Verify such details exist locally before acting on them — never resume another
+host's tmux pane, worktree, or in-flight process as if it were yours. The same
+applies when WRITING: if an entry contains host-local details, say which host
+they belong to in the content so future readers on other machines are not
+misled.
+
 Use ``memory_type`` accurately — one of: note, decision, bug, pattern, config,
 summary. Prefer decision / bug / pattern / config over summary; use summary only
 for a session conclusion with a chosen direction, not as a log of what happened.
@@ -424,9 +435,11 @@ def search_memory(
         subject_part = f' {obs.subject}' if obs.subject else ''
         project_part = f' ({obs.project})' if obs.project else ''
         refs_part = f' (refs: {", ".join(obs.references)})' if obs.references else ''
+        note = _origin_note(obs)
+        origin_part = f' [origin: {obs.client_id or "?"}, {note}]' if note != 'this pc' else ''
         lines.append(
             f'[{obs.memory_type}][{obs.importance}] {obs.created_at[:19]}'
-            f'{project_part}{subject_part}{refs_part}\n'
+            f'{project_part}{subject_part}{refs_part}{origin_part}\n'
             f'{body} <id={obs.observation_id}>'
         )
     return '\n---\n'.join(lines)
@@ -461,6 +474,7 @@ def get_memory(observation_id: str) -> str:
         f'subject: {obs.subject or "-"}',
         f'summary: {obs.summary or "-"}',
         f'agent: {obs.agent_family}/{obs.client_id}',
+        f'origin: {obs.client_id or "-"} ({_origin_note(obs)})',
         f'tags: {", ".join(obs.tags) if obs.tags else "-"}',
         f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}',
         f'references: {", ".join(obs.references) if obs.references else "-"}',
@@ -471,6 +485,18 @@ def get_memory(observation_id: str) -> str:
         obs.content,
     ]
     return '\n'.join(lines)
+
+
+def _origin_note(obs: Observation) -> str:
+    """Classify where an observation was written relative to this process's host.
+
+    Compares the stored ``pc_id`` against this host's ``get_pc_id()``:
+    ``'this pc'`` on match, ``'other pc'`` on mismatch, ``'unknown pc'`` when
+    the entry carries no pc_id (pre-identity legacy payloads).
+    """
+    if not obs.pc_id:
+        return 'unknown pc'
+    return 'this pc' if obs.pc_id == get_pc_id() else 'other pc'
 
 
 def _normalize_list_filter(v: list[str] | None) -> list[str] | None:
@@ -518,6 +544,7 @@ def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str
             lines.append(f'state: {state}')
             lines.append(f'importance: {obs.importance}')
             lines.append(f'created_at: {obs.created_at}')
+            lines.append(f'origin: {obs.client_id or "-"} ({_origin_note(obs)})')
             lines.append(f'subject: {obs.subject or "-"}')
             lines.append(f'summary: {obs.summary or "-"}')
             lines.append(f'tags: {", ".join(obs.tags) if obs.tags else "-"}')
