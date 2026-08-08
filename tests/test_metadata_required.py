@@ -534,3 +534,90 @@ def test_cli_save_accepts_filled_metadata(monkeypatch: pytest.MonkeyPatch) -> No
     rc = cli.main(['save', 'body text', '--subject', 'real subject', '--summary', 'real summary'])
     assert rc == 0
     assert len(saved) == 1
+
+
+# -- required metadata x observation expiry (merge of PR #275 and PR #273) -----
+
+
+def test_mcp_required_metadata_and_expiry_hold_in_one_tool_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both features share one ``save_observation`` schema; pin them together.
+
+    PR #275 made ``subject`` / ``summary`` required, PR #273 added the optional
+    ``expires_at`` / ``ttl_sec``. Resolving that merge by hand can silently
+    push the expiry arguments into ``required`` (breaking every durable save)
+    or drop the expiry normalization (silently storing entries that never
+    expire). One FastMCP call exercises both halves so neither regresses
+    alone.
+    """
+    import asyncio
+
+    pytest.importorskip('fastmcp')
+    from datetime import datetime
+    from datetime import timedelta
+
+    from fastmcp import Client
+
+    from kioku_mesh import mcp_server
+
+    def _parse_ts(value: str) -> datetime:
+        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+    saved: list = []
+    monkeypatch.setattr(mcp_server, 'get_backend', lambda: _RecordingBackend(saved))
+
+    async def _go():  # noqa: ANN202 — fastmcp CallToolResult tuple
+        async with Client(mcp_server.mcp) as client:
+            tool = next(t for t in await client.list_tools() if t.name == 'save_observation')
+            missing = await client.call_tool(
+                'save_observation',
+                {'content': 'body text', 'subject': '', 'summary': ''},
+                raise_on_error=False,
+            )
+            explicit = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'body text',
+                    'subject': 'real subject',
+                    'summary': 'real summary',
+                    'expires_at': '2026-08-08T21:00:00+09:00',
+                    'ttl_sec': 999999,
+                },
+                raise_on_error=False,
+            )
+            ttl = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'body text',
+                    'subject': 'real subject',
+                    'summary': 'real summary',
+                    'ttl_sec': 3600,
+                },
+                raise_on_error=False,
+            )
+            return tool.inputSchema, missing, explicit, ttl
+
+    schema, missing, explicit, ttl = asyncio.run(_go())
+
+    # The published contract: only the three metadata fields are required, and
+    # the expiry arguments stay optional.
+    assert set(schema.get('required', [])) == {'content', 'subject', 'summary'}
+    assert {'expires_at', 'ttl_sec'} <= set(schema.get('properties', {}))
+
+    # Missing metadata is still a protocol-level error, and nothing is stored.
+    assert missing.is_error is True
+    assert len(saved) == 2
+
+    # expires_at wins over ttl_sec and is normalized to UTC.
+    assert explicit.is_error is False
+    assert saved[0].expires_at == '2026-08-08T12:00:00.000000Z'
+    assert json.loads(explicit.content[0].text)['expires_at'] == '2026-08-08T12:00:00.000000Z'
+
+    # ttl_sec alone lands roughly ttl seconds ahead: the server resolves the
+    # instant just before the observation stamps its own created_at, so the
+    # gap is a hair under the full ttl rather than exactly it.
+    assert ttl.is_error is False
+    assert saved[1].expires_at > saved[1].created_at
+    delta = _parse_ts(saved[1].expires_at) - _parse_ts(saved[1].created_at)
+    assert timedelta(seconds=3599) <= delta <= timedelta(seconds=3600)
