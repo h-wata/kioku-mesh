@@ -813,17 +813,25 @@ def check_legacy_namespace(
 # configs that still carry it are how 286 consecutive observations came to be
 # saved as `unknown` for five weeks without anyone noticing.
 #
-# Deliberately reported as WARN, not FAIL: #275 reintroduces a deprecated
-# read of this prefix, so whether a config using it still works depends on
-# which revision is installed. This check reports the same thing either way —
-# the config names an env var the project has moved off — which is advice
-# that holds on both sides of that change.
+# Reported as FAIL: identity resolution is KIOKU_MESH_* -> launcher detection
+# -> unknown, with no read of the retired prefix (#275 settled on removing it
+# rather than reinstating a deprecated fallback). A config that names only the
+# old keys therefore does not set identity at all — it is broken, not merely
+# deprecated.
 _LEGACY_ENV_PREFIX = 'MESH_MEM_'
 _CURRENT_ENV_PREFIX = 'KIOKU_MESH_'
 
 # Current identity env vars, quoted in the remediation hint so the fix is
 # copy-pasteable rather than a pointer to the docs.
 _IDENTITY_ENV_KEYS = ('KIOKU_MESH_AGENT_FAMILY', 'KIOKU_MESH_CLIENT_ID')
+
+# The retired names this check looks for: exactly the counterparts of
+# _IDENTITY_ENV_KEYS. Scoped to identity rather than to the whole MESH_MEM_*
+# prefix so the finding, the summary and the "rename to
+# KIOKU_MESH_AGENT_FAMILY / KIOKU_MESH_CLIENT_ID" hint all describe the same
+# thing — a prefix-wide scan would FAIL on e.g. MESH_MEM_STATE_DIR while
+# advising a rename that has nothing to do with it.
+_LEGACY_IDENTITY_ENV_KEYS = tuple(_LEGACY_ENV_PREFIX + k[len(_CURRENT_ENV_PREFIX) :] for k in _IDENTITY_ENV_KEYS)
 
 # How many recent observations the unknown-dominance probe reads, and the
 # share of them that must be 'unknown' before it warns. 50 is roughly a day
@@ -851,15 +859,18 @@ def _default_identity_config_paths() -> list[Path]:
 
 
 def _collect_legacy_env_keys(data: Any) -> list[str]:
-    """Return legacy-prefixed keys under ``data`` that have no current-prefix twin.
+    """Return retired identity keys under ``data`` that have no current twin.
 
-    A key only counts when its ``KIOKU_MESH_*`` counterpart is absent from the
-    *same* mapping. A config setting both prefixes side by side is already
-    correct: ``KIOKU_MESH_*`` wins whether or not the deprecated fallback in
-    #275 is installed, so the legacy key is inert and reporting it would be
-    noise. That comparison is also what keeps this check independent of which
-    revision is running — it never asks whether the fallback exists, only
-    whether the config still relies on the old name alone.
+    Only the keys in :data:`_LEGACY_IDENTITY_ENV_KEYS` count, and only when
+    the ``KIOKU_MESH_*`` counterpart is absent from the *same* mapping. A
+    config setting both names side by side is already correct — the current
+    name is the one that is read, so the retired key is inert and reporting it
+    would be noise.
+
+    Other retired ``MESH_MEM_*`` keys (``MESH_MEM_STATE_DIR`` and friends) are
+    deliberately out of scope: this check's summary and hint are about
+    identity, and a finding that cannot be acted on by following its own hint
+    is worse than no finding.
 
     Walks the parsed config structurally rather than grepping the raw text:
     a substring scan would also fire on prose in a description field or on a
@@ -871,7 +882,7 @@ def _collect_legacy_env_keys(data: Any) -> list[str]:
         node = stack.pop()
         if isinstance(node, dict):
             for key, value in node.items():
-                if isinstance(key, str) and key.startswith(_LEGACY_ENV_PREFIX):
+                if key in _LEGACY_IDENTITY_ENV_KEYS:
                     counterpart = _CURRENT_ENV_PREFIX + key[len(_LEGACY_ENV_PREFIX) :]
                     if counterpart not in node:
                         found.add(key)
@@ -903,14 +914,85 @@ def _load_config_mapping(path: Path) -> Any | None:
         return None
 
 
-def _unknown_family_ratio(observations: list[Any]) -> float:
-    """Share of ``observations`` whose agent_family is unset or 'unknown'."""
-    if not observations:
+def _unknown_family_ratio(families: list[str]) -> float:
+    """Share of ``families`` that are unset or 'unknown'."""
+    if not families:
         return 0.0
-    unknown = sum(
-        1 for o in observations if (getattr(o, 'agent_family', '') or '').strip().lower() in _UNKNOWN_FAMILIES
-    )
-    return unknown / len(observations)
+    unknown = sum(1 for f in families if (f or '').strip().lower() in _UNKNOWN_FAMILIES)
+    return unknown / len(families)
+
+
+def _readonly_index_db_path() -> Path | None:
+    """Resolve the index DB to sample, without creating anything.
+
+    Mirrors how the backends pick their index — LocalBackend keeps its own at
+    ``state_dir()/local/index.db``, the Zenoh sidecar index lives at
+    ``state_dir()/index.db`` unless ``KIOKU_MESH_INDEX_DB`` overrides it — but
+    resolves the path only. ``state_dir(create=False)`` is what keeps a fresh
+    host fresh; returns None when there is no file-backed index to read.
+    """
+    from .core.config import get_backend_mode  # noqa: PLC0415
+    from .core.identity import state_dir  # noqa: PLC0415
+
+    try:
+        if get_backend_mode() == 'local':
+            return state_dir(create=False) / 'local' / 'index.db'
+        override = os.environ.get('KIOKU_MESH_INDEX_DB', '').strip()
+        if override:
+            return None if override == ':memory:' else Path(override)
+        return state_dir(create=False) / 'index.db'
+    except Exception as exc:  # noqa: BLE001
+        log.debug('identity check: could not resolve index path (%s)', type(exc).__name__)
+        return None
+
+
+def _read_recent_agent_families(limit: int) -> list[str] | None:
+    """Read ``agent_family`` off the most recent rows without writing anything.
+
+    Deliberately *not* routed through ``get_backend()``: constructing a
+    backend creates the state directory, migrates the raw store, applies the
+    index schema and may kick off a Zenoh rebuild or subscriber — all
+    side effects a diagnostic must not have (a fresh host would come away
+    with a raw.db and an index.db it did not have before doctor ran).
+
+    Opens the existing SQLite file through the read-only URI instead, so the
+    file is never created and the schema is never applied. Returns None
+    whenever the sample cannot be taken (no index yet, unreadable, or a
+    schema this build does not know) — an unavailable sample is not evidence
+    of a broken identity, so the caller skips that finding rather than
+    reporting it.
+    """
+    path = _readonly_index_db_path()
+    if path is None or not path.is_file():
+        return None
+    import sqlite3  # noqa: PLC0415
+
+    try:
+        conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=2.0)
+    except sqlite3.Error as exc:
+        log.debug('identity check: could not open %s read-only (%s)', path, type(exc).__name__)
+        return None
+    try:
+        rows = conn.execute(
+            'SELECT payload_json FROM obs_index '
+            'WHERE deleted_at IS NULL AND shadowed_at IS NULL '
+            'ORDER BY created_at DESC LIMIT ?',
+            (limit,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        log.debug('identity check: could not read %s (%s)', path, type(exc).__name__)
+        return None
+    finally:
+        conn.close()
+
+    families: list[str] = []
+    for (payload,) in rows:
+        try:
+            families.append(str(json.loads(payload or '{}').get('agent_family', '') or ''))
+        except Exception:  # noqa: BLE001
+            # A row whose payload won't parse is not attributable either.
+            families.append('')
+    return families
 
 
 def check_identity(
@@ -920,32 +1002,35 @@ def check_identity(
 ) -> CheckResult:
     """Detect identity settings that have silently stopped taking effect.
 
-    Two independent symptoms of the same failure mode, folded into one check:
+    Two symptoms of the same failure mode, folded into one check:
 
-    1. **Deprecated env prefix (WARN).** An MCP client config declares its
-       identity only through ``MESH_MEM_*`` keys, with no ``KIOKU_MESH_*``
-       counterpart alongside them. v1.0.0 removed the read of that prefix
-       (#266) and #275 reinstates it as a deprecated path, so the config is
-       either broken or on a deprecated path depending on the installed
-       revision — worth renaming either way, which is why this warns rather
-       than fails.
+    1. **Retired identity env vars (FAIL).** An MCP client config declares its
+       identity only through :data:`_LEGACY_IDENTITY_ENV_KEYS`, with no
+       ``KIOKU_MESH_*`` counterpart in the same mapping. Nothing reads that
+       prefix any more — v1.0.0 removed it (#266) and #275 kept it removed —
+       so those settings do not take effect at all. That is a broken config,
+       not a deprecated one, hence FAIL.
     2. **Unknown dominance (WARN).** ``agent_family`` is unset or ``unknown``
        on at least :data:`_UNKNOWN_DOMINANCE_RATIO` of the most recent
-       :data:`_IDENTITY_SCAN_LIMIT` observations — the observable consequence,
-       which also catches causes other than the deprecated prefix.
+       :data:`_IDENTITY_SCAN_LIMIT` observations. WARN rather than FAIL
+       because the ratio is a symptom with several possible causes, including
+       legitimately unattributed writes (CLI ``kioku-mesh save``, cron).
 
-    Both are WARN, so precedence decides only which one gets the headline:
-    the deprecated prefix wins, because it names the file and key to edit
-    while the ratio only reports the symptom. Both findings are always
-    reported in ``details`` regardless of which one sets the summary.
+    The retired-key finding takes the headline when both fire — it is the
+    more severe of the two and it names the file and key to edit, while the
+    ratio only reports the consequence. Both findings are always reported in
+    ``details`` regardless of which one sets the summary.
 
-    This check never writes: configs are read and parsed, never rewritten
+    This check never writes. Configs are read and parsed, never rewritten
     (renaming keys in a user's editor-managed config is the user's call, and
-    ``kioku-mesh mcp install`` already does it deliberately). Missing configs
-    are normal — a host with neither client installed passes.
+    ``kioku-mesh mcp install`` already does it deliberately), and the
+    observation sample is read straight off the existing index through a
+    read-only SQLite connection rather than through ``get_backend()``, which
+    would create the state directory and index a fresh host does not have yet.
+    Missing configs are normal — a host with neither client installed passes.
 
     ``config_paths`` and ``observations`` are injectable for tests; the
-    defaults read the real client configs and the active backend.
+    defaults read the real client configs and the on-disk index.
     """
     paths = _default_identity_config_paths() if config_paths is None else config_paths
 
@@ -965,26 +1050,24 @@ def check_identity(
         if keys:
             legacy_hits.append({'path': str(path), 'keys': keys})
 
-    # Unknown-dominance probe. Skipped (not failed) when the backend is
-    # unreachable — doctor runs on hosts whose zenohd is down, and that is
-    # what check_zenohd_reachable is for.
+    # Unknown-dominance probe. Skipped (not failed) when there is no readable
+    # index — a host that has never saved anything, or whose store is
+    # unreachable, is not evidence of a broken identity.
     unknown_ratio: float | None = None
     sampled = 0
-    if observations is None:
-        try:
-            from .memory.backend import get_backend  # noqa: PLC0415
-
-            observations = get_backend().search_observations(limit=_IDENTITY_SCAN_LIMIT)
-        except Exception as exc:  # noqa: BLE001
-            log.debug('identity check: could not read recent observations (%s)', type(exc).__name__)
-            observations = None
-    if observations is not None:
-        sampled = len(observations)
+    families = (
+        _read_recent_agent_families(_IDENTITY_SCAN_LIMIT)
+        if observations is None
+        else [str(getattr(o, 'agent_family', '') or '') for o in observations]
+    )
+    if families is not None:
+        sampled = len(families)
         if sampled:
-            unknown_ratio = _unknown_family_ratio(observations)
+            unknown_ratio = _unknown_family_ratio(families)
 
     details: dict[str, Any] = {
         'legacy_env_prefix': _LEGACY_ENV_PREFIX,
+        'legacy_identity_keys': list(_LEGACY_IDENTITY_ENV_KEYS),
         'legacy_hits': legacy_hits,
         'inspected_configs': inspected,
         'sampled_observations': sampled,
@@ -996,10 +1079,11 @@ def check_identity(
         where = ', '.join(f'{h["path"]} ({", ".join(h["keys"])})' for h in legacy_hits)
         return CheckResult(
             name='identity',
-            status=CheckStatus.WARN,
-            summary=f'MCP config declares identity only via deprecated {_LEGACY_ENV_PREFIX}* env vars: {where}',
+            status=CheckStatus.FAIL,
+            summary=f'MCP config declares identity only via retired {_LEGACY_ENV_PREFIX}* env vars: {where}',
             hint=(
-                f'Rename them to {" / ".join(_IDENTITY_ENV_KEYS)}, or re-register with '
+                f'These names are no longer read, so identity is unset. Rename them to '
+                f'{" / ".join(_IDENTITY_ENV_KEYS)}, or re-register with '
                 '`kioku-mesh mcp install`, then restart the MCP client.'
             ),
             details=details,
@@ -1036,6 +1120,27 @@ def check_identity(
 # -- Orchestration & rendering -------------------------------------------------
 
 
+# The checks doctor runs, in the order it runs them. Held as function *names*
+# rather than function objects for two reasons: a test can assert membership
+# and ordering without executing anything (running the real checks just to
+# read back their names would touch the developer's own ~/.config, TLS certs
+# and memory store), and callers that patch a check on this module still see
+# their replacement, since the lookup happens per call.
+_CHECK_ORDER: tuple[str, ...] = (
+    'check_zenohd_binary',
+    'check_config_file',
+    'check_zenohd_reachable',
+    'check_state_dir_hardlinks',
+    'check_embedded_router',
+    'check_tls_certs',
+    'check_fts5',
+    'check_shadow_visibility',
+    'check_conflicting_latest',
+    'check_legacy_namespace',
+    'check_identity',
+)
+
+
 def run_all_checks() -> list[CheckResult]:
     """Run every v0.3 doctor check in stable order.
 
@@ -1043,19 +1148,8 @@ def run_all_checks() -> list[CheckResult]:
     failures first). JSON consumers should look at the per-check ``name``
     rather than relying on index.
     """
-    return [
-        check_zenohd_binary(),
-        check_config_file(),
-        check_zenohd_reachable(),
-        check_state_dir_hardlinks(),
-        check_embedded_router(),
-        check_tls_certs(),
-        check_fts5(),
-        check_shadow_visibility(),
-        check_conflicting_latest(),
-        check_legacy_namespace(),
-        check_identity(),
-    ]
+    checks: list[Callable[[], CheckResult]] = [globals()[name] for name in _CHECK_ORDER]
+    return [check() for check in checks]
 
 
 def to_json(results: list[CheckResult]) -> str:

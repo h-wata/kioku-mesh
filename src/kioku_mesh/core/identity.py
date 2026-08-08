@@ -91,8 +91,14 @@ def _default_short_hostname() -> str:
     return h.split('.', 1)[0] or 'host'
 
 
-def state_dir() -> pathlib.Path:
+def state_dir(*, create: bool = True) -> pathlib.Path:
     r"""Return the writable state directory, creating it if absent.
+
+    Pass ``create=False`` to resolve the path without touching the
+    filesystem. Read-only callers need that: ``kioku-mesh doctor`` reports on
+    a host's state, and a diagnostic that materializes the directory it is
+    diagnosing turns "nothing is set up here" into "something is set up here"
+    just by looking.
 
     Resolution order:
         1. ``KIOKU_MESH_STATE_DIR`` env var when set to a **non-empty** value
@@ -132,7 +138,8 @@ def state_dir() -> pathlib.Path:
         import platformdirs
 
         d = pathlib.Path(platformdirs.user_data_dir(APP_DIR, appauthor=False))
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
