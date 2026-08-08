@@ -38,6 +38,16 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   何も無いホストを診断しただけで state ディレクトリや SQLite ファイルを
   作ってしまうのを防ぐため。既定は従来どおり `create=True`。
 
+- 観測の失効フローを追加した (#272)。使い捨ての観測に寿命を持たせられるよう
+  `save_observation` へ `expires_at` / `ttl_sec` を追加し、期限切れの観測は
+  `recall_context` / `search_memory` の既定結果から外れるようにした
+  (`get_memory` での id 指定参照は従来どおり可能)。あわせて掃除用の
+  `kioku-mesh gc-observations` を追加した。期限切れ TTL・保持期間を過ぎた
+  tombstone・同 shadow の 3 種を対象 id と理由付きで一覧表示する **dry-run が既定**で、
+  実際の tombstone 化 / 物理削除には `--execute` (と確認) が必要。
+  local index には `expires_at` 列を追加した (既存 DB は起動時に自動 migration、
+  寿命を持たない既存行は無期限のまま)。
+
 - 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
   全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
   現在のホストのものと誤認して引き継いでしまう問題があった。
@@ -53,6 +63,23 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ### Fixed
 
+- 観測の失効フロー (#272) の Codex cross-review (PR #273) で指摘された
+  blocking 3 件を修正した。(1) `gc-observations --execute` が確認画面に
+  表示していない tombstone まで物理削除していた問題を修正した。候補一覧は
+  local index 由来なのに対し実行側は表示済み id を使わず
+  `gc_tombstones` / `gc_shadows` の global sweep を再実行しており、index に
+  行を持たない orphan tombstone (raw store 側にのみ残る) まで巻き込むため、
+  1 件の確認に対して 2 件削除されうる状態だった。gc API に `only_ids`
+  境界を追加し、実行側は確認済み候補 id のスナップショットだけを処理する
+  ようにした (orphan の掃除は従来どおり `kioku-mesh gc` の責務)。
+  (2) shadow 済みかつ期限切れの行が TTL bucket と shadow bucket の両方に
+  入り、TTL 側が先に tombstone 化することで `gc_expired_shadows` による
+  再確認・revive の機会を奪っていた問題を修正した (TTL 候補 SQL に
+  `shadowed_at IS NULL` を追加し bucket を排他化)。(3) 期限切れの観測が
+  supersede 元の観測を隠し続け、既定検索から両方消えていた問題を修正した。
+  supersede の存在判定が superseder の `deleted_at` / `shadowed_at` しか
+  見ておらず `expires_at` を見ていなかったため、期限切れ superseder は
+  それ自身が結果から外れつつ旧観測も隠したままになっていた。
 - `search_memory` / `recall_context` が同一 `observation_id` を複数回返す
   ことがあったバグを修正した。根本原因は `LocalIndex.upsert()` が
   `obs_fts` (FTS5) へ `INSERT OR REPLACE` していたが、FTS5 の仮想テーブルは

@@ -45,7 +45,7 @@ from ..core.models import Tombstone
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ADR-0021: FTS5 capability levels (detected once per connection).
 _FTS_CAP_TRIGRAM = 'trigram'  # FTS5 with trigram tokenizer (supports Japanese substring match)
@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS obs_index (
   summary TEXT,
   payload_json TEXT,
   deleted_at TEXT,
-  shadowed_at TEXT
+  shadowed_at TEXT,
+  expires_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_project_created ON obs_index(project, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_created ON obs_index(created_at DESC);
@@ -101,8 +102,8 @@ CREATE INDEX IF NOT EXISTS idx_created ON obs_index(created_at DESC);
 
 _UPSERT_SQL = (
     'INSERT INTO obs_index '
-    '(observation_id, project, created_at, memory_type, importance, subject, summary, payload_json) '
-    'VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+    '(observation_id, project, created_at, memory_type, importance, subject, summary, payload_json, expires_at) '
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) '
     'ON CONFLICT(observation_id) DO UPDATE SET '
     'project=excluded.project, '
     'created_at=excluded.created_at, '
@@ -111,8 +112,17 @@ _UPSERT_SQL = (
     'subject=excluded.subject, '
     'summary=excluded.summary, '
     'payload_json=excluded.payload_json, '
+    'expires_at=excluded.expires_at, '
     'shadowed_at=NULL'
 )
+
+# Issue #272: rows without a lifetime store NULL, so "not expired" is
+# ``expires_at IS NULL OR expires_at > :now``. Kept as one constant because the
+# search filter and the gc candidate query must never drift apart — if one
+# treats a boundary as expired and the other does not, gc would tombstone rows
+# that recall still shows. Boundary is inclusive (``expires_at <= now`` is
+# expired), matching messaging's ``now >= expires_at`` in ``is_expired``.
+_NOT_EXPIRED_SQL = "(expires_at IS NULL OR expires_at = '' OR expires_at > ?)"
 
 _MARK_DELETED_SQL = 'UPDATE obs_index SET deleted_at = ?, shadowed_at = NULL WHERE observation_id = ?'
 _MARK_SHADOWED_SQL = (
@@ -151,12 +161,21 @@ def _disabled_via_env() -> bool:
     return os.environ.get('KIOKU_MESH_DISABLE_INDEX', '').strip() == '1'
 
 
-def _shadow_now_iso() -> str:
-    """Return the local timestamp used to mark rebuild-shadowed rows."""
+def _now_iso() -> str:
+    """Return the current UTC instant in the compact 'Z'-suffixed ISO form.
+
+    Same shape as ``Observation.created_at`` / ``expires_at`` so every
+    comparison in this module stays a plain lexical string compare.
+    """
     from datetime import datetime
     from datetime import timezone
 
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+def _shadow_now_iso() -> str:
+    """Return the local timestamp used to mark rebuild-shadowed rows."""
+    return _now_iso()
 
 
 def _detect_fts_cap(conn: sqlite3.Connection) -> str:
@@ -252,6 +271,17 @@ def _ensure_schema(conn: sqlite3.Connection) -> str:
                     )
             except Exception:  # noqa: BLE001
                 pass
+    # Issue #272: expires_at mirrors payload_json.expires_at into a real column
+    # so the search filter and the gc candidate query are index-friendly SQL
+    # rather than a json_extract per row. Backfilled for databases written
+    # before the column existed; pre-#272 payloads simply have no key and stay
+    # NULL (= never expires), so the migration is a no-op for them.
+    if 'expires_at' not in cols:
+        conn.execute('ALTER TABLE obs_index ADD COLUMN expires_at TEXT')
+        conn.execute(
+            "UPDATE obs_index SET expires_at = json_extract(payload_json, '$.expires_at') "
+            "WHERE json_extract(payload_json, '$.expires_at') IS NOT NULL"
+        )
     # ADR-0021: FTS5 virtual table for full-text search (content/subject/summary/tags/project).
     fts_cap = _detect_fts_cap(conn)
     if fts_cap != _FTS_CAP_LIKE:
@@ -398,6 +428,9 @@ class LocalIndex:
             obs.subject,
             obs.summary,
             obs.to_json(),
+            # '' means "never expires"; store NULL so the column is sparse and
+            # the IS NULL branch of _NOT_EXPIRED_SQL covers legacy rows too.
+            obs.expires_at or None,
         )
         with self._lock:
             try:
@@ -514,6 +547,8 @@ class LocalIndex:
         memory_types: list[str] | None = None,
         source_files: list[str] | None = None,
         references: list[str] | None = None,
+        include_expired: bool = False,
+        now_iso: str = '',
     ) -> list[Observation]:
         """SQL-side search returning Observations ordered by created_at DESC.
 
@@ -538,6 +573,11 @@ class LocalIndex:
         ``include_superseded=False`` (default) hides rows whose superseder is
         still live in the index (existence-based, ADR-0021). Set to ``True``
         to include superseded rows.
+
+        ``include_expired=False`` (default) hides rows whose ``expires_at``
+        has passed (Issue #272). Rows without a lifetime are never affected.
+        ``now_iso`` overrides the comparison instant (tests / deterministic
+        sweeps); empty means "now".
 
         ``since_iso`` / ``until_iso`` are compared lexicographically against
         ``created_at``; both are produced as 'Z'-suffixed UTC ISO 8601
@@ -578,6 +618,8 @@ class LocalIndex:
                 memory_types=memory_types,
                 source_files=source_files,
                 references=references,
+                include_expired=include_expired,
+                now_iso=now_iso,
             )
             if len(strict) >= limit:
                 return strict[:limit]
@@ -600,6 +642,8 @@ class LocalIndex:
                 memory_types=memory_types,
                 source_files=source_files,
                 references=references,
+                include_expired=include_expired,
+                now_iso=now_iso,
             )
             seen = {obs.observation_id for obs in strict}
             return [*strict, *(obs for obs in broad if obs.observation_id not in seen)][:limit]
@@ -609,13 +653,32 @@ class LocalIndex:
         if not include_deleted:
             where.append('deleted_at IS NULL')
             where.append('shadowed_at IS NULL')
+        # Issue #272: a disposable observation whose lifetime elapsed is stale
+        # in exactly the same way a tombstoned one is, so it drops out of the
+        # default result set even before gc physically tombstones it.
+        resolved_now = now_iso or _now_iso()
+        if not include_expired:
+            where.append(_NOT_EXPIRED_SQL)
+            params.append(resolved_now)
         # ADR-0021: existence-based supersedes filter. Superseder must be live
         # (not deleted AND not shadowed) to keep the superseded row hidden.
+        # "Live" has to mean the same thing on both sides of the filter: a
+        # lapsed superseder is already excluded from this result set, so
+        # letting it keep its predecessor hidden would drop both rows and
+        # return nothing for content the writer never marked disposable
+        # (PR #273 review B3). The clause is conditioned on
+        # ``include_expired`` so that an explicitly expiry-inclusive query
+        # still sees the superseder and keeps hiding what it replaced.
         if not include_superseded:
+            superseder_live = 'deleted_at IS NULL AND shadowed_at IS NULL'
+            if not include_expired:
+                superseder_live += f' AND {_NOT_EXPIRED_SQL}'
             where.append(
                 '(superseded_by IS NULL OR superseded_by NOT IN '
-                '(SELECT observation_id FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL))'
+                f'(SELECT observation_id FROM obs_index WHERE {superseder_live}))'
             )
+            if not include_expired:
+                params.append(resolved_now)
         if project:
             where.append('project = ?')
             params.append(project)
@@ -956,6 +1019,52 @@ class LocalIndex:
                 return []
         return [row[0] for row in rows]
 
+    def list_expired_ttl_obs(
+        self,
+        now_iso: str = '',
+        project: str = '',
+        limit: int = 0,
+    ) -> list[tuple[str, str, str, str]]:
+        """Return ``(observation_id, project, expires_at, summary)`` for lapsed live rows.
+
+        Issue #272: the discovery half of the disposable-record lifecycle.
+        Only rows that are still live (neither tombstoned nor shadowed) and
+        carry a non-empty ``expires_at`` at or before ``now_iso`` are returned
+        — an already tombstoned row is the tombstone sweep's business, not
+        this one, and a shadowed row may still be revived by
+        ``gc_expired_shadows``, so tombstoning it from here would settle that
+        question destructively before the re-verification that owns it runs
+        (PR #273 review B2). The buckets are therefore disjoint by
+        construction.
+
+        The boundary matches :data:`_NOT_EXPIRED_SQL` exactly (``<=`` here is
+        the complement of its ``>``), so every row this returns is already
+        invisible to :meth:`search`. ``limit`` of 0 means unbounded — the gc
+        caller wants the complete candidate set, not a page.
+        """
+        if self._disabled or self._conn is None:
+            return []
+        sql = (
+            'SELECT observation_id, project, expires_at, summary FROM obs_index '
+            'WHERE deleted_at IS NULL AND shadowed_at IS NULL '
+            "AND expires_at IS NOT NULL AND expires_at != '' AND expires_at <= ?"
+        )
+        params: list[object] = [now_iso or _now_iso()]
+        if project:
+            sql += ' AND project = ?'
+            params.append(project)
+        sql += ' ORDER BY expires_at ASC'
+        if limit > 0:
+            sql += ' LIMIT ?'
+            params.append(limit)
+        with self._lock:
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.list_expired_ttl_obs failed: %s', e)
+                return []
+        return [(row[0], row[1] or '', row[2] or '', row[3] or '') for row in rows]
+
     def list_shadowed_obs(
         self,
         project: str = '',
@@ -1002,18 +1111,23 @@ class LocalIndex:
         - ``"tombstoned"``: ``deleted_at IS NOT NULL``.
         - ``"shadowed"``: ``shadowed_at IS NOT NULL`` (and not tombstoned).
         - ``"superseded"``: ``superseded_by IS NOT NULL`` (and row is otherwise live).
+        - ``"expired"``: ``expires_at`` has passed (Issue #272, row otherwise live).
         - ``"physical-missing"``: no row found in obs_index → returns ``None``.
+
+        ``expired`` ranks below ``superseded`` because a superseder names the
+        replacement, which is the more actionable fact for the reader.
 
         Returns:
             dict with keys ``id``, ``payload``, ``state``, ``deleted_at``,
-            ``shadowed_at``, ``superseded_by``, ``created_at``, ``updated_at``.
+            ``shadowed_at``, ``superseded_by``, ``expires_at``, ``created_at``,
+            ``updated_at``.
             ``updated_at`` is always ``None`` (column not present in current schema).
             Returns ``None`` when the row does not exist (physical-missing).
         """
         if self._disabled or self._conn is None:
             return None
         sql = (
-            'SELECT observation_id, payload_json, created_at, deleted_at, shadowed_at, superseded_by '
+            'SELECT observation_id, payload_json, created_at, deleted_at, shadowed_at, superseded_by, expires_at '
             'FROM obs_index WHERE observation_id = ?'
         )
         with self._lock:
@@ -1024,13 +1138,15 @@ class LocalIndex:
                 return None
         if row is None:
             return None
-        obs_id, payload_json, created_at, deleted_at, shadowed_at, superseded_by = row
+        obs_id, payload_json, created_at, deleted_at, shadowed_at, superseded_by, expires_at = row
         if deleted_at is not None:
             state = 'tombstoned'
         elif shadowed_at is not None:
             state = 'shadowed'
         elif superseded_by is not None:
             state = 'superseded'
+        elif expires_at and expires_at <= _now_iso():
+            state = 'expired'
         else:
             state = 'live'
         return {
@@ -1040,6 +1156,7 @@ class LocalIndex:
             'deleted_at': deleted_at,
             'shadowed_at': shadowed_at,
             'superseded_by': superseded_by,
+            'expires_at': expires_at,
             'created_at': created_at,
             'updated_at': None,
         }
@@ -1269,6 +1386,7 @@ class LocalIndex:
                                 obs.subject,
                                 obs.summary,
                                 payload_json,
+                                obs.expires_at or None,
                             )
                         )
                         added += 1
@@ -1285,6 +1403,7 @@ class LocalIndex:
                                 obs.subject,
                                 obs.summary,
                                 payload_json,
+                                obs.expires_at or None,
                             )
                         )
                     else:

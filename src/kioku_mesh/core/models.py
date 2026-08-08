@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from dataclasses import fields
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 import json
 import logging
@@ -85,6 +86,13 @@ class Observation:
     # it explicitly.
     visibility: str = ''
     scope_id: str = ''
+    # Issue #272: optional lifetime for disposable observations (verification
+    # pings, scratch notes). Empty = never expires, which stays the default so
+    # every pre-#272 payload keeps its current semantics. Always stored as a
+    # resolved 'Z'-suffixed UTC ISO timestamp so readers only ever do a lexical
+    # comparison — the ``ttl_sec`` convenience form is normalized away at the
+    # write entry point (see :func:`resolve_expires_at`).
+    expires_at: str = ''
 
     def __post_init__(self) -> None:
         if self.importance < 1:
@@ -164,6 +172,53 @@ class Observation:
             )
             parsed['visibility'] = ''
         return _from_dict_compat(cls, parsed)
+
+
+def resolve_expires_at(expires_at: str = '', ttl_sec: int = 0, created_at: str = '') -> str:
+    """Normalize a lifetime spec into a single 'Z'-suffixed UTC ISO timestamp.
+
+    Precedence mirrors the messaging layer's :func:`kioku_mesh.messaging.models.is_expired`
+    contract (Issue #215): ``expires_at`` > ``ttl_sec + created_at`` > never
+    expires. The two layers deliberately share only this rule, not code —
+    messaging must not import memory (ADR-0023), and the memory side resolves
+    at write time so the read path is one lexical SQL comparison instead of a
+    per-row Python evaluation.
+
+    Args:
+        expires_at: explicit ISO 8601 instant. Parsed for validation and
+            re-emitted in the canonical compact form; a naive value is read
+            as UTC.
+        ttl_sec: seconds from ``created_at``; used only when ``expires_at``
+            is empty. Non-positive values mean "no TTL".
+        created_at: base timestamp for ``ttl_sec`` (defaults to now).
+
+    Returns:
+        The resolved timestamp, or ``''`` for "never expires".
+
+    Raises:
+        ValueError: ``expires_at`` is not parseable ISO 8601.
+    """
+    if expires_at:
+        try:
+            dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+        except ValueError as e:
+            raise ValueError(f'expires_at must be ISO 8601; got {expires_at!r}') from e
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    if ttl_sec and ttl_sec > 0:
+        base = None
+        if created_at:
+            try:
+                base = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+            except ValueError:
+                base = None
+        if base is None:
+            base = datetime.now(timezone.utc)
+        if base.tzinfo is None:
+            base = base.replace(tzinfo=timezone.utc)
+        return (base.astimezone(timezone.utc) + timedelta(seconds=ttl_sec)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    return ''
 
 
 @dataclass

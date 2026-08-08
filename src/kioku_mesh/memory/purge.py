@@ -381,7 +381,121 @@ def bulk_purge_by_pc_id(
     )
 
 
-def _gc_via_sqlite_index(idx: LocalIndex, cutoff_iso: str, project: str) -> int:
+@dataclass(frozen=True)
+class GcCandidate:
+    """One row the stale-observation sweep would act on (Issue #272).
+
+    ``action`` is what ``--execute`` would do, not what already happened:
+    ``tombstone`` for a live-but-lapsed TTL row (soft delete, still
+    recoverable until the retention sweep catches it), ``physical-delete``
+    for rows that already sat in a hidden state past the retention window.
+    """
+
+    observation_id: str
+    reason: str
+    action: str
+    project: str = ''
+    detail: str = ''
+
+
+@dataclass
+class GcCandidates:
+    """Grouped output of :func:`collect_gc_candidates`."""
+
+    expired_ttl: list[GcCandidate] = field(default_factory=list)
+    expired_tombstones: list[GcCandidate] = field(default_factory=list)
+    expired_shadows: list[GcCandidate] = field(default_factory=list)
+
+    def all(self) -> list[GcCandidate]:
+        """Return every candidate, TTL first (the only bucket that soft-deletes)."""
+        return [*self.expired_ttl, *self.expired_tombstones, *self.expired_shadows]
+
+    def total(self) -> int:
+        """Return the candidate count across all three buckets."""
+        return len(self.expired_ttl) + len(self.expired_tombstones) + len(self.expired_shadows)
+
+
+def collect_gc_candidates(
+    idx: LocalIndex,
+    *,
+    retention_days: int = 30,
+    project: str = '',
+    now: datetime | None = None,
+) -> GcCandidates:
+    """Enumerate what a stale-observation sweep would touch, without touching it.
+
+    Read-only by construction — it only calls the three listing methods on
+    ``LocalIndex`` and never a delete path, so the dry-run CLI cannot destroy
+    anything even if a later refactor forgets the ``--execute`` gate.
+
+    Reuses the existing retention listings rather than re-deriving them:
+    :meth:`~.local_index.LocalIndex.list_tombstoned_obs_in_project` (#32) and
+    :meth:`~.local_index.LocalIndex.list_expired_shadowed_obs` (#70). The
+    tombstone listing is project-scoped by design, so an empty ``project``
+    fans out over :meth:`~.local_index.LocalIndex.distinct_projects` — that
+    covers every project present in the index but, unlike the global
+    ``mem/tomb/**`` scan, not orphan tombstones whose observation is absent
+    locally. Those are left to ``kioku-mesh gc``.
+
+    ``retention_days`` applies to the tombstone / shadow buckets only. TTL
+    expiry is an absolute instant chosen by the writer, so a lapsed row is a
+    candidate immediately — deferring it by a retention window would just
+    reintroduce the residue this sweep exists to remove.
+    """
+    if retention_days < 0:
+        raise ValueError(f'retention_days must be >= 0, got {retention_days}')
+    if now is None:
+        now = datetime.now(timezone.utc)
+    now_iso = now.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    cutoff_iso = (now - timedelta(days=retention_days)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    out = GcCandidates()
+    if idx.disabled:
+        return out
+
+    for obs_id, proj, expires_at, summary in idx.list_expired_ttl_obs(now_iso=now_iso, project=project):
+        out.expired_ttl.append(
+            GcCandidate(
+                observation_id=obs_id,
+                reason='expired-ttl',
+                action='tombstone',
+                project=proj,
+                detail=f'expires_at={expires_at} summary={summary[:60]}',
+            )
+        )
+
+    projects = [project] if project else idx.distinct_projects()
+    for proj in projects:
+        for obs_id, _payload_json in idx.list_tombstoned_obs_in_project(proj, cutoff_iso):
+            out.expired_tombstones.append(
+                GcCandidate(
+                    observation_id=obs_id,
+                    reason='expired-tombstone',
+                    action='physical-delete',
+                    project=proj,
+                    detail=f'tombstoned before {cutoff_iso}',
+                )
+            )
+
+    for obs_id in idx.list_expired_shadowed_obs(cutoff_iso, project=project):
+        out.expired_shadows.append(
+            GcCandidate(
+                observation_id=obs_id,
+                reason='expired-shadow',
+                action='physical-delete',
+                project=project,
+                detail=f'shadowed before {cutoff_iso}',
+            )
+        )
+    return out
+
+
+def _gc_via_sqlite_index(
+    idx: LocalIndex,
+    cutoff_iso: str,
+    project: str,
+    only_ids: set[str] | None = None,
+) -> int:
     """Project-scoped gc that drives deletes from the local SQLite index.
 
     Bypasses the global ``mem/tomb/**`` scan and the per-id Zenoh fallback
@@ -390,9 +504,14 @@ def _gc_via_sqlite_index(idx: LocalIndex, cutoff_iso: str, project: str) -> int:
     the project-scoped subset (#32). Orphan tombstones (no obs row) are
     silently skipped — same semantic as the legacy path's
     ``log.warning('skip orphan tomb ... under project filter')`` branch.
+
+    ``only_ids`` bounds the sweep to a pre-approved id set; see
+    :func:`gc_expired_tombstones`.
     """
     purged = 0
     for obs_id, payload_json in idx.list_tombstoned_obs_in_project(project, cutoff_iso):
+        if only_ids is not None and obs_id not in only_ids:
+            continue
         try:
             obs = Observation.from_json(payload_json)
         except Exception as e:  # noqa: BLE001
@@ -415,6 +534,7 @@ def gc_expired_tombstones(
     retention_days: int = 30,
     now: datetime | None = None,
     project: str = '',
+    only_ids: set[str] | None = None,
 ) -> int:
     """Physically purge tombstones older than ``retention_days`` along with their observations.
 
@@ -423,6 +543,13 @@ def gc_expired_tombstones(
     (observation absent) are skipped conservatively when a project filter is
     active because the project cannot be determined. When ``project`` is empty
     (default) all expired tombstones are swept regardless of project.
+
+    ``only_ids`` bounds the sweep to a caller-supplied id set — the
+    snapshot a confirmation prompt already showed the user. ``None``
+    (default) keeps the unbounded behaviour ``kioku-mesh gc`` relies on;
+    an empty set deletes nothing. ``gc-observations`` passes its reviewed
+    candidates so the retention window cannot widen the blast radius
+    between preview and execute (PR #273 review B1).
 
     ``--force-id`` callers use :func:`physical_delete_observation` directly
     and are not affected by this filter.
@@ -459,7 +586,7 @@ def gc_expired_tombstones(
         if not idx.disabled:
             try:
                 idx.rebuild_from_zenoh(store.get_session())
-                return _gc_via_sqlite_index(idx, cutoff_iso, project)
+                return _gc_via_sqlite_index(idx, cutoff_iso, project, only_ids)
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     'gc project-scoped fast path failed (%s); falling through to global Zenoh scan',
@@ -468,6 +595,8 @@ def gc_expired_tombstones(
 
     purged = 0
     for tomb_key, tomb in _list_tombstones():
+        if only_ids is not None and tomb.observation_id not in only_ids:
+            continue
         deleted_dt = store._parse_iso(tomb.deleted_at)  # noqa: SLF001 — store collaborator, see _store()
         if deleted_dt is None:
             log.warning('skip tomb with unparseable deleted_at: %s', tomb_key)
@@ -516,6 +645,7 @@ def gc_expired_shadows(
     retention_days: int = 30,
     now: datetime | None = None,
     project: str = '',
+    only_ids: set[str] | None = None,
 ) -> tuple[int, int]:
     """Sweep shadow rows older than the cutoff, re-verifying each against Zenoh.
 
@@ -545,7 +675,10 @@ def gc_expired_shadows(
     If the live Zenoh query fails the sweep is skipped entirely
     (returns ``(0, 0)``) — never delete on transport ambiguity.
 
-    ``project`` mirrors the tombstone sweep filter.
+    ``project`` mirrors the tombstone sweep filter. ``only_ids`` bounds the
+    sweep to a caller-supplied id set the same way
+    :func:`gc_expired_tombstones` does, so ``gc-observations`` acts on the
+    snapshot it previewed rather than re-deriving one (PR #273 review B1).
 
     Returns ``(purged, revived)``.
     """
@@ -561,6 +694,8 @@ def gc_expired_shadows(
     if idx.disabled:
         return (0, 0)
     candidate_ids = idx.list_expired_shadowed_obs(cutoff_iso, project=project)
+    if only_ids is not None:
+        candidate_ids = [obs_id for obs_id in candidate_ids if obs_id in only_ids]
     if not candidate_ids:
         return (0, 0)
     candidate_set = set(candidate_ids)

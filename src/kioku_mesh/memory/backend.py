@@ -71,9 +71,19 @@ class MemoryBackend(Protocol):
 
     def drain_pending(self, limit: int | None = None, *, wait: bool = True) -> int: ...
 
-    def gc_tombstones(self, retention_days: int = 30, project: str = '') -> int: ...
+    def gc_tombstones(
+        self,
+        retention_days: int = 30,
+        project: str = '',
+        only_ids: set[str] | None = None,
+    ) -> int: ...
 
-    def gc_shadows(self, retention_days: int = 30, project: str = '') -> tuple[int, int]: ...
+    def gc_shadows(
+        self,
+        retention_days: int = 30,
+        project: str = '',
+        only_ids: set[str] | None = None,
+    ) -> tuple[int, int]: ...
 
     def close(self) -> None: ...
 
@@ -169,7 +179,12 @@ class LocalBackend:
     def drain_pending(self, limit: int | None = None, *, wait: bool = True) -> int:
         return 0
 
-    def gc_tombstones(self, retention_days: int = 30, project: str = '') -> int:
+    def gc_tombstones(
+        self,
+        retention_days: int = 30,
+        project: str = '',
+        only_ids: set[str] | None = None,
+    ) -> int:
         if retention_days < 0:
             raise ValueError(f'retention_days must be >= 0, got {retention_days}')
         now = datetime.now(timezone.utc)
@@ -184,17 +199,23 @@ class LocalBackend:
                     candidate_ids.add(obs_id)
             for obs_id, _ in self._idx.list_tombstoned_obs_in_project(project, cutoff_iso):
                 candidate_ids.add(obs_id)
+            if only_ids is not None:
+                candidate_ids &= only_ids
             for obs_id in candidate_ids:
                 self._raw_store.delete_obs(obs_id)
                 self._raw_store.delete_tomb(obs_id)
                 self._idx.physical_delete(obs_id)
                 purged += 1
         else:
-            purged = self._gc_global_tombs(cutoff_iso)
+            purged = self._gc_global_tombs(cutoff_iso, only_ids)
         return purged
 
-    def _gc_global_tombs(self, cutoff_iso: str) -> int:
-        """Physical-delete tombstoned rows older than cutoff_iso across all projects."""
+    def _gc_global_tombs(self, cutoff_iso: str, only_ids: set[str] | None = None) -> int:
+        """Physical-delete tombstoned rows older than cutoff_iso across all projects.
+
+        ``only_ids`` narrows the union to a pre-approved snapshot; see
+        :meth:`gc_tombstones`.
+        """
         import sqlite3
 
         # Collect from raw.db (authoritative) and index (best-effort); union.
@@ -212,6 +233,8 @@ class LocalBackend:
                         candidate_ids.add(obs_id)
                 except sqlite3.Error as e:
                     log.warning('LocalBackend._gc_global_tombs query failed: %s', e)
+        if only_ids is not None:
+            candidate_ids &= only_ids
         purged = 0
         for obs_id in candidate_ids:
             self._raw_store.delete_obs(obs_id)
@@ -220,7 +243,12 @@ class LocalBackend:
             purged += 1
         return purged
 
-    def gc_shadows(self, retention_days: int = 30, project: str = '') -> tuple[int, int]:
+    def gc_shadows(
+        self,
+        retention_days: int = 30,
+        project: str = '',
+        only_ids: set[str] | None = None,
+    ) -> tuple[int, int]:
         if self._idx.disabled:
             return (0, 0)
         if retention_days < 0:
@@ -229,6 +257,8 @@ class LocalBackend:
         cutoff = now - timedelta(days=retention_days)
         cutoff_iso = cutoff.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
         candidate_ids = self._idx.list_expired_shadowed_obs(cutoff_iso, project=project)
+        if only_ids is not None:
+            candidate_ids = [obs_id for obs_id in candidate_ids if obs_id in only_ids]
         purged = 0
         for obs_id in candidate_ids:
             self._raw_store.delete_obs(obs_id)
@@ -328,15 +358,33 @@ class ZenohBackend:
 
         return store.drain_pending_puts(limit=limit, wait=wait)
 
-    def gc_tombstones(self, retention_days: int = 30, project: str = '') -> int:
+    def gc_tombstones(
+        self,
+        retention_days: int = 30,
+        project: str = '',
+        only_ids: set[str] | None = None,
+    ) -> int:
         from . import store
 
-        return store.gc_expired_tombstones(retention_days=retention_days, project=project)
+        return store.gc_expired_tombstones(
+            retention_days=retention_days,
+            project=project,
+            only_ids=only_ids,
+        )
 
-    def gc_shadows(self, retention_days: int = 30, project: str = '') -> tuple[int, int]:
+    def gc_shadows(
+        self,
+        retention_days: int = 30,
+        project: str = '',
+        only_ids: set[str] | None = None,
+    ) -> tuple[int, int]:
         from . import store
 
-        return store.gc_expired_shadows(retention_days=retention_days, project=project)
+        return store.gc_expired_shadows(
+            retention_days=retention_days,
+            project=project,
+            only_ids=only_ids,
+        )
 
     def close(self) -> None:
         from .store import _reset_session  # noqa: PLC2701
