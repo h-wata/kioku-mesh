@@ -8,9 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 kioku-mesh is in `0.x`: APIs and on-disk storage schema may change between minor
 versions without a migration path until `1.0.0`. From `1.0.0` onward, the public
 CLI / MCP / Python API and on-disk schema follow Semantic Versioning: breaking
-changes require a semver-major bump or an explicit migration path (ADR-0029).
+changes require a semver-major bump or an explicit migration path (ADR-0029),
+except while the repository has a single operator, per the conditions in
+ADR-0030.
 
 ## [Unreleased]
+
+### Changed
+
+- Superseded ADR-0029's semver clause with ADR-0030, which documents a
+  single-operator exception allowing breaking changes to ship as minor
+  releases (CHANGELOG-first disclosure + upgrade notes + release note
+  placement required), and its failure condition once a third-party user
+  exists.
 
 ## [1.1.0] - 2026-08-08
 
