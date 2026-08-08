@@ -102,7 +102,7 @@ Useful environment variables (the `MESH_MEM_` prefix was renamed to
 
 | Variable | Purpose |
 |---|---|
-| `KIOKU_MESH_AGENT_FAMILY` | Agent family, such as `claude` or `codex`. Falls back to the deprecated `MESH_MEM_AGENT_FAMILY` (with a warning), then to launcher detection |
+| `KIOKU_MESH_AGENT_FAMILY` | Agent family, such as `claude` or `codex`. Falls back to launcher detection (`CLAUDECODE` and friends), then to `unknown` with a warning |
 | `KIOKU_MESH_CLIENT_ID` | Client name, such as `claude-code` |
 | `KIOKU_MESH_SESSION_ID` | Optional stable session id |
 | `KIOKU_MESH_STATE_DIR` | State directory; defaults under the user data dir |

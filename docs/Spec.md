@@ -35,8 +35,8 @@ Observation は保存されるメモリ本体で、原則 immutable です。内
 | フィールド | 型 | 既定値 / 仕様 |
 | --- | --- | --- |
 | `content` | `str` | 本文。必須。 |
-| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY` → 旧 `MESH_MEM_AGENT_FAMILY` (非推奨警告) → ランチャ検出 → `unknown`。 |
-| `client_id` | `str` | `KIOKU_MESH_CLIENT_ID` → 旧 `MESH_MEM_CLIENT_ID` (非推奨警告) → `<user>@<host>`。 |
+| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY` → ランチャ検出 → `unknown` (警告)。 |
+| `client_id` | `str` | `KIOKU_MESH_CLIENT_ID` → `<user>@<host>`。 |
 | `pc_id` | `str` | ホスト単位の永続 UUID。 |
 | `session_id` | `str` | プロセス単位 ID。 |
 | `project` | `str` | 任意のプロジェクト名。 |
@@ -93,8 +93,8 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 | 識別子 | 解決方法 |
 | --- | --- |
-| `agent_family` | `KIOKU_MESH_AGENT_FAMILY` → 旧 `MESH_MEM_AGENT_FAMILY` (非推奨警告つき) → ランチャ検出 (`CLAUDECODE` 等) → `unknown` (警告)。 |
-| `client_id` | `KIOKU_MESH_CLIENT_ID` → 旧 `MESH_MEM_CLIENT_ID` (非推奨警告つき) → `<user>@<host>`。 |
+| `agent_family` | `KIOKU_MESH_AGENT_FAMILY` → ランチャ検出 (`CLAUDECODE` 等) → `unknown` (警告)。v1.0.0 で削除した旧 `MESH_MEM_*` は読まない (ADR-0029)。 |
+| `client_id` | `KIOKU_MESH_CLIENT_ID` → `<user>@<host>`。 |
 | `pc_id` | `KIOKU_MESH_STATE_DIR/pc_id` に永続化。なければ UUID4 を生成。 |
 | `session_id` | `KIOKU_MESH_SESSION_ID`。未設定時は `{YYYYMMDDTHHMMSSZ}-{uuid8}` を生成し、プロセス内でキャッシュ。 |
 
