@@ -14,6 +14,15 @@ ADR-0030.
 
 ## [Unreleased]
 
+### Fixed
+
+- `backfill-metadata`: summary derivation no longer ends a sentence at a period
+  inside an identifier (version numbers, filenames, IP addresses, dotted
+  identifiers, decimals). An ASCII `.` / `!` / `?` now ends a sentence only when
+  a space or the end of the text follows it, and a period closing a one-letter
+  token (`e.g.`) is treated as an abbreviation marker. A dry-run over the live
+  store went from 58/283 (20.5%) truncated summaries to 0.
+
 ### Changed
 
 - Superseded ADR-0029's semver clause with ADR-0030, which documents a

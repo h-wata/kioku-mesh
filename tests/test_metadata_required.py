@@ -66,6 +66,51 @@ def test_derive_summary_of_empty_content_is_empty() -> None:
     assert derive_summary('   \n  ') == ''
 
 
+@pytest.mark.parametrize(
+    ('content', 'token'),
+    [
+        # The four shapes measured in production: a backfill dry-run over 269
+        # derivable entries cut 21.6% of them inside a dotted token like these.
+        ('v0.8.0 リリース後の migration plan を承認した。次の文は含まない。', 'v0.8.0'),
+        ('watch.sh が停止していると report が Dispatcher に届かない。次の文は含まない。', 'watch.sh'),
+        ('handyscanner(192.168.3.44) の Pico ボタン検証が完了した。次の文は含まない。', '192.168.3.44'),
+        ('cube-webapp frontend useMultiMap.ts の runFloorId が自己参照する。次の文は含まない。', 'useMultiMap.ts'),
+        # Same defect, other everyday shapes.
+        ('kioku_mesh.memory.metadata の derive_summary を直した。次の文は含まない。', 'kioku_mesh.memory.metadata'),
+        ('store.state.mapInfo.floorId を obj.method() 経由で読む。次の文は含まない。', 'obj.method()'),
+        ('recall の閾値は 0.7、レイテンシは 15.6 ms だった。次の文は含まない。', '15.6 ms'),
+    ],
+)
+def test_derive_summary_does_not_split_inside_dotted_tokens(content: str, token: str) -> None:
+    """A period glued to a following non-space character is part of a token, not a sentence end."""
+    summary = derive_summary(content)
+    assert token in summary
+    assert '次の文' not in summary
+
+
+def test_derive_summary_still_splits_english_sentences() -> None:
+    assert derive_summary('This is a sentence. Next one.') == 'This is a sentence.'
+
+
+def test_derive_summary_splits_after_a_trailing_version_number() -> None:
+    """The dotted-token rule must not swallow a real sentence end that follows one."""
+    assert derive_summary('Bumped to v0.8.0. Next one.') == 'Bumped to v0.8.0.'
+
+
+def test_derive_summary_keeps_single_letter_abbreviations() -> None:
+    """'e.g.' ends in '. ' but is not a sentence end — splitting there yields a 4-char summary."""
+    assert derive_summary('Use e.g. this form. Next one.') == 'Use e.g. this form.'
+
+
+def test_derive_summary_keeps_japanese_sentence_splitting() -> None:
+    assert derive_summary('これは概要です。次の文は含まない。') == 'これは概要です。'
+
+
+def test_derive_subject_is_unaffected_by_dotted_tokens() -> None:
+    """Subject derivation (first line + truncate) was already healthy; pin that it stays."""
+    assert derive_subject('v0.8.0 リリース後の migration plan\n本文') == 'v0.8.0 リリース後の migration plan'
+
+
 # -- agent_family / client_id resolution (family=unknown fix) -------------------
 
 
