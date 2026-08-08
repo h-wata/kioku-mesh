@@ -12,6 +12,15 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-08
+
+> **このリリースは後方非互換の変更を含む (minor bump だが安全な更新ではない)。**
+> `save_observation` (MCP) と `kioku-mesh save` (CLI) は `subject` / `summary` を
+> 必須とするようになり、これらを渡していない既存の呼び出しはエラーになる。
+> ADR-0029 の semver 契約ではこの変更は major bump に相当するが、利用者が
+> 本人の環境のみであることからユーザー判断で minor とした。更新前に
+> 下記 "Upgrade notes for v1.1" を必ず確認すること。
+
 ### Changed
 
 - **BREAKING**: `save_observation` (MCP) と `kioku-mesh save` (CLI) で
@@ -24,7 +33,8 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   payload を落とすとメッシュのデータが静かに欠落するため。CLI / MCP の
   後方非互換変更である。deprecation 期間・互換オプション・移行用の
   フォールバックは実装しない (単一ユーザー環境のため不要と判断)。
-  semver 契約 (ADR-0029) 上、**次リリースは major bump とする**。
+  ADR-0029 の semver 契約では major bump に相当する変更だが、利用者が本人の
+  環境のみであることからユーザー判断で v1.1.0 (minor) として出す。
 - **BREAKING**: MCP `save_observation` の `subject` / `summary` を既定値なしの
   引数にし、公開 inputSchema の `required` に含めた。あわせて欠落・
   プレースホルダ時の拒否を、通常の戻り値文字列ではなく MCP のツールエラー
@@ -164,6 +174,26 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   INSERT が `sqlite3.Error` を投げた場合に rollback していなかったため、
   DELETE 済みの中間状態がコミットされないまま残ってしまう問題を修正し、
   失敗時は明示的に `rollback()` するようにした。
+
+### Upgrade notes for v1.1
+
+- `save_observation` (MCP) / `kioku-mesh save` (CLI) を呼ぶ側は `subject` と
+  `summary` を必ず渡すこと。省略・空文字・`-` / `N/A` / `TBD` 等の
+  プレースホルダはいずれも保存されず、MCP ではツールエラー
+  (`is_error=true`)、CLI では非 0 終了になる。既存の保存済みデータと、
+  他ピアから複製されてくる payload には適用されないため、読み取り経路は
+  影響を受けない。
+- 既に subject / summary が欠落している観測は
+  `kioku-mesh backfill-metadata` で補完できる (既定は dry-run、`--apply` で
+  書き込み)。補完は append-only で、元の観測は書き換えずに新 ID の観測を
+  `supersedes` で紐づける。
+- MCP クライアント設定 (`~/.claude.json` / `~/.codex/config.toml`) が
+  v1.0.0 で削除された `MESH_MEM_AGENT_FAMILY` / `MESH_MEM_CLIENT_ID` のまま
+  残っている場合、`kioku-mesh doctor` が FAIL (exit code 2) を返すように
+  なった。`KIOKU_MESH_AGENT_FAMILY` / `KIOKU_MESH_CLIENT_ID` にリネームするか
+  `kioku-mesh mcp install --client <client> --force` で再生成すること。
+- local index に `expires_at` 列が増える。既存 DB は起動時に自動 migration
+  され、寿命を持たない既存行は無期限のまま残る。
 
 ## [1.0.0] - 2026-07-02
 
