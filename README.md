@@ -272,7 +272,8 @@ pytest tests/test_mcp_server.py tests/test_mcp_cli.py -v  # focused MCP checks
 - `0.x` releases are experimental; breaking changes can happen in minor
   versions. From `1.0.0` onward, the public CLI / MCP / Python API and
   on-disk schema follow Semantic Versioning: breaking changes require a
-  semver-major bump or an explicit migration path (ADR-0029).
+  semver-major bump or an explicit migration path (ADR-0029), except while
+  the repository has a single operator, per the conditions in ADR-0030.
 
 More detail lives in [docs/Spec.md](docs/Spec.md), [CHANGELOG.md](CHANGELOG.md),
 and the design records under [docs/adr/](docs/adr/).

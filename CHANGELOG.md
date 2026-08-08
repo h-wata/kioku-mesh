@@ -12,6 +12,14 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+### Changed
+
+- Superseded ADR-0029's semver clause with ADR-0030, which documents a
+  single-operator exception allowing breaking changes to ship as minor
+  releases (CHANGELOG-first disclosure + upgrade notes + release note
+  placement required), and its failure condition once a third-party user
+  exists.
+
 ## [1.1.0] - 2026-08-08
 
 > **このリリースは後方非互換の変更を含む (minor bump だが安全な更新ではない)。**

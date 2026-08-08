@@ -1,9 +1,9 @@
 # ADR-0029: v1.0 scope and compatibility deprecation policy
 
-- Status: Proposed
+- Status: Proposed（semver 条項のみ ADR-0030 に Superseded）
 - Date: 2026-07-02
 - Supersedes: なし
-- Related: ADR-0019, ADR-0024, ADR-0026, ADR-0028
+- Related: ADR-0019, ADR-0024, ADR-0026, ADR-0028, ADR-0030
 
 ## Context
 
