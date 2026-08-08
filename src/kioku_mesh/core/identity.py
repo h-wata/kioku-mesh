@@ -37,13 +37,19 @@ _session_id_cache: str | None = None
 # One-shot warning latch. Identity is resolved on every Observation
 # construction, so the warning must not repeat per save.
 _unknown_family_warned: bool = False
+# Same latch, for the "several launchers claim this process" case.
+_ambiguous_family_warned: bool = False
 
 # Env markers a launcher sets on the processes it spawns, mapped to the family
 # they identify. Only launcher-owned names belong here: a marker a human might
 # export by hand would misclassify observations, which is worse than 'unknown'.
+# ``CODEX_HOME`` is deliberately absent — it is a user-configurable location
+# that people export from their shell profile, and Codex CLI does not pass it
+# to the MCP subprocesses it spawns anyway, so listing it could only ever
+# mislabel a non-Codex process.
 _LAUNCHER_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ('claude', ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT')),
-    ('codex', ('CODEX_SANDBOX', 'CODEX_HOME')),
+    ('codex', ('CODEX_SANDBOX',)),
     ('gemini', ('GEMINI_CLI', 'GEMINI_SANDBOX')),
 )
 
@@ -229,11 +235,40 @@ def detect_agent_family() -> str:
     subprocesses it spawns; Codex CLI passes no marker at all (verified on the
     running MCP servers), so a Codex MCP entry has to set
     ``KIOKU_MESH_AGENT_FAMILY`` explicitly to be attributable.
+
+    Markers of **more than one** family can coexist: agents nest (Claude Code
+    launching Codex, or the reverse) and the child inherits the parent's
+    marker alongside its own. There is no ordering that identifies "the
+    current agent" in that case, so detection declines rather than picking
+    the first table entry — a confidently wrong family is trusted silently,
+    while ``'unknown'`` is visible in ``kioku-mesh status`` and searchable as
+    a defect. The ambiguity is logged once so the operator can set
+    ``KIOKU_MESH_AGENT_FAMILY`` explicitly.
     """
-    for family, markers in _LAUNCHER_MARKERS:
-        if any(os.environ.get(marker, '').strip() for marker in markers):
-            return family
-    return ''
+    detected = [family for family, markers in _LAUNCHER_MARKERS if _any_marker_set(markers)]
+    if len(detected) > 1:
+        _warn_ambiguous_family(detected)
+        return ''
+    return detected[0] if detected else ''
+
+
+def _any_marker_set(markers: tuple[str, ...]) -> bool:
+    """Report whether at least one of ``markers`` is present with a non-blank value."""
+    return any(os.environ.get(marker, '').strip() for marker in markers)
+
+
+def _warn_ambiguous_family(detected: list[str]) -> None:
+    """Warn once that nested launcher markers made detection ambiguous."""
+    global _ambiguous_family_warned
+    if _ambiguous_family_warned:
+        return
+    _ambiguous_family_warned = True
+    log.warning(
+        'launcher markers for multiple agent families are set (%s); the current agent cannot be '
+        "identified from them, so agent_family falls back to 'unknown'. Set KIOKU_MESH_AGENT_FAMILY "
+        'in this process (or in the MCP client entry that spawns it) to attribute these saves.',
+        ', '.join(sorted(detected)),
+    )
 
 
 def resolve_agent_family() -> tuple[str, IdentitySource]:
@@ -241,7 +276,8 @@ def resolve_agent_family() -> tuple[str, IdentitySource]:
 
     Precedence:
         1. ``KIOKU_MESH_AGENT_FAMILY`` — explicit current config
-        2. launcher detection (:func:`detect_agent_family`)
+        2. launcher detection (:func:`detect_agent_family`), which declines
+           when markers of several families are present at once
         3. ``'unknown'`` — warns once, since it makes the entry unattributable
 
     The pre-v1.0 env names are deliberately NOT consulted: ADR-0029 removed
@@ -326,8 +362,9 @@ def get_session_id() -> str:
 
 
 def reset_caches() -> None:
-    """Clear cached pc_id / session_id and the one-shot warning latch. Test-only helper."""
-    global _pc_id_cache, _session_id_cache, _unknown_family_warned
+    """Clear cached pc_id / session_id and the one-shot warning latches. Test-only helper."""
+    global _pc_id_cache, _session_id_cache, _unknown_family_warned, _ambiguous_family_warned
     _pc_id_cache = None
     _session_id_cache = None
     _unknown_family_warned = False
+    _ambiguous_family_warned = False

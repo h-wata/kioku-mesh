@@ -17,6 +17,7 @@ import socket
 import sys
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from . import __version__
 from .backend import get_backend
@@ -273,12 +274,12 @@ def _warn_if_zenoh_connect_unreachable() -> None:
 @mcp.tool()
 def save_observation(
     content: str,
+    subject: str,
+    summary: str,
     project: str = '',
     tags: list[str] | None = None,
     memory_type: str = 'note',
     importance: int = 2,
-    subject: str = '',
-    summary: str = '',
     source_files: list[str] | None = None,
     references: list[str] | None = None,
     supersedes: list[str] | None = None,
@@ -310,15 +311,17 @@ def save_observation(
 
     Args:
         content: full-text body of the observation.
+        subject: REQUIRED (no default — part of the tool's input schema
+            ``required`` list). Short topic / symbol name (e.g. "get_position
+            latency"). Placeholder values ("-", "N/A", "TBD") are rejected
+            with a tool error.
+        summary: REQUIRED (no default). One-line abstract shown in search
+            results. Placeholder values are rejected with a tool error.
         project: optional project tag to scope the entry.
         tags: optional list of keyword tags.
         memory_type: category — one of "note", "decision", "bug", "pattern",
             "config", "summary" (default "note").
         importance: 1 (trivial) to 5 (critical), clamped automatically.
-        subject: REQUIRED. Short topic / symbol name (e.g. "get_position
-            latency"). Placeholder values ("-", "N/A", "TBD") are rejected.
-        summary: REQUIRED. One-line abstract shown in search results.
-            Placeholder values are rejected.
         source_files: related file paths for traceability.
         references: related PR / Issue / external identifiers.
         supersedes: list of observation_ids this entry replaces.
@@ -349,7 +352,11 @@ def save_observation(
     try:
         validate_required_metadata(subject, summary)
     except MetadataRequiredError as e:
-        return str(e)
+        # Raised, not returned: a returned string is is_error=false on the MCP
+        # wire, so a caller that dropped subject/summary would read the refusal
+        # as a successful save and never retry. ToolError carries the message
+        # through as a protocol-level tool error instead.
+        raise ToolError(str(e)) from e
     try:
         resolved_expires_at = resolve_expires_at(expires_at=expires_at, ttl_sec=ttl_sec)
     except ValueError as e:

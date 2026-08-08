@@ -133,6 +133,102 @@ def test_launcher_detection_outranks_legacy_env(monkeypatch: pytest.MonkeyPatch)
     assert source is IdentitySource.DETECTED
 
 
+def test_nested_claude_then_codex_markers_resolve_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Codex launched from Claude Code inherits CLAUDECODE alongside its own marker.
+
+    Table order used to hand that process to 'claude' with no warning. A wrong
+    family is trusted silently, so ambiguity must fall back to 'unknown'.
+    """
+    from kioku_mesh.core import identity
+
+    _clear_identity_env(monkeypatch)
+    monkeypatch.setenv('CLAUDECODE', '1')
+    monkeypatch.setenv('CODEX_SANDBOX', '1')
+    identity.reset_caches()
+    with caplog.at_level('WARNING'):
+        value, source = resolve_agent_family()
+    assert value == 'unknown'
+    assert source is IdentitySource.DEFAULT
+    assert any('multiple agent families' in record.getMessage() for record in caplog.records)
+
+
+def test_nested_codex_then_claude_markers_resolve_to_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The reverse nesting (Claude Code launched from Codex) is equally unattributable.
+
+    Same env set as the previous test — the point is that neither direction is
+    distinguishable from the markers, so neither may win.
+    """
+    from kioku_mesh.core import identity
+
+    _clear_identity_env(monkeypatch)
+    monkeypatch.setenv('CODEX_SANDBOX', '1')
+    monkeypatch.setenv('CLAUDE_CODE_ENTRYPOINT', 'cli')
+    identity.reset_caches()
+    with caplog.at_level('WARNING'):
+        value, source = resolve_agent_family()
+    assert value == 'unknown'
+    assert source is IdentitySource.DEFAULT
+    assert any('multiple agent families' in record.getMessage() for record in caplog.records)
+
+
+def test_user_exported_codex_home_does_not_attribute_to_codex(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """CODEX_HOME is a user-configurable path, not a launcher-owned marker.
+
+    Codex CLI does not pass it to the MCP servers it spawns, so honouring it
+    could only ever mislabel a shell that exports it from a profile.
+    """
+    from kioku_mesh.core import identity
+
+    _clear_identity_env(monkeypatch)
+    monkeypatch.setenv('CODEX_HOME', '/home/someone/.codex')
+    identity.reset_caches()
+    with caplog.at_level('WARNING'):
+        value, source = resolve_agent_family()
+    assert value == 'unknown'
+    assert source is IdentitySource.DEFAULT
+
+
+def test_explicit_family_env_survives_conflicting_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ambiguity handling must not weaken the explicit-config precedence."""
+    from kioku_mesh.core import identity
+
+    _clear_identity_env(monkeypatch)
+    monkeypatch.setenv('KIOKU_MESH_AGENT_FAMILY', 'codex')
+    monkeypatch.setenv('CLAUDECODE', '1')
+    monkeypatch.setenv('CODEX_SANDBOX', '1')
+    identity.reset_caches()
+    value, source = resolve_agent_family()
+    assert value == 'codex'
+    assert source is IdentitySource.ENV
+
+
+def test_ambiguous_family_warning_is_emitted_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Identity resolves on every Observation construction; the warning must not repeat."""
+    from kioku_mesh.core import identity
+
+    _clear_identity_env(monkeypatch)
+    monkeypatch.setenv('CLAUDECODE', '1')
+    monkeypatch.setenv('CODEX_SANDBOX', '1')
+    identity.reset_caches()
+    with caplog.at_level('WARNING'):
+        resolve_agent_family()
+        resolve_agent_family()
+    ambiguous = [r for r in caplog.records if 'multiple agent families' in r.getMessage()]
+    assert len(ambiguous) == 1
+
+
 def test_unresolved_family_warns(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     """Falling back to 'unknown' means the identity config is broken — say so."""
     _clear_identity_env(monkeypatch)
@@ -159,23 +255,84 @@ def test_legacy_client_id_env_is_not_read(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_mcp_save_observation_rejects_missing_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastmcp.exceptions import ToolError
+
     from kioku_mesh import mcp_server
 
     saved: list = []
     monkeypatch.setattr(mcp_server, 'get_backend', lambda: _RecordingBackend(saved))
-    result = mcp_server.save_observation(content='body text', subject='', summary='')
-    assert 'subject' in result
-    assert 'summary' in result
+    with pytest.raises(ToolError) as excinfo:
+        mcp_server.save_observation(content='body text', subject='', summary='')
+    assert 'subject' in str(excinfo.value)
+    assert 'summary' in str(excinfo.value)
     assert saved == []
 
 
 def test_mcp_save_observation_rejects_placeholder_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastmcp.exceptions import ToolError
+
     from kioku_mesh import mcp_server
 
     saved: list = []
     monkeypatch.setattr(mcp_server, 'get_backend', lambda: _RecordingBackend(saved))
-    result = mcp_server.save_observation(content='body text', subject='-', summary='-')
-    assert 'subject' in result
+    with pytest.raises(ToolError) as excinfo:
+        mcp_server.save_observation(content='body text', subject='-', summary='-')
+    assert 'subject' in str(excinfo.value)
+    assert saved == []
+
+
+def test_mcp_input_schema_marks_subject_and_summary_required() -> None:
+    """The published schema is what an MCP client generates arguments from.
+
+    A docstring saying REQUIRED is invisible to it: only ``required`` in the
+    tool's inputSchema keeps a client from omitting subject / summary.
+    """
+    import asyncio
+
+    pytest.importorskip('fastmcp')
+    from fastmcp import Client
+
+    from kioku_mesh.mcp_server import mcp
+
+    async def _go() -> list[str]:
+        async with Client(mcp) as client:
+            tools = await client.list_tools()
+            tool = next(t for t in tools if t.name == 'save_observation')
+            return list(tool.inputSchema.get('required', []))
+
+    required = asyncio.run(_go())
+    assert set(required) >= {'content', 'subject', 'summary'}
+
+
+def test_mcp_call_without_metadata_is_a_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refusal returned as a normal string reads as a successful save on the wire.
+
+    The caller must see ``is_error=true`` so it retries with real metadata
+    instead of believing the entry was stored.
+    """
+    import asyncio
+
+    pytest.importorskip('fastmcp')
+    from fastmcp import Client
+
+    from kioku_mesh import mcp_server
+
+    saved: list = []
+    monkeypatch.setattr(mcp_server, 'get_backend', lambda: _RecordingBackend(saved))
+
+    async def _go():  # noqa: ANN202 — fastmcp CallToolResult
+        async with Client(mcp_server.mcp) as client:
+            return await client.call_tool(
+                'save_observation',
+                {'content': 'body text', 'subject': '', 'summary': ''},
+                raise_on_error=False,
+            )
+
+    result = asyncio.run(_go())
+    assert result.is_error is True
+    message = ' '.join(getattr(block, 'text', '') for block in result.content)
+    assert 'subject' in message
+    assert 'summary' in message
     assert saved == []
 
 
@@ -237,16 +394,80 @@ def test_backfill_metadata_is_dry_run_by_default(
     assert '壊れた行' in out
 
 
-def test_backfill_metadata_apply_rewrites_derived_values(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_metadata_apply_appends_new_observation_superseding_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0002 / ADR-0028: the original payload is never written back over.
+
+    The repair is a new observation carrying the derived metadata and a
+    supersedes link, so the raw layer stays append-only and the historical
+    payload is still there to read.
+    """
     from kioku_mesh import __main__ as cli
 
-    backend = _BackfillBackend([_observation(subject='', summary='', content='見出し行。本文の続き。')])
+    original = _observation(subject='', summary='', content='見出し行。本文の続き。')
+    backend = _BackfillBackend([original])
     monkeypatch.setattr(cli, 'get_backend', lambda: backend)
     rc = cli.main(['backfill-metadata', '--apply'])
     assert rc == 0
     assert len(backend.written) == 1
-    assert backend.written[0].subject == '見出し行。本文の続き。'
-    assert backend.written[0].summary == '見出し行。'
+    repaired = backend.written[0]
+    assert repaired.subject == '見出し行。本文の続き。'
+    assert repaired.summary == '見出し行。'
+    assert repaired.observation_id != original.observation_id
+    assert repaired.supersedes == [original.observation_id]
+    # Provenance rides along: a repair must not re-attribute the entry to the
+    # host running the command, nor move it to the top of recency ordering.
+    assert repaired.content == original.content
+    assert repaired.created_at == original.created_at
+    assert repaired.agent_family == original.agent_family
+    assert repaired.client_id == original.client_id
+    assert repaired.pc_id == original.pc_id
+    assert repaired.session_id == original.session_id
+    assert repaired.visibility == original.visibility
+
+
+def test_backfill_metadata_partial_failure_keeps_successes_and_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure mid-batch leaves the appended repairs in place and reports failure."""
+    from kioku_mesh import __main__ as cli
+
+    observations = [_observation(subject='', summary='', content=f'行{i}。本文。') for i in range(3)]
+    backend = _BackfillBackend(observations, fail_on_index=1)
+    monkeypatch.setattr(cli, 'get_backend', lambda: backend)
+    rc = cli.main(['backfill-metadata', '--apply'])
+    assert rc == 1
+    assert len(backend.written) == 2
+    superseded = {old for obs in backend.written for old in obs.supersedes}
+    assert superseded == {observations[0].observation_id, observations[2].observation_id}
+
+
+def test_backfill_metadata_rerun_does_not_supersede_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-running after a partial failure retries only what is still unrepaired.
+
+    The store keeps both the original and its superseder, so a naive second
+    pass would append a second repair for an already-repaired entry.
+    """
+    from kioku_mesh import __main__ as cli
+
+    observations = [_observation(subject='', summary='', content=f'行{i}。本文。') for i in range(3)]
+    backend = _BackfillBackend(observations, fail_on_index=1)
+    monkeypatch.setattr(cli, 'get_backend', lambda: backend)
+    assert cli.main(['backfill-metadata', '--apply']) == 1
+
+    # The superseders are now part of the stored set, as a real backend would
+    # return them (unfiltered) on the next scan.
+    backend.observations.extend(backend.written)
+    first_pass = list(backend.written)
+    backend.fail_on_index = None
+    backend.written.clear()
+    assert cli.main(['backfill-metadata', '--apply']) == 0
+
+    assert len(backend.written) == 1
+    assert backend.written[0].supersedes == [observations[1].observation_id]
+    already = {old for obs in first_pass for old in obs.supersedes}
+    assert not already & set(backend.written[0].supersedes)
 
 
 def test_backfill_metadata_skips_complete_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,16 +503,26 @@ def _observation(*, subject: str, summary: str, content: str):  # noqa: ANN202 �
 
 
 class _BackfillBackend:
-    """Backend double returning a fixed observation set and recording rewrites."""
+    """Backend double returning a fixed observation set and recording appends.
 
-    def __init__(self, observations: list) -> None:
-        self._observations = observations
+    ``fail_on_index`` injects a failure on the Nth put so partial-batch
+    behaviour can be asserted without a live backend.
+    """
+
+    def __init__(self, observations: list, fail_on_index: int | None = None) -> None:
+        self.observations = observations
+        self.fail_on_index = fail_on_index
         self.written: list = []
+        self._puts = 0
 
     def search_observations(self, **kwargs) -> list:  # noqa: ANN003, ARG002 — test double
-        return list(self._observations)
+        return list(self.observations)
 
     def put_observation(self, obs) -> None:  # noqa: ANN001 — test double
+        index = self._puts
+        self._puts += 1
+        if self.fail_on_index is not None and index == self.fail_on_index:
+            raise RuntimeError('injected put failure')
         self.written.append(obs)
 
 

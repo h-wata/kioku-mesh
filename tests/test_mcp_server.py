@@ -1259,21 +1259,38 @@ def test_save_rejects_missing_subject(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Supersedes the MISSING_SUBJECT warn-only assertion: the lint rule still
     exists in save_lint.py, but the MCP boundary now rejects such a save
-    before linting, so that warning is unreachable from this path.
+    before linting, so that warning is unreachable from this path. Both the
+    omitted argument (schema-level) and the blank one (validation-level) come
+    back as tool errors, never as a successful-looking string.
     """
     _mock_backend(monkeypatch)
 
-    async def _go() -> str:
+    async def _go() -> tuple[Any, Any]:
         async with Client(mcp) as client:
-            result = await client.call_tool(
+            omitted = await client.call_tool(
                 'save_observation',
                 {'content': 'A non-trivial decision content here', 'memory_type': 'decision', 'subject': ''},
+                raise_on_error=False,
             )
-            return result.data
+            blank = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'A non-trivial decision content here',
+                    'memory_type': 'decision',
+                    'subject': '',
+                    'summary': '',
+                },
+                raise_on_error=False,
+            )
+            return omitted, blank
 
-    msg = _run(_go())
-    assert 'subject' in msg
-    assert 'required' in msg
+    omitted, blank = _run(_go())
+    assert omitted.is_error is True
+    assert 'summary' in ' '.join(getattr(block, 'text', '') for block in omitted.content)
+    assert blank.is_error is True
+    blank_message = ' '.join(getattr(block, 'text', '') for block in blank.content)
+    assert 'subject' in blank_message
+    assert 'required' in blank_message
 
 
 def test_save_lint_no_warning_for_normal_content(monkeypatch: pytest.MonkeyPatch) -> None:

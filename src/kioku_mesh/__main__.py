@@ -20,6 +20,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import uuid
 
 try:
     import argcomplete
@@ -530,9 +531,30 @@ def _cmd_backfill_metadata(args: argparse.Namespace) -> int:
 
     Dry-run by default: nothing is written unless ``--apply`` is passed.
 
-    Only ``subject`` / ``summary`` are repairable here. They live in the
-    payload, so a repaired observation keeps its key and simply overwrites
-    itself. ``agent_family`` is part of the Zenoh key expression
+    A repair never rewrites the stored observation. ADR-0002 makes an
+    Observation immutable and ADR-0028 makes the raw layer an append-only
+    source of truth, so overwriting the original payload under its own key
+    would destroy the historical record of what was actually saved. Instead
+    each repair **appends a new observation** — a copy carrying the derived
+    ``subject`` / ``summary``, a fresh ``observation_id``, and
+    ``supersedes=[<original id>]``. ADR-0021's existence-based supersede
+    filter then hides the original from search while it stays on disk.
+
+    Consequences worth knowing before running ``--apply``:
+
+    - Identity (``agent_family`` / ``client_id`` / ``pc_id`` / ``session_id``)
+      and ``created_at`` are copied from the original, so a repair does not
+      re-attribute the entry to the repairing host nor bump it to the top of
+      recency-ordered recall.
+    - Failures are per-observation, not batched: an entry either has its
+      replacement appended or it does not, and a mid-batch failure leaves the
+      earlier appends in place and exits non-zero.
+    - Re-running after a partial failure is safe. An original that already has
+      a superseder is skipped, so the repaired entries are not superseded a
+      second time.
+
+    Only ``subject`` / ``summary`` are repairable here. ``agent_family`` is
+    part of the Zenoh key expression
     (``mem/obs/<family>/<client>/<pc>/<session>/<id>``), so rewriting it would
     re-key every affected entry across the mesh — that is a migration in the
     shape of ``migrate-visibility``, not a payload backfill. Unknown-family
@@ -546,12 +568,21 @@ def _cmd_backfill_metadata(args: argparse.Namespace) -> int:
         return 1
 
     unknown_family = [obs for obs in observations if obs.agent_family in ('', 'unknown')]
+    # Idempotency guard for a re-run after a partial failure. Search already
+    # hides superseded rows (ADR-0021), but a backend that returns them anyway
+    # must not get a second replacement appended for the same original.
+    already_superseded = {old_id for obs in observations for old_id in obs.supersedes}
     plan: list[tuple[Observation, str, str]] = []
     unrepairable = 0
+    superseded_skipped = 0
     for obs in observations:
         needs_subject = is_missing(obs.subject)
         needs_summary = is_missing(obs.summary)
         if not (needs_subject or needs_summary):
+            continue
+        if obs.observation_id in already_superseded:
+            # A previous run already appended the repaired copy.
+            superseded_skipped += 1
             continue
         new_subject = derive_subject(obs.content) if needs_subject else obs.subject
         new_summary = derive_summary(obs.content) if needs_summary else obs.summary
@@ -568,13 +599,14 @@ def _cmd_backfill_metadata(args: argparse.Namespace) -> int:
         f'scanned: {len(observations)} live observation(s)' + (f' in project {args.project}' if args.project else '')
     )
     print(
-        f'missing subject/summary: {len(plan) + unrepairable} '
-        f'(repairable: {len(plan)}, no content to derive from: {unrepairable})'
+        f'missing subject/summary: {len(plan) + unrepairable + superseded_skipped} '
+        f'(repairable: {len(plan)}, no content to derive from: {unrepairable}, '
+        f'already repaired by a superseding entry: {superseded_skipped})'
     )
     print(f'agent_family unknown: {len(unknown_family)} (not rewritten — see note below)')
     print(f'mode: {"APPLY" if args.apply else "dry-run (no writes; pass --apply to write)"}')
     print(
-        f'planned rewrites: {len(selected)}'
+        f'planned repairs: {len(selected)} (appended as new observations superseding the originals)'
         + (f' (capped by --limit {args.limit})' if len(selected) < len(plan) else '')
     )
 
@@ -601,18 +633,35 @@ def _cmd_backfill_metadata(args: argparse.Namespace) -> int:
     written = 0
     backend = get_backend()
     for obs, new_subject, new_summary in selected:
-        repaired = dataclasses.replace(obs, subject=new_subject, summary=new_summary)
+        # Append-only repair (ADR-0002 / ADR-0028): a fresh observation_id and
+        # an explicit supersedes link, never a write back to the original key.
+        # created_at and the identity fields ride along from the original via
+        # dataclasses.replace, so the copy keeps the provenance of what it
+        # repairs instead of claiming to be a save by this host, now.
+        repaired = dataclasses.replace(
+            obs,
+            observation_id=uuid.uuid4().hex,
+            subject=new_subject,
+            summary=new_summary,
+            supersedes=[*obs.supersedes, obs.observation_id],
+        )
         # dataclasses.replace() bypasses to_json/from_json, which is the only
-        # path that carries _extras (models.py). Re-attach it so a rewrite does
-        # not drop fields preserved from a newer peer schema.
+        # path that carries _extras (models.py). Re-attach it so the repaired
+        # copy does not drop fields preserved from a newer peer schema.
         repaired._extras = dict(getattr(obs, '_extras', {}))  # noqa: SLF001
         try:
             backend.put_observation(repaired)
         except Exception as e:  # noqa: BLE001
-            print(f'  failed to rewrite {obs.observation_id}: [{type(e).__name__}] {e}', file=sys.stderr)
+            print(f'  failed to repair {obs.observation_id}: [{type(e).__name__}] {e}', file=sys.stderr)
             continue
         written += 1
-    print(f'rewritten: {written}/{len(selected)}')
+    print(f'repaired: {written}/{len(selected)} (originals kept and superseded)')
+    if written < len(selected):
+        print(
+            f'  {len(selected) - written} repair(s) did not land. The successful ones are already '
+            'stored; re-run the same command to retry only what is left.',
+            file=sys.stderr,
+        )
     return 0 if written == len(selected) else 1
 
 
@@ -2126,7 +2175,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             'Derive subject / summary for stored observations that are missing them. '
             'Dry-run by default: nothing is written unless --apply is passed. '
-            'agent_family is part of the observation key and is only reported, never rewritten.'
+            'Repairs are append-only: each fix is stored as a new observation that supersedes '
+            'the original, which stays on disk untouched. '
+            'agent_family is part of the observation key and is only reported, never repaired.'
         ),
     )
     _attach_completer(p_backfill.add_argument('-p', '--project', default=''), _complete_project)
@@ -2134,10 +2185,10 @@ def _build_parser() -> argparse.ArgumentParser:
         '--apply',
         action='store_true',
         default=False,
-        help='actually rewrite the observations (default: dry-run)',
+        help='actually append the repaired observations (default: dry-run)',
     )
-    p_backfill.add_argument('--limit', type=int, default=0, help='max observations to rewrite (0 = no cap)')
-    p_backfill.add_argument('--show', type=int, default=10, help='how many planned rewrites to print (default: 10)')
+    p_backfill.add_argument('--limit', type=int, default=0, help='max observations to repair (0 = no cap)')
+    p_backfill.add_argument('--show', type=int, default=10, help='how many planned repairs to print (default: 10)')
     p_backfill.set_defaults(func=_cmd_backfill_metadata)
 
     p_drain = sub.add_parser('drain', help='Drain pending_puts')

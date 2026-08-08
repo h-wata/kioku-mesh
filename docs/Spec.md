@@ -35,7 +35,7 @@ Observation は保存されるメモリ本体で、原則 immutable です。内
 | フィールド | 型 | 既定値 / 仕様 |
 | --- | --- | --- |
 | `content` | `str` | 本文。必須。 |
-| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY` → ランチャ検出 → `unknown` (警告)。 |
+| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY` → ランチャ検出 (複数 family のマーカーが同時にある場合は検出せず) → `unknown` (警告)。 |
 | `client_id` | `str` | `KIOKU_MESH_CLIENT_ID` → `<user>@<host>`。 |
 | `pc_id` | `str` | ホスト単位の永続 UUID。 |
 | `session_id` | `str` | プロセス単位 ID。 |
@@ -93,7 +93,7 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 | 識別子 | 解決方法 |
 | --- | --- |
-| `agent_family` | `KIOKU_MESH_AGENT_FAMILY` → ランチャ検出 (`CLAUDECODE` 等) → `unknown` (警告)。v1.0.0 で削除した旧 `MESH_MEM_*` は読まない (ADR-0029)。 |
+| `agent_family` | `KIOKU_MESH_AGENT_FAMILY` → ランチャ検出 (`CLAUDECODE` 等) → `unknown` (警告)。異なる family のマーカーが同時に存在する場合 (エージェントの入れ子起動) は検出せず `unknown` + 警告に倒す。v1.0.0 で削除した旧 `MESH_MEM_*` は読まない (ADR-0029)。 |
 | `client_id` | `KIOKU_MESH_CLIENT_ID` → `<user>@<host>`。 |
 | `pc_id` | `KIOKU_MESH_STATE_DIR/pc_id` に永続化。なければ UUID4 を生成。 |
 | `session_id` | `KIOKU_MESH_SESSION_ID`。未設定時は `{YYYYMMDDTHHMMSSZ}-{uuid8}` を生成し、プロセス内でキャッシュ。 |
@@ -250,7 +250,10 @@ Backend mode の解決順序:
   - `--supersedes`: カンマ区切り
 - `backfill-metadata`
   - `--project`, `--limit`, `--show`
-  - `--apply`: 既定は dry-run。渡したときだけ既存 Observation を書き換える。
+  - `--apply`: 既定は dry-run。渡したときだけ書き込む。書き込みは append-only:
+    元の Observation は書き換えず、subject / summary を補完した新しい
+    Observation を新 ID で保存し `supersedes` で旧観測に紐づける
+    (ADR-0002 / ADR-0028)。identity と `created_at` は旧観測から引き継ぐ。
 - `search [QUERY]`
   - `--agent-family`, `--client-id`, `--pc-id`, `--session-id`
   - `--project`
