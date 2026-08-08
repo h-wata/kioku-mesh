@@ -14,6 +14,30 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ### Added
 
+- `kioku-mesh doctor` に identity チェックを追加した。MCP クライアント設定
+  (`~/.claude.json` / `~/.codex/config.toml`) が identity を廃止済みの
+  `MESH_MEM_AGENT_FAMILY` / `MESH_MEM_CLIENT_ID` だけで宣言している場合は
+  **FAIL (exit code 2)** を返す。identity の解決順は `KIOKU_MESH_*` →
+  ランチャ検出 → `unknown` で旧 prefix は一切読まれないため、この設定は
+  「非推奨」ではなく実際に効いていないため。同じマッピング内に
+  `KIOKU_MESH_*` の対応キーがあるときは現行キーが読まれるので報告しない。
+  検出対象は identity の 2 キーに限定してある (`MESH_MEM_STATE_DIR` 等は
+  このチェックの hint「`KIOKU_MESH_AGENT_FAMILY` /
+  `KIOKU_MESH_CLIENT_ID` にリネームせよ」が当てはまらないため対象外)。
+  あわせて、直近 50 件の観測のうち 8 割以上が `agent_family=unknown` の
+  場合は WARN を出す。こちらは CLI からの保存など正当に unknown となる
+  原因もあるため WARN に留めている。
+  doctor は設定ファイルを書き換えず、観測のサンプリングも既存 index を
+  read-only で開いて読むだけで、state ディレクトリ・DB・スキーマを新規に
+  作らない。v1.0.0 (#266) で `MESH_MEM_*` の読み取りを削除した際、
+  手書きの MCP 設定が旧 prefix のまま取り残され、5 週間・286 件の観測が
+  `unknown` で保存され続けたことに気付けなかったため。
+
+- `state_dir()` に `create=False` を追加した。パスの解決だけを行い
+  ディレクトリを作らない。doctor のような read-only な呼び出し元が、
+  何も無いホストを診断しただけで state ディレクトリや SQLite ファイルを
+  作ってしまうのを防ぐため。既定は従来どおり `create=True`。
+
 - 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
   全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
   現在のホストのものと誤認して引き継いでしまう問題があった。
