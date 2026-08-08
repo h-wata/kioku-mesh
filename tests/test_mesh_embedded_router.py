@@ -134,7 +134,18 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
             XDG_CONFIG_HOME=xdg_dir,
         )
         save_result = subprocess.run(
-            [sys.executable, '-m', 'kioku_mesh', 'save', unique_content],
+            [
+                sys.executable,
+                '-m',
+                'kioku_mesh',
+                'save',
+                unique_content,
+                '--subject',
+                'mesh exchange',
+                # search renders the summary, so echo the unique marker there too
+                '--summary',
+                unique_content,
+            ],
             env=peer_env,
             capture_output=True,
             text=True,
@@ -288,7 +299,18 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
             XDG_CONFIG_HOME=xdg_dir,
         )
         save_result = subprocess.run(
-            [sys.executable, '-m', 'kioku_mesh', 'save', unique_content],
+            [
+                sys.executable,
+                '-m',
+                'kioku_mesh',
+                'save',
+                unique_content,
+                '--subject',
+                'mesh exchange',
+                # search renders the summary, so echo the unique marker there too
+                '--summary',
+                unique_content,
+            ],
             env=save_env,
             capture_output=True,
             text=True,

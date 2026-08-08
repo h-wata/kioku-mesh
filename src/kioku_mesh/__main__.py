@@ -9,6 +9,7 @@ sides converge.
 import argparse
 from collections.abc import Callable
 from collections.abc import Iterator
+import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
@@ -19,6 +20,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import uuid
 
 try:
     import argcomplete
@@ -42,6 +44,11 @@ from .identity import resolve_agent_family
 from .identity import resolve_client_id
 from .local_index import LocalIndex
 from .mcp_install import MCPClient
+from .memory.metadata import derive_subject
+from .memory.metadata import derive_summary
+from .memory.metadata import is_missing
+from .memory.metadata import MetadataRequiredError
+from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
@@ -153,6 +160,11 @@ def _cmd_save(args: argparse.Namespace) -> int:
     try:
         visibility, scope_id = resolve_write_visibility(getattr(args, 'visibility', '') or '')
     except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+    try:
+        validate_required_metadata(args.subject, args.summary)
+    except MetadataRequiredError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
     # ADR-0028 Phase5: save-lint (warn-only)
@@ -512,6 +524,145 @@ def _cmd_status(args: argparse.Namespace) -> int:
         else:
             print('no shadowed observations.')
     return 0
+
+
+def _cmd_backfill_metadata(args: argparse.Namespace) -> int:
+    """Report (and optionally repair) observations stored without usable metadata.
+
+    Dry-run by default: nothing is written unless ``--apply`` is passed.
+
+    A repair never rewrites the stored observation. ADR-0002 makes an
+    Observation immutable and ADR-0028 makes the raw layer an append-only
+    source of truth, so overwriting the original payload under its own key
+    would destroy the historical record of what was actually saved. Instead
+    each repair **appends a new observation** — a copy carrying the derived
+    ``subject`` / ``summary``, a fresh ``observation_id``, and
+    ``supersedes=[<original id>]``. ADR-0021's existence-based supersede
+    filter then hides the original from search while it stays on disk.
+
+    Consequences worth knowing before running ``--apply``:
+
+    - Identity (``agent_family`` / ``client_id`` / ``pc_id`` / ``session_id``)
+      and ``created_at`` are copied from the original, so a repair does not
+      re-attribute the entry to the repairing host nor bump it to the top of
+      recency-ordered recall.
+    - Failures are per-observation, not batched: an entry either has its
+      replacement appended or it does not, and a mid-batch failure leaves the
+      earlier appends in place and exits non-zero.
+    - Re-running after a partial failure is safe. An original that already has
+      a superseder is skipped, so the repaired entries are not superseded a
+      second time.
+
+    Only ``subject`` / ``summary`` are repairable here. ``agent_family`` is
+    part of the Zenoh key expression
+    (``mem/obs/<family>/<client>/<pc>/<session>/<id>``), so rewriting it would
+    re-key every affected entry across the mesh — that is a migration in the
+    shape of ``migrate-visibility``, not a payload backfill. Unknown-family
+    rows are therefore counted and explained, never rewritten: the fix that
+    matters is repairing the identity config so new saves are attributed.
+    """
+    try:
+        observations = get_backend().search_observations(project=args.project, limit=MAX_SEARCH)
+    except Exception as e:  # noqa: BLE001
+        print(f'failed to read shared memory [{type(e).__name__}]: {e}', file=sys.stderr)
+        return 1
+
+    unknown_family = [obs for obs in observations if obs.agent_family in ('', 'unknown')]
+    # Idempotency guard for a re-run after a partial failure. Search already
+    # hides superseded rows (ADR-0021), but a backend that returns them anyway
+    # must not get a second replacement appended for the same original.
+    already_superseded = {old_id for obs in observations for old_id in obs.supersedes}
+    plan: list[tuple[Observation, str, str]] = []
+    unrepairable = 0
+    superseded_skipped = 0
+    for obs in observations:
+        needs_subject = is_missing(obs.subject)
+        needs_summary = is_missing(obs.summary)
+        if not (needs_subject or needs_summary):
+            continue
+        if obs.observation_id in already_superseded:
+            # A previous run already appended the repaired copy.
+            superseded_skipped += 1
+            continue
+        new_subject = derive_subject(obs.content) if needs_subject else obs.subject
+        new_summary = derive_summary(obs.content) if needs_summary else obs.summary
+        if is_missing(new_subject) or is_missing(new_summary):
+            # Nothing to derive from (empty content) — a human has to fix it.
+            unrepairable += 1
+            continue
+        plan.append((obs, new_subject, new_summary))
+
+    limit = args.limit if args.limit > 0 else len(plan)
+    selected = plan[:limit]
+
+    print(
+        f'scanned: {len(observations)} live observation(s)' + (f' in project {args.project}' if args.project else '')
+    )
+    print(
+        f'missing subject/summary: {len(plan) + unrepairable + superseded_skipped} '
+        f'(repairable: {len(plan)}, no content to derive from: {unrepairable}, '
+        f'already repaired by a superseding entry: {superseded_skipped})'
+    )
+    print(f'agent_family unknown: {len(unknown_family)} (not rewritten — see note below)')
+    print(f'mode: {"APPLY" if args.apply else "dry-run (no writes; pass --apply to write)"}')
+    print(
+        f'planned repairs: {len(selected)} (appended as new observations superseding the originals)'
+        + (f' (capped by --limit {args.limit})' if len(selected) < len(plan) else '')
+    )
+
+    for obs, new_subject, new_summary in selected[: args.show]:
+        print(f'  {obs.observation_id}  {obs.created_at[:10]}  project={obs.project or "-"}')
+        if is_missing(obs.subject):
+            print(f'    subject: {obs.subject!r} -> {new_subject!r}')
+        if is_missing(obs.summary):
+            print(f'    summary: {obs.summary!r} -> {new_summary!r}')
+    if len(selected) > args.show:
+        print(f'  ... and {len(selected) - args.show} more (raise --show to list)')
+
+    if unknown_family:
+        print(
+            'note: agent_family is part of the observation key, so existing unknown rows cannot be '
+            'relabelled by a payload rewrite. Fix the source instead: re-run '
+            '`kioku-mesh mcp install --client <client> --force` (pre-v1.0 configs still export the '
+            'removed MESH_MEM_* names) or set KIOKU_MESH_AGENT_FAMILY.'
+        )
+
+    if not args.apply:
+        return 0
+
+    written = 0
+    backend = get_backend()
+    for obs, new_subject, new_summary in selected:
+        # Append-only repair (ADR-0002 / ADR-0028): a fresh observation_id and
+        # an explicit supersedes link, never a write back to the original key.
+        # created_at and the identity fields ride along from the original via
+        # dataclasses.replace, so the copy keeps the provenance of what it
+        # repairs instead of claiming to be a save by this host, now.
+        repaired = dataclasses.replace(
+            obs,
+            observation_id=uuid.uuid4().hex,
+            subject=new_subject,
+            summary=new_summary,
+            supersedes=[*obs.supersedes, obs.observation_id],
+        )
+        # dataclasses.replace() bypasses to_json/from_json, which is the only
+        # path that carries _extras (models.py). Re-attach it so the repaired
+        # copy does not drop fields preserved from a newer peer schema.
+        repaired._extras = dict(getattr(obs, '_extras', {}))  # noqa: SLF001
+        try:
+            backend.put_observation(repaired)
+        except Exception as e:  # noqa: BLE001
+            print(f'  failed to repair {obs.observation_id}: [{type(e).__name__}] {e}', file=sys.stderr)
+            continue
+        written += 1
+    print(f'repaired: {written}/{len(selected)} (originals kept and superseded)')
+    if written < len(selected):
+        print(
+            f'  {len(selected) - written} repair(s) did not land. The successful ones are already '
+            'stored; re-run the same command to retry only what is left.',
+            file=sys.stderr,
+        )
+    return 0 if written == len(selected) else 1
 
 
 def _cmd_drain(args: argparse.Namespace) -> int:
@@ -1941,8 +2092,12 @@ def _build_parser() -> argparse.ArgumentParser:
         'default follows configured default_visibility (env > project > global). '
         "Since Phase D / v0.8, an unset default falls back to 'mesh'.",
     )
-    p_save.add_argument('--subject', default='', help='short topic name')
-    p_save.add_argument('--summary', default='', help='one-line summary shown in search results')
+    p_save.add_argument('--subject', default='', help='REQUIRED. short topic name')
+    p_save.add_argument(
+        '--summary',
+        default='',
+        help='REQUIRED. one-line summary shown in search results',
+    )
     p_save.add_argument(
         '--source-files',
         dest='source_files',
@@ -2013,6 +2168,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help='list shadowed observations (read-only, no unshadow/delete)',
     )
     p_status.set_defaults(func=_cmd_status)
+
+    p_backfill = sub.add_parser(
+        'backfill-metadata',
+        help='Report / repair observations saved without subject or summary (dry-run by default)',
+        description=(
+            'Derive subject / summary for stored observations that are missing them. '
+            'Dry-run by default: nothing is written unless --apply is passed. '
+            'Repairs are append-only: each fix is stored as a new observation that supersedes '
+            'the original, which stays on disk untouched. '
+            'agent_family is part of the observation key and is only reported, never repaired.'
+        ),
+    )
+    _attach_completer(p_backfill.add_argument('-p', '--project', default=''), _complete_project)
+    p_backfill.add_argument(
+        '--apply',
+        action='store_true',
+        default=False,
+        help='actually append the repaired observations (default: dry-run)',
+    )
+    p_backfill.add_argument('--limit', type=int, default=0, help='max observations to repair (0 = no cap)')
+    p_backfill.add_argument('--show', type=int, default=10, help='how many planned repairs to print (default: 10)')
+    p_backfill.set_defaults(func=_cmd_backfill_metadata)
 
     p_drain = sub.add_parser('drain', help='Drain pending_puts')
     p_drain.add_argument('--pending', action='store_true', help='replay queued rows in pending_puts.db')

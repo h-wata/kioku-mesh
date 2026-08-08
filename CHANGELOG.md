@@ -12,6 +12,40 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: `save_observation` (MCP) と `kioku-mesh save` (CLI) で
+  `subject` / `summary` を必須にした。空文字・空白のみに加え、`-` / `N/A` /
+  `TBD` 等のプレースホルダも欠落として拒否する。ADR-0028 Phase5 の
+  warn-only lint では効果が出ず、実データ 1058 件のうち subject 欠落 271 件・
+  summary 欠落 282 件 (両方欠落 232 件) が蓄積していたため、警告期間を置かず
+  即エラーとした。取り込み経路 (replication subscriber / index rebuild /
+  `Observation.from_json`) には適用しない — 旧バージョンの peer から届いた
+  payload を落とすとメッシュのデータが静かに欠落するため。CLI / MCP の
+  後方非互換変更である。deprecation 期間・互換オプション・移行用の
+  フォールバックは実装しない (単一ユーザー環境のため不要と判断)。
+  semver 契約 (ADR-0029) 上、**次リリースは major bump とする**。
+- **BREAKING**: MCP `save_observation` の `subject` / `summary` を既定値なしの
+  引数にし、公開 inputSchema の `required` に含めた。あわせて欠落・
+  プレースホルダ時の拒否を、通常の戻り値文字列ではなく MCP のツールエラー
+  (`is_error=true`) として返すようにした。docstring に REQUIRED と書いても
+  schema が optional のままでは MCP クライアントが引数を省略でき、拒否も
+  「成功」として読まれて再試行されなかったため。
+- ランチャ検出で異なる family のマーカーが同時に見つかった場合
+  (Claude Code から起動された Codex 等) は、テーブル順で先頭を採らず
+  `unknown` + 警告に倒すようにした。誤った family は無警告で信頼される分、
+  検索性が落ちるだけの `unknown` より危険なため。あわせて `CODEX_HOME` を
+  ランチャマーカーから外した — ユーザーが shell profile で export しうる
+  設定パスであり、Codex CLI は子プロセスに渡さないため、検出に使っても
+  誤ラベルにしかならない。`KIOKU_MESH_AGENT_FAMILY` の明示指定が最優先で
+  ある点は従来どおり。
+- `agent_family` / `client_id` の解決順を
+  `KIOKU_MESH_*` → ランチャ検出 (`CLAUDECODE` 等) → `unknown` に変更した。
+  `unknown` へ落ちる場合は「識別子の設定が壊れている」ことを警告として出す
+  (従来は無言で `unknown` になっていた)。v1.0.0 で削除した旧 `MESH_MEM_*`
+  は**読まない** — ADR-0029 の shim 削除方針は維持し、旧名が残っている
+  クライアント設定は設定側で修正する。
+
 ### Added
 
 - `kioku-mesh doctor` に identity チェックを追加した。MCP クライアント設定
@@ -48,6 +82,22 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   local index には `expires_at` 列を追加した (既存 DB は起動時に自動 migration、
   寿命を持たない既存行は無期限のまま)。
 
+- `kioku-mesh backfill-metadata` を追加した。subject / summary が欠落した
+  既存の観測を content から導出して補完する。既定は dry-run で、`--apply`
+  を渡したときだけ書き込む。補完は **append-only** で行う: 元の観測を
+  同じ `observation_id` / キーで上書きせず、導出した subject / summary を
+  持つ新しい観測を新 ID で保存し、`supersedes` で旧観測に紐づける
+  (ADR-0002 の immutable 契約 / ADR-0028 の append-only な SoT を維持する
+  ため)。旧観測はディスク上に残り、ADR-0021 の supersede フィルタで検索
+  結果から隠れる。identity (`agent_family` / `client_id` / `pc_id` /
+  `session_id`) と `created_at` は元の観測から引き継ぐため、補完によって
+  実行ホストへ帰属が移ったり recency の並びが変わったりしない。失敗は
+  観測単位で、途中で失敗しても成功済みの追記は残り exit code は非 0 に
+  なる。再実行時は既に superseder を持つ観測をスキップするため、重複した
+  supersede は作られない。`agent_family` は観測のキー
+  (`mem/obs/<family>/...`) の一部であり payload の書き換えでは修正できない
+  ため、件数の報告と設定修正の案内のみを行い、書き換えはしない。
+
 - 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
   全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
   現在のホストのものと誤認して引き継いでしまう問題があった。
@@ -80,6 +130,18 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   supersede の存在判定が superseder の `deleted_at` / `shadowed_at` しか
   見ておらず `expires_at` を見ていなかったため、期限切れ superseder は
   それ自身が結果から外れつつ旧観測も隠したままになっていた。
+
+- v1.0.0 で `MESH_MEM_*` 互換 shim を削除した際 (ADR-0029)、既存の MCP client
+  設定 (`~/.claude.json` / `~/.codex/config.toml`) が旧名のままだと、以後の
+  保存がすべて `agent_family=unknown` / `client_id=<user>@<host>` に**静かに**
+  落ちていた問題に対処した。実データでも `unknown` 445 件のうち 404 件が
+  v1.0.0 リリース月 (2026-07) に集中していた。旧名の読み直しはせず、
+  (1) `unknown` へ落ちる際に必ず警告を出す、(2) Claude Code の `CLAUDECODE`
+  等、ランチャが子プロセスへ渡すマーカーからの検出を追加する
+  (`IdentitySource.DETECTED`)、の 2 点で対応する。Codex CLI の MCP
+  subprocess にはマーカーが渡らないため、Codex 側は MCP 設定に
+  `KIOKU_MESH_AGENT_FAMILY` を明示する必要がある
+  (`kioku-mesh mcp install --client <client> --force` で更新できる)。
 - `search_memory` / `recall_context` が同一 `observation_id` を複数回返す
   ことがあったバグを修正した。根本原因は `LocalIndex.upsert()` が
   `obs_fts` (FTS5) へ `INSERT OR REPLACE` していたが、FTS5 の仮想テーブルは

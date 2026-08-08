@@ -114,6 +114,8 @@ def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None: 
                     'content': 'saved-through-subprocess',
                     'project': 'mcp-cli',
                     'tags': ['subproc'],
+                    'subject': 'subprocess roundtrip',
+                    'summary': 'published by the subprocess MCP server',
                 },
             )
             assert not result.is_error
@@ -226,6 +228,8 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
         [
             'save',
             'full-body-content-that-is-long',
+            '--subject',
+            'summary-priority',
             '--summary',
             'short-summary',
             '--references',
@@ -525,17 +529,19 @@ def test_cli_main_requests_background_drain_shutdown_on_exit(
 def test_cli_save_importance_out_of_range(capsys: pytest.CaptureFixture) -> None:
     """Importance outside 1-5 causes argparse error (exit code 2)."""
     with pytest.raises(SystemExit) as exc:
-        cli_main(['save', 'content', '--importance', '6'])
+        cli_main(['save', 'content', '--importance', '6', '--subject', 'clamp high', '--summary', 'over range'])
     assert exc.value.code == 2
 
     with pytest.raises(SystemExit) as exc2:
-        cli_main(['save', 'content', '--importance', '0'])
+        cli_main(['save', 'content', '--importance', '0', '--subject', 'clamp low', '--summary', 'under range'])
     assert exc2.value.code == 2
 
 
 def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
     """--source-files a.py,b.py is parsed into list[str]."""
-    rc = cli_main(['save', 'csv-test', '--source-files', 'a.py,b.py'])
+    rc = cli_main(
+        ['save', 'csv-test', '--source-files', 'a.py,b.py', '--subject', 'csv files', '--summary', 'csv parsed']
+    )
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
@@ -547,7 +553,9 @@ def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture)
 
 def test_cli_references_csv(single_zenohd: Any, capsys: pytest.CaptureFixture) -> None:  # noqa: ARG001
     """--references #73,PR#68 is parsed into list[str]."""
-    rc = cli_main(['save', 'refs-test', '--references', '#73,PR#68'])
+    rc = cli_main(
+        ['save', 'refs-test', '--references', '#73,PR#68', '--subject', 'csv refs', '--summary', 'csv parsed']
+    )
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
@@ -785,7 +793,15 @@ def test_save_lint_generic_noise_via_subprocess(single_zenohd: Any) -> None:  # 
         env = os.environ.copy()
         transport = StdioTransport(command=MESH_MEM_MCP, args=[], env=env)
         async with Client(transport) as client:
-            result = await client.call_tool('save_observation', {'content': 'done', 'project': 'lint-subproc'})
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'done',
+                    'project': 'lint-subproc',
+                    'subject': 'generic noise',
+                    'summary': 'content is a bare progress tick',
+                },
+            )
             assert not result.is_error
             return result.data
 
@@ -807,7 +823,15 @@ def test_save_lint_done_content_save_succeeds_via_subprocess(single_zenohd: Any)
         env = os.environ.copy()
         transport = StdioTransport(command=MESH_MEM_MCP, args=[], env=env)
         async with Client(transport) as client:
-            result = await client.call_tool('save_observation', {'content': 'done', 'project': 'lint-subproc-persist'})
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'done',
+                    'project': 'lint-subproc-persist',
+                    'subject': 'generic noise persists',
+                    'summary': 'warned content is still stored',
+                },
+            )
             assert not result.is_error
             return result.data
 
@@ -838,6 +862,8 @@ def test_save_lint_secret_pattern_via_subprocess(single_zenohd: Any) -> None:  #
                 {
                     'content': 'token=sk-ABCDEFGHIJKLMNOPQRSTU012345',  # pragma: allowlist secret
                     'project': 'lint-secret',
+                    'subject': 'secret pattern',
+                    'summary': 'content carries an API-key-shaped token',
                 },
             )
             assert not result.is_error
@@ -867,6 +893,7 @@ def test_save_lint_no_warning_normal_save_via_subprocess(single_zenohd: Any) -> 
                     'content': 'Root cause: zenoh session leaked when two callers shared the session concurrently.',
                     'memory_type': 'bug',
                     'subject': 'zenoh_session_leak',
+                    'summary': 'session shared across callers leaked',
                     'project': 'lint-no-warn',
                 },
             )

@@ -23,23 +23,42 @@ from datetime import datetime
 from datetime import timezone
 from enum import Enum
 import getpass
+import logging
 import os
 import pathlib
 import socket
 import sys
 import uuid
 
+log = logging.getLogger(__name__)
+
 _pc_id_cache: str | None = None
 _session_id_cache: str | None = None
+# One-shot warning latch. Identity is resolved on every Observation
+# construction, so the warning must not repeat per save.
+_unknown_family_warned: bool = False
+# Same latch, for the "several launchers claim this process" case.
+_ambiguous_family_warned: bool = False
+
+# Env markers a launcher sets on the processes it spawns, mapped to the family
+# they identify. Only launcher-owned names belong here: a marker a human might
+# export by hand would misclassify observations, which is worse than 'unknown'.
+# ``CODEX_HOME`` is deliberately absent — it is a user-configurable location
+# that people export from their shell profile, and Codex CLI does not pass it
+# to the MCP subprocesses it spawns anyway, so listing it could only ever
+# mislabel a non-Codex process.
+_LAUNCHER_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ('claude', ('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT')),
+    ('codex', ('CODEX_SANDBOX',)),
+    ('gemini', ('GEMINI_CLI', 'GEMINI_SANDBOX')),
+)
 
 
 class IdentitySource(str, Enum):
     """Where an identity value came from. Used for `kioku-mesh status` display."""
 
     ENV = 'env'
-    # Reserved for future launcher detection (Claude Code / Gemini CLI env
-    # markers). Not produced in v0.3 — leaving the enum value lets `status`
-    # output and tests stabilize their shape before detection is wired in.
+    # Launcher detection from well-known agent env markers (CLAUDECODE=1 etc.).
     DETECTED = 'detected'
     DEFAULT = 'default'
 
@@ -207,29 +226,104 @@ def _read_pc_id_file(p: pathlib.Path) -> str | None:
     return value or None
 
 
+def detect_agent_family() -> str:
+    """Return the agent family implied by launcher env markers, or ``''``.
+
+    Only markers a launcher sets for its own child processes are consulted,
+    so a family is never inferred from something a user might export by hand.
+    Claude Code passes ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT`` to the MCP
+    subprocesses it spawns; Codex CLI passes no marker at all (verified on the
+    running MCP servers), so a Codex MCP entry has to set
+    ``KIOKU_MESH_AGENT_FAMILY`` explicitly to be attributable.
+
+    Markers of **more than one** family can coexist: agents nest (Claude Code
+    launching Codex, or the reverse) and the child inherits the parent's
+    marker alongside its own. There is no ordering that identifies "the
+    current agent" in that case, so detection declines rather than picking
+    the first table entry — a confidently wrong family is trusted silently,
+    while ``'unknown'`` is visible in ``kioku-mesh status`` and searchable as
+    a defect. The ambiguity is logged once so the operator can set
+    ``KIOKU_MESH_AGENT_FAMILY`` explicitly.
+    """
+    detected = [family for family, markers in _LAUNCHER_MARKERS if _any_marker_set(markers)]
+    if len(detected) > 1:
+        _warn_ambiguous_family(detected)
+        return ''
+    return detected[0] if detected else ''
+
+
+def _any_marker_set(markers: tuple[str, ...]) -> bool:
+    """Report whether at least one of ``markers`` is present with a non-blank value."""
+    return any(os.environ.get(marker, '').strip() for marker in markers)
+
+
+def _warn_ambiguous_family(detected: list[str]) -> None:
+    """Warn once that nested launcher markers made detection ambiguous."""
+    global _ambiguous_family_warned
+    if _ambiguous_family_warned:
+        return
+    _ambiguous_family_warned = True
+    log.warning(
+        'launcher markers for multiple agent families are set (%s); the current agent cannot be '
+        "identified from them, so agent_family falls back to 'unknown'. Set KIOKU_MESH_AGENT_FAMILY "
+        'in this process (or in the MCP client entry that spawns it) to attribute these saves.',
+        ', '.join(sorted(detected)),
+    )
+
+
 def resolve_agent_family() -> tuple[str, IdentitySource]:
     """Resolve agent_family and where it came from.
 
-    v0.3 keeps ``agent_family`` as ``'unknown'`` when env-unset (#82). It's
-    the aggregation axis used by ``search --agent-family``, so the cost of
-    misclassifying observations (e.g. labeling everything ``claude``
-    because ``CLAUDECODE=1`` happens to leak into a non-Claude session) is
-    higher than the cost of an uninformative default. Launcher detection
-    is a follow-up that will produce :attr:`IdentitySource.DETECTED`.
+    Precedence:
+        1. ``KIOKU_MESH_AGENT_FAMILY`` — explicit current config
+        2. launcher detection (:func:`detect_agent_family`), which declines
+           when markers of several families are present at once
+        3. ``'unknown'`` — warns once, since it makes the entry unattributable
+
+    The pre-v1.0 env names are deliberately NOT consulted: ADR-0029 removed
+    them in v1.0.0 and that removal stands. A client config still exporting an
+    old name is a config to repair (``kioku-mesh mcp install --client <client>
+    --force``), not a case to keep supporting here.
+
+    Explicit config outranks detection: a value the operator wrote is a
+    stronger signal than an env marker that may have leaked in from a parent
+    process. ``'unknown'`` remains the last resort rather than a guess, but it
+    is no longer silent — an unattributable save means the identity config is
+    broken and the operator needs to know.
     """
     v = os.environ.get('KIOKU_MESH_AGENT_FAMILY', '').strip()
     if v:
         return v, IdentitySource.ENV
+    detected = detect_agent_family()
+    if detected:
+        return detected, IdentitySource.DETECTED
+    _warn_unresolved_family()
     return 'unknown', IdentitySource.DEFAULT
+
+
+def _warn_unresolved_family() -> None:
+    """Warn once that saves from this process will be unattributable."""
+    global _unknown_family_warned
+    if _unknown_family_warned:
+        return
+    _unknown_family_warned = True
+    log.warning(
+        'agent_family could not be resolved; observations saved from this process will be '
+        "recorded as 'unknown' and will not be findable via `search --agent-family`. "
+        'Set KIOKU_MESH_AGENT_FAMILY, or re-run `kioku-mesh mcp install --client <client> --force`.'
+    )
 
 
 def resolve_client_id() -> tuple[str, IdentitySource]:
     """Resolve client_id and where it came from.
 
-    Default is ``<user>@<host_short>`` — searchable by humans
-    (``--client-id alice@mbp``) and complementary to ``pc_id`` which already
-    plays the opaque-UUID role. Falls back to safe placeholders when user
-    or hostname can't be resolved (e.g. in minimal containers).
+    ``KIOKU_MESH_CLIENT_ID`` or the default; no launcher exposes a client name
+    to detect, and the pre-v1.0 env name is not read (see
+    :func:`resolve_agent_family`). Default is ``<user>@<host_short>`` —
+    searchable by humans (``--client-id alice@mbp``) and complementary to
+    ``pc_id`` which already plays the opaque-UUID role. Falls back to safe
+    placeholders when user or hostname can't be resolved (e.g. in minimal
+    containers).
     """
     v = os.environ.get('KIOKU_MESH_CLIENT_ID', '').strip()
     if v:
@@ -268,7 +362,9 @@ def get_session_id() -> str:
 
 
 def reset_caches() -> None:
-    """Clear cached pc_id / session_id. Test-only helper."""
-    global _pc_id_cache, _session_id_cache
+    """Clear cached pc_id / session_id and the one-shot warning latches. Test-only helper."""
+    global _pc_id_cache, _session_id_cache, _unknown_family_warned, _ambiguous_family_warned
     _pc_id_cache = None
     _session_id_cache = None
+    _unknown_family_warned = False
+    _ambiguous_family_warned = False

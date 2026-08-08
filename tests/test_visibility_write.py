@@ -241,19 +241,36 @@ def test_save_responses_show_effective_visibility(
     reset_backend()
 
     # Phase D: default save goes to mesh, not legacy
-    msg = mcp_server.save_observation(content='mesh default save', project='vis-resp')
+    msg = mcp_server.save_observation(
+        content='mesh default save',
+        project='vis-resp',
+        subject='mesh default',
+        summary='default visibility save',
+    )
     assert 'mesh' in msg
 
-    msg = mcp_server.save_observation(content='mesh save', project='vis-resp', visibility='mesh')
+    msg = mcp_server.save_observation(
+        content='mesh save',
+        project='vis-resp',
+        visibility='mesh',
+        subject='mesh scope',
+        summary='explicit mesh visibility save',
+    )
     assert 'mesh' in msg
 
     monkeypatch.setenv('KIOKU_MESH_USER_ID', 'hwata')
-    msg = mcp_server.save_observation(content='user save', project='vis-resp', visibility='user')
+    msg = mcp_server.save_observation(
+        content='user save',
+        project='vis-resp',
+        visibility='user',
+        subject='user scope',
+        summary='explicit user visibility save',
+    )
     assert 'user/hwata' in msg
 
     # Project file drives the CLI default; the response surfaces it.
     (tmp_path / '.kioku-mesh.yaml').write_text('default_visibility: team\nteam_id: kioku-mesh\n')
-    rc = cli_main(['save', 'team save', '-p', 'vis-resp'])
+    rc = cli_main(['save', 'team save', '-p', 'vis-resp', '--subject', 'team visibility', '--summary', 'team scope'])
     assert rc == 0
     out = capsys.readouterr().out
     assert '(visibility=team/kioku-mesh)' in out

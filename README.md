@@ -83,10 +83,12 @@ mesh.
 ## CLI
 
 ```bash
+# --subject and --summary are required
 kioku-mesh save "Decided to keep billing events append-only" \
   --memory-type decision \
   --importance 4 \
-  --subject billing
+  --subject billing \
+  --summary "billing events stay append-only"
 
 kioku-mesh search "billing events"
 kioku-mesh get-memory <observation_id>
@@ -100,7 +102,7 @@ Useful environment variables (the `MESH_MEM_` prefix was renamed to
 
 | Variable | Purpose |
 |---|---|
-| `KIOKU_MESH_AGENT_FAMILY` | Agent family, such as `claude` or `codex` |
+| `KIOKU_MESH_AGENT_FAMILY` | Agent family, such as `claude` or `codex`. Falls back to launcher detection (`CLAUDECODE` and friends; skipped when markers of several agents are present at once, as with nested launches), then to `unknown` with a warning |
 | `KIOKU_MESH_CLIENT_ID` | Client name, such as `claude-code` |
 | `KIOKU_MESH_SESSION_ID` | Optional stable session id |
 | `KIOKU_MESH_STATE_DIR` | State directory; defaults under the user data dir |

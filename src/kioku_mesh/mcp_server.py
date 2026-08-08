@@ -17,6 +17,7 @@ import socket
 import sys
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 
 from . import __version__
 from .backend import get_backend
@@ -30,6 +31,8 @@ from .core.identity import state_dir
 from .core.transport import get_session as _get_zenoh_session
 from .identity import get_pc_id
 from .identity import get_session_id
+from .memory.metadata import MetadataRequiredError
+from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
 from .messaging.local_index import ack_message as _ack_message_internal
@@ -146,9 +149,12 @@ durable rule, 4 = a decision reused across future sessions, 3 = a local,
 reusable lesson, 1-2 = barely worth saving at all (only after the SKIP rules
 still say to save it). A single inconclusive experiment's result is usually a
 3, not a 5. If most of your entries land at 4-5, you are over-rating them.
-Prefer adding ``subject`` + ``summary`` so search results stay scannable. Put
-the proper nouns a future searcher would actually type into ``subject`` /
-``summary``. FTS only matches the language an entry was saved in, so a
+``subject`` and ``summary`` are REQUIRED — a save that omits either, or that
+passes a placeholder like ``-`` / ``N/A`` / ``TBD``, is rejected and must be
+retried with real values. They are what search and recall render before
+falling back to the body, so an entry without them costs every future reader a
+full-content read. Put the proper nouns a future searcher would actually type
+into ``subject`` / ``summary``. FTS only matches the language an entry was saved in, so a
 project-specific term should be written in both English and Japanese (e.g.
 subject: "Dispatcher default model / opus 既定") — a Japanese-only entry is
 invisible to this mesh's English-speaking agents searching in English, and
@@ -268,12 +274,12 @@ def _warn_if_zenoh_connect_unreachable() -> None:
 @mcp.tool()
 def save_observation(
     content: str,
+    subject: str,
+    summary: str,
     project: str = '',
     tags: list[str] | None = None,
     memory_type: str = 'note',
     importance: int = 2,
-    subject: str = '',
-    summary: str = '',
     source_files: list[str] | None = None,
     references: list[str] | None = None,
     supersedes: list[str] | None = None,
@@ -305,13 +311,17 @@ def save_observation(
 
     Args:
         content: full-text body of the observation.
+        subject: REQUIRED (no default — part of the tool's input schema
+            ``required`` list). Short topic / symbol name (e.g. "get_position
+            latency"). Placeholder values ("-", "N/A", "TBD") are rejected
+            with a tool error.
+        summary: REQUIRED (no default). One-line abstract shown in search
+            results. Placeholder values are rejected with a tool error.
         project: optional project tag to scope the entry.
         tags: optional list of keyword tags.
         memory_type: category — one of "note", "decision", "bug", "pattern",
             "config", "summary" (default "note").
         importance: 1 (trivial) to 5 (critical), clamped automatically.
-        subject: short topic / symbol name (e.g. "get_position latency").
-        summary: one-line abstract shown in search results (fallback: content).
         source_files: related file paths for traceability.
         references: related PR / Issue / external identifiers.
         supersedes: list of observation_ids this entry replaces.
@@ -339,6 +349,14 @@ def save_observation(
     """
     if memory_type not in VALID_MEMORY_TYPES:
         return f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}. got: {memory_type!r}'
+    try:
+        validate_required_metadata(subject, summary)
+    except MetadataRequiredError as e:
+        # Raised, not returned: a returned string is is_error=false on the MCP
+        # wire, so a caller that dropped subject/summary would read the refusal
+        # as a successful save and never retry. ToolError carries the message
+        # through as a protocol-level tool error instead.
+        raise ToolError(str(e)) from e
     try:
         resolved_expires_at = resolve_expires_at(expires_at=expires_at, ttl_sec=ttl_sec)
     except ValueError as e:

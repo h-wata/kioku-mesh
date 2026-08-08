@@ -421,6 +421,8 @@ def test_save_observation_ttl_sec_hides_entry_once_lapsed(monkeypatch: pytest.Mo
 
     raw = save_observation(
         content='verification ping, delete after the report lands',
+        subject='verification ping',
+        summary='disposable ping saved through the MCP tool',
         project='expiry-mcp',
         ttl_sec=3600,
     )
@@ -439,7 +441,14 @@ def test_save_observation_without_ttl_stays_durable(monkeypatch: pytest.MonkeyPa
     backend = _local_backend(monkeypatch)
     from kioku_mesh.mcp_server import save_observation  # noqa: PLC0415
 
-    payload = json.loads(save_observation(content='durable note', project='expiry-mcp'))
+    payload = json.loads(
+        save_observation(
+            content='durable note',
+            subject='durable note',
+            summary='an entry saved without a lifetime',
+            project='expiry-mcp',
+        )
+    )
     assert 'expires_at' not in payload
     far_future = _iso(datetime.now(timezone.utc) + timedelta(days=3650))
     ids = [o.observation_id for o in backend._idx.search(project='expiry-mcp', now_iso=far_future)]  # noqa: SLF001
@@ -450,7 +459,12 @@ def test_save_observation_rejects_unparseable_expires_at(monkeypatch: pytest.Mon
     _local_backend(monkeypatch)
     from kioku_mesh.mcp_server import save_observation  # noqa: PLC0415
 
-    assert 'ISO 8601' in save_observation(content='bad ttl', expires_at='next tuesday')
+    assert 'ISO 8601' in save_observation(
+        content='bad ttl',
+        subject='bad ttl',
+        summary='an unparseable expires_at is refused',
+        expires_at='next tuesday',
+    )
 
 
 # -- PR #273 review B1/B2/B3 regressions ---------------------------------------

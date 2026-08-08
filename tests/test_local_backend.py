@@ -224,13 +224,15 @@ def test_cli_save_search_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
     reset_backend()
     from kioku_mesh.__main__ import main as cli_main
 
-    rc = cli_main(['save', 'hello from local cli', '-p', 'cliproj'])
+    rc = cli_main(
+        ['save', 'hello from local cli', '-p', 'cliproj', '--subject', 'local cli save', '--summary', 'via local']
+    )
     assert rc == 0
 
     rc = cli_main(['search', 'hello from local', '-p', 'cliproj'])
     assert rc == 0
     out = capsys.readouterr().out
-    assert 'hello from local cli' in out
+    assert 'via local' in out  # search renders the summary, not the raw content
 
 
 def test_cli_save_local_no_zenohd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,7 +248,7 @@ def test_cli_save_local_no_zenohd(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     from kioku_mesh.__main__ import main as cli_main
 
-    rc = cli_main(['save', 'no zenohd test'])
+    rc = cli_main(['save', 'no zenohd test', '--subject', 'no zenohd', '--summary', 'save works without zenohd'])
     assert rc == 0
 
 
