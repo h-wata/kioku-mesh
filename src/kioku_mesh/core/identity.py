@@ -34,9 +34,8 @@ log = logging.getLogger(__name__)
 
 _pc_id_cache: str | None = None
 _session_id_cache: str | None = None
-# One-shot warning latches. Identity is resolved on every Observation
-# construction, so warnings must not repeat per save.
-_legacy_env_warned: set[str] = set()
+# One-shot warning latch. Identity is resolved on every Observation
+# construction, so the warning must not repeat per save.
 _unknown_family_warned: bool = False
 
 # Env markers a launcher sets on the processes it spawns, mapped to the family
@@ -55,9 +54,6 @@ class IdentitySource(str, Enum):
     ENV = 'env'
     # Launcher detection from well-known agent env markers (CLAUDECODE=1 etc.).
     DETECTED = 'detected'
-    # Deprecated pre-v1.0 ``MESH_MEM_*`` env var, read as a last resort so
-    # MCP client configs written before the rename keep a real identity.
-    LEGACY_ENV = 'legacy-env'
     DEFAULT = 'default'
 
 
@@ -224,31 +220,6 @@ def _read_pc_id_file(p: pathlib.Path) -> str | None:
     return value or None
 
 
-def _legacy_env(name: str) -> str:
-    """Read a pre-v1.0 ``MESH_MEM_*`` env var, warning once when it is used.
-
-    ADR-0029 removed the ``MESH_MEM_*`` → ``KIOKU_MESH_*`` fallback in v1.0.0.
-    The removal turned out to silently degrade identity instead of surfacing
-    the stale config: MCP client entries written by pre-v1.0
-    ``kioku-mesh mcp install`` still carry ``MESH_MEM_AGENT_FAMILY`` /
-    ``MESH_MEM_CLIENT_ID``, so every save from those servers landed as
-    ``agent_family=unknown``. Reading the legacy name *with a deprecation
-    warning* keeps the data attributable while still telling the operator to
-    re-run ``kioku-mesh mcp install --force``.
-    """
-    value = os.environ.get(name, '').strip()
-    if value and name not in _legacy_env_warned:
-        _legacy_env_warned.add(name)
-        log.warning(
-            '%s is deprecated since v1.0.0 and is only read as a fallback. '
-            'Re-run `kioku-mesh mcp install --client <client> --force` (or set %s) '
-            'so identity stops depending on the removed name.',
-            name,
-            name.replace('MESH_MEM_', 'KIOKU_MESH_', 1),
-        )
-    return value
-
-
 def detect_agent_family() -> str:
     """Return the agent family implied by launcher env markers, or ``''``.
 
@@ -256,7 +227,8 @@ def detect_agent_family() -> str:
     so a family is never inferred from something a user might export by hand.
     Claude Code passes ``CLAUDECODE`` / ``CLAUDE_CODE_ENTRYPOINT`` to the MCP
     subprocesses it spawns; Codex CLI passes no marker at all (verified on the
-    running MCP servers), which is why the legacy-env read above still matters.
+    running MCP servers), so a Codex MCP entry has to set
+    ``KIOKU_MESH_AGENT_FAMILY`` explicitly to be attributable.
     """
     for family, markers in _LAUNCHER_MARKERS:
         if any(os.environ.get(marker, '').strip() for marker in markers):
@@ -269,9 +241,13 @@ def resolve_agent_family() -> tuple[str, IdentitySource]:
 
     Precedence:
         1. ``KIOKU_MESH_AGENT_FAMILY`` — explicit current config
-        2. ``MESH_MEM_AGENT_FAMILY`` — explicit but deprecated (warns once)
-        3. launcher detection (:func:`detect_agent_family`)
-        4. ``'unknown'`` — warns once, since it makes the entry unattributable
+        2. launcher detection (:func:`detect_agent_family`)
+        3. ``'unknown'`` — warns once, since it makes the entry unattributable
+
+    The pre-v1.0 env names are deliberately NOT consulted: ADR-0029 removed
+    them in v1.0.0 and that removal stands. A client config still exporting an
+    old name is a config to repair (``kioku-mesh mcp install --client <client>
+    --force``), not a case to keep supporting here.
 
     Explicit config outranks detection: a value the operator wrote is a
     stronger signal than an env marker that may have leaked in from a parent
@@ -282,9 +258,6 @@ def resolve_agent_family() -> tuple[str, IdentitySource]:
     v = os.environ.get('KIOKU_MESH_AGENT_FAMILY', '').strip()
     if v:
         return v, IdentitySource.ENV
-    legacy = _legacy_env('MESH_MEM_AGENT_FAMILY')
-    if legacy:
-        return legacy, IdentitySource.LEGACY_ENV
     detected = detect_agent_family()
     if detected:
         return detected, IdentitySource.DETECTED
@@ -308,8 +281,9 @@ def _warn_unresolved_family() -> None:
 def resolve_client_id() -> tuple[str, IdentitySource]:
     """Resolve client_id and where it came from.
 
-    Same precedence as :func:`resolve_agent_family` minus detection (no
-    launcher exposes a client name). Default is ``<user>@<host_short>`` —
+    ``KIOKU_MESH_CLIENT_ID`` or the default; no launcher exposes a client name
+    to detect, and the pre-v1.0 env name is not read (see
+    :func:`resolve_agent_family`). Default is ``<user>@<host_short>`` —
     searchable by humans (``--client-id alice@mbp``) and complementary to
     ``pc_id`` which already plays the opaque-UUID role. Falls back to safe
     placeholders when user or hostname can't be resolved (e.g. in minimal
@@ -318,9 +292,6 @@ def resolve_client_id() -> tuple[str, IdentitySource]:
     v = os.environ.get('KIOKU_MESH_CLIENT_ID', '').strip()
     if v:
         return v, IdentitySource.ENV
-    legacy = _legacy_env('MESH_MEM_CLIENT_ID')
-    if legacy:
-        return _sanitize_key_segment(legacy, 'client'), IdentitySource.LEGACY_ENV
     user = _sanitize_key_segment(_default_user_name(), 'user')
     host = _sanitize_key_segment(_default_short_hostname(), 'host')
     return f'{user}@{host}', IdentitySource.DEFAULT
@@ -355,9 +326,8 @@ def get_session_id() -> str:
 
 
 def reset_caches() -> None:
-    """Clear cached pc_id / session_id and the one-shot warning latches. Test-only helper."""
+    """Clear cached pc_id / session_id and the one-shot warning latch. Test-only helper."""
     global _pc_id_cache, _session_id_cache, _unknown_family_warned
     _pc_id_cache = None
     _session_id_cache = None
-    _legacy_env_warned.clear()
     _unknown_family_warned = False

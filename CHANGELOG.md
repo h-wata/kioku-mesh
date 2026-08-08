@@ -22,12 +22,15 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   即エラーとした。取り込み経路 (replication subscriber / index rebuild /
   `Observation.from_json`) には適用しない — 旧バージョンの peer から届いた
   payload を落とすとメッシュのデータが静かに欠落するため。CLI / MCP の
-  後方非互換変更であり、次リリースは semver 上 major bump または明示的な
-  移行措置が必要になる (ADR-0029)。
+  後方非互換変更である。deprecation 期間・互換オプション・移行用の
+  フォールバックは実装しない (単一ユーザー環境のため不要と判断)。
+  semver 契約 (ADR-0029) 上、**次リリースは major bump とする**。
 - `agent_family` / `client_id` の解決順を
-  `KIOKU_MESH_*` → 旧 `MESH_MEM_*` (非推奨警告つき) → ランチャ検出 →
-  `unknown` に変更した。`unknown` へ落ちる場合は「識別子の設定が壊れている」
-  ことを警告として出す。
+  `KIOKU_MESH_*` → ランチャ検出 (`CLAUDECODE` 等) → `unknown` に変更した。
+  `unknown` へ落ちる場合は「識別子の設定が壊れている」ことを警告として出す
+  (従来は無言で `unknown` になっていた)。v1.0.0 で削除した旧 `MESH_MEM_*`
+  は**読まない** — ADR-0029 の shim 削除方針は維持し、旧名が残っている
+  クライアント設定は設定側で修正する。
 
 ### Added
 
@@ -106,14 +109,15 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 - v1.0.0 で `MESH_MEM_*` 互換 shim を削除した際 (ADR-0029)、既存の MCP client
   設定 (`~/.claude.json` / `~/.codex/config.toml`) が旧名のままだと、以後の
-  保存がすべて `agent_family=unknown` / `client_id=<user>@<host>` に静かに
-  落ちていた問題を修正した。実データでも `unknown` 445 件のうち 404 件が
-  v1.0.0 リリース月 (2026-07) に集中していた。identity 解決に限り旧名を
-  読み直し、使用時には非推奨警告 (再インストールの案内) を必ず出す。
-  あわせて Claude Code の `CLAUDECODE` 等、ランチャが子プロセスへ渡す
-  マーカーからの検出を追加した (`IdentitySource.DETECTED`)。Codex CLI の
-  MCP subprocess にはマーカーが渡らないため、旧名の読み直しが唯一の
-  救済経路になる。
+  保存がすべて `agent_family=unknown` / `client_id=<user>@<host>` に**静かに**
+  落ちていた問題に対処した。実データでも `unknown` 445 件のうち 404 件が
+  v1.0.0 リリース月 (2026-07) に集中していた。旧名の読み直しはせず、
+  (1) `unknown` へ落ちる際に必ず警告を出す、(2) Claude Code の `CLAUDECODE`
+  等、ランチャが子プロセスへ渡すマーカーからの検出を追加する
+  (`IdentitySource.DETECTED`)、の 2 点で対応する。Codex CLI の MCP
+  subprocess にはマーカーが渡らないため、Codex 側は MCP 設定に
+  `KIOKU_MESH_AGENT_FAMILY` を明示する必要がある
+  (`kioku-mesh mcp install --client <client> --force` で更新できる)。
 - `search_memory` / `recall_context` が同一 `observation_id` を複数回返す
   ことがあったバグを修正した。根本原因は `LocalIndex.upsert()` が
   `obs_fts` (FTS5) へ `INSERT OR REPLACE` していたが、FTS5 の仮想テーブルは

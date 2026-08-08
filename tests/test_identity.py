@@ -192,10 +192,9 @@ def _clear_family_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The test process itself usually runs under an agent launcher (CLAUDECODE=1
     and friends), so the 'unknown' default is only observable once those
-    markers and the legacy env name are cleared.
+    markers are cleared.
     """
     for name in (
-        'MESH_MEM_AGENT_FAMILY',
         'CLAUDECODE',
         'CLAUDE_CODE_ENTRYPOINT',
         'CODEX_SANDBOX',

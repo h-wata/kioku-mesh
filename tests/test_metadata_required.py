@@ -85,27 +85,30 @@ def _clear_identity_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def test_legacy_mesh_mem_env_still_yields_a_real_family(monkeypatch: pytest.MonkeyPatch) -> None:
-    """MCP configs written before the v1.0 rename still carry MESH_MEM_*; they must not save as 'unknown'."""
+def test_legacy_mesh_mem_env_is_not_read(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """ADR-0029 removed MESH_MEM_* in v1.0.0 and that removal stands.
+
+    A client config still exporting the old name resolves to 'unknown' (with
+    the warning) so the operator repairs the config instead of the old name
+    quietly keeping a removed contract alive.
+    """
+    from kioku_mesh.core import identity
+
     _clear_identity_env(monkeypatch)
     monkeypatch.setenv('MESH_MEM_AGENT_FAMILY', 'codex')
-    value, source = resolve_agent_family()
-    assert value == 'codex'
-    assert source is IdentitySource.LEGACY_ENV
-
-
-def test_legacy_env_use_is_warned(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    _clear_identity_env(monkeypatch)
-    monkeypatch.setenv('MESH_MEM_AGENT_FAMILY', 'codex')
+    identity.reset_caches()
     with caplog.at_level('WARNING'):
-        resolve_agent_family()
-    assert any('MESH_MEM_AGENT_FAMILY' in record.getMessage() for record in caplog.records)
+        value, source = resolve_agent_family()
+    assert value == 'unknown'
+    assert source is IdentitySource.DEFAULT
+    assert any('agent_family' in record.getMessage() for record in caplog.records)
 
 
-def test_current_env_outranks_legacy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_current_env_outranks_launcher_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator-written value beats a marker that may have leaked from a parent process."""
     _clear_identity_env(monkeypatch)
     monkeypatch.setenv('KIOKU_MESH_AGENT_FAMILY', 'claude')
-    monkeypatch.setenv('MESH_MEM_AGENT_FAMILY', 'codex')
+    monkeypatch.setenv('CODEX_SANDBOX', '1')
     value, source = resolve_agent_family()
     assert value == 'claude'
     assert source is IdentitySource.ENV
@@ -120,13 +123,14 @@ def test_launcher_marker_detects_family(monkeypatch: pytest.MonkeyPatch) -> None
     assert source is IdentitySource.DETECTED
 
 
-def test_legacy_env_outranks_launcher_detection(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An operator-written value beats a marker that may have leaked from a parent process."""
+def test_launcher_detection_outranks_legacy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The legacy name carries no weight at all — detection is consulted as if it were unset."""
     _clear_identity_env(monkeypatch)
     monkeypatch.setenv('MESH_MEM_AGENT_FAMILY', 'codex')
     monkeypatch.setenv('CLAUDECODE', '1')
-    value, _ = resolve_agent_family()
-    assert value == 'codex'
+    value, source = resolve_agent_family()
+    assert value == 'claude'
+    assert source is IdentitySource.DETECTED
 
 
 def test_unresolved_family_warns(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -142,12 +146,13 @@ def test_unresolved_family_warns(monkeypatch: pytest.MonkeyPatch, caplog: pytest
     assert any('agent_family' in record.message for record in caplog.records)
 
 
-def test_legacy_client_id_env_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_legacy_client_id_env_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same removal as agent_family: the old name falls through to the <user>@<host> default."""
     _clear_identity_env(monkeypatch)
     monkeypatch.setenv('MESH_MEM_CLIENT_ID', 'codex-cli')
     value, source = resolve_client_id()
-    assert value == 'codex-cli'
-    assert source is IdentitySource.LEGACY_ENV
+    assert value != 'codex-cli'
+    assert source is IdentitySource.DEFAULT
 
 
 # -- MCP save_observation entry point ------------------------------------------
