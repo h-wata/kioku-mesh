@@ -656,16 +656,29 @@ class LocalIndex:
         # Issue #272: a disposable observation whose lifetime elapsed is stale
         # in exactly the same way a tombstoned one is, so it drops out of the
         # default result set even before gc physically tombstones it.
+        resolved_now = now_iso or _now_iso()
         if not include_expired:
             where.append(_NOT_EXPIRED_SQL)
-            params.append(now_iso or _now_iso())
+            params.append(resolved_now)
         # ADR-0021: existence-based supersedes filter. Superseder must be live
         # (not deleted AND not shadowed) to keep the superseded row hidden.
+        # "Live" has to mean the same thing on both sides of the filter: a
+        # lapsed superseder is already excluded from this result set, so
+        # letting it keep its predecessor hidden would drop both rows and
+        # return nothing for content the writer never marked disposable
+        # (PR #273 review B3). The clause is conditioned on
+        # ``include_expired`` so that an explicitly expiry-inclusive query
+        # still sees the superseder and keeps hiding what it replaced.
         if not include_superseded:
+            superseder_live = 'deleted_at IS NULL AND shadowed_at IS NULL'
+            if not include_expired:
+                superseder_live += f' AND {_NOT_EXPIRED_SQL}'
             where.append(
                 '(superseded_by IS NULL OR superseded_by NOT IN '
-                '(SELECT observation_id FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL))'
+                f'(SELECT observation_id FROM obs_index WHERE {superseder_live}))'
             )
+            if not include_expired:
+                params.append(resolved_now)
         if project:
             where.append('project = ?')
             params.append(project)
@@ -1015,10 +1028,14 @@ class LocalIndex:
         """Return ``(observation_id, project, expires_at, summary)`` for lapsed live rows.
 
         Issue #272: the discovery half of the disposable-record lifecycle.
-        Only rows that are still live (no tombstone) and carry a non-empty
-        ``expires_at`` at or before ``now_iso`` are returned — an already
-        tombstoned row is the tombstone sweep's business, not this one, and a
-        shadowed row may still be revived by ``gc_expired_shadows``.
+        Only rows that are still live (neither tombstoned nor shadowed) and
+        carry a non-empty ``expires_at`` at or before ``now_iso`` are returned
+        — an already tombstoned row is the tombstone sweep's business, not
+        this one, and a shadowed row may still be revived by
+        ``gc_expired_shadows``, so tombstoning it from here would settle that
+        question destructively before the re-verification that owns it runs
+        (PR #273 review B2). The buckets are therefore disjoint by
+        construction.
 
         The boundary matches :data:`_NOT_EXPIRED_SQL` exactly (``<=`` here is
         the complement of its ``>``), so every row this returns is already
@@ -1029,7 +1046,8 @@ class LocalIndex:
             return []
         sql = (
             'SELECT observation_id, project, expires_at, summary FROM obs_index '
-            "WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at != '' AND expires_at <= ?"
+            'WHERE deleted_at IS NULL AND shadowed_at IS NULL '
+            "AND expires_at IS NOT NULL AND expires_at != '' AND expires_at <= ?"
         )
         params: list[object] = [now_iso or _now_iso()]
         if project:

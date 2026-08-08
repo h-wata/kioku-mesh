@@ -451,3 +451,110 @@ def test_save_observation_rejects_unparseable_expires_at(monkeypatch: pytest.Mon
     from kioku_mesh.mcp_server import save_observation  # noqa: PLC0415
 
     assert 'ISO 8601' in save_observation(content='bad ttl', expires_at='next tuesday')
+
+
+# -- PR #273 review B1/B2/B3 regressions ---------------------------------------
+
+
+def test_expired_superseder_stops_hiding_the_durable_original(idx: LocalIndex) -> None:
+    """[B3] A lapsed superseder must not keep a durable predecessor invisible.
+
+    The supersedes filter hides ``old`` only while its superseder is
+    *visible*. Once the superseder expires it is gone from every default
+    result set, so continuing to hide ``old`` erases both rows at once —
+    the default search returns nothing at all for content the user never
+    marked disposable.
+    """
+    old = _mk('durable original', memory_type='decision')
+    idx.upsert(old)
+    newer = _mk('disposable correction', expires_at=PAST, supersedes=[old.observation_id])
+    idx.upsert(newer)
+    assert idx.inspect_by_id(old.observation_id)['superseded_by'] == newer.observation_id
+
+    ids = [o.observation_id for o in idx.search(project='expiry-demo')]
+
+    assert newer.observation_id not in ids, 'the lapsed superseder itself stays hidden'
+    assert ids == [old.observation_id], 'the durable original must come back once its superseder lapses'
+
+
+def test_shadowed_expired_row_is_not_a_ttl_candidate(idx: LocalIndex) -> None:
+    """[B2] The TTL and shadow buckets must be disjoint.
+
+    A shadowed row is a *guess* that the row vanished upstream, and
+    ``gc_expired_shadows`` may still revive it. Tombstoning it from the TTL
+    bucket first would settle that question destructively, before the
+    re-verification that owns it ever runs.
+    """
+    shadowed = _mk('shadowed and lapsed', expires_at=PAST)
+    idx.upsert(shadowed)
+    idx.mark_shadowed_missing(shadowed.observation_id, _iso(NOW - timedelta(days=60)))
+
+    ttl_ids = [row[0] for row in idx.list_expired_ttl_obs(now_iso=_iso(NOW))]
+    shadow_ids = idx.list_expired_shadowed_obs(_iso(NOW - timedelta(days=1)))
+
+    assert shadowed.observation_id not in ttl_ids, 'a shadowed row is the shadow sweep to resolve, not the TTL sweep'
+    assert shadowed.observation_id in shadow_ids
+    candidates = collect_gc_candidates(idx, retention_days=30, now=NOW)
+    buckets = {
+        'ttl': {c.observation_id for c in candidates.expired_ttl},
+        'shadow': {c.observation_id for c in candidates.expired_shadows},
+    }
+    assert not (buckets['ttl'] & buckets['shadow']), 'candidate buckets must be mutually exclusive'
+
+
+def test_gc_observations_execute_deletes_expired_tombstones(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The physical-delete bucket is actually swept by ``--execute``.
+
+    The TTL bucket had CLI coverage; the tombstone bucket did not, so a
+    regression that silently skipped it would have stayed green.
+    """
+    backend = _local_backend(monkeypatch)
+    obs = _mk('already tombstoned', memory_type='note')
+    backend.put_observation(obs)
+    backend.put_tombstone(obs, reason='test')
+
+    rc = cli_main(['gc-observations', '--retention-days', '0', '--execute', '--yes'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert 'reason=expired-tombstone' in out
+    assert 'physically deleted 1 tombstones' in out
+    assert _inspect(obs.observation_id) is None
+
+
+def test_gc_observations_execute_only_touches_the_previewed_set(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[B1] ``--execute`` must delete exactly what the confirmation prompt showed.
+
+    An orphan tombstone (raw row present, index row gone) is invisible to
+    the candidate listing by design — ``kioku-mesh gc`` owns those. If
+    execute re-derives its own global sweep instead of acting on the
+    reviewed snapshot, the user confirms one deletion and gets two.
+    """
+    backend = _local_backend(monkeypatch)
+    listed = _mk('tombstoned and listed', memory_type='note')
+    orphan = _mk('tombstoned, index row gone', memory_type='note')
+    for obs in (listed, orphan):
+        backend.put_observation(obs)
+        backend.put_tombstone(obs, reason='test')
+    # Make ``orphan`` an orphan: the raw tombstone outlives both its obs
+    # payload and its index row, so no candidate listing can surface it.
+    backend._raw_store.delete_obs(orphan.observation_id)  # noqa: SLF001
+    backend._idx.physical_delete(orphan.observation_id)  # noqa: SLF001
+
+    rc = cli_main(['gc-observations', '--retention-days', '0', '--execute', '--yes'])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert 'total candidates: 1' in out
+    assert 'physically deleted 1 tombstones' in out, 'must not exceed the confirmed candidate set'
+    from kioku_mesh.backend import get_backend  # noqa: PLC0415
+
+    raw = get_backend()._raw_store  # noqa: SLF001
+    assert not raw.obs_exists(listed.observation_id), 'the previewed tombstone is swept'
+    assert raw.obs_exists(orphan.observation_id), 'the orphan is left for `kioku-mesh gc`'

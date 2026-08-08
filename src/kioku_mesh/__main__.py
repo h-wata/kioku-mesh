@@ -665,8 +665,22 @@ def _cmd_gc_observations(args: argparse.Namespace) -> int:
     # The physical-delete buckets are exactly what the existing retention
     # sweep already implements; re-deriving the deletes here would fork the
     # cross-namespace safety net in gc_expired_tombstones / gc_expired_shadows.
-    purged_tomb = backend.gc_tombstones(retention_days=args.retention_days, project=args.project or '')
-    purged_shadow, revived_shadow = backend.gc_shadows(retention_days=args.retention_days, project=args.project or '')
+    # They are handed the id snapshot the prompt above just showed, so the
+    # sweep cannot reach past what the user confirmed — orphan tombstones
+    # (absent from the index, hence never listed) stay with ``kioku-mesh gc``,
+    # exactly as the candidate listing documents (PR #273 review B1).
+    tomb_ids = {c.observation_id for c in candidates.expired_tombstones}
+    shadow_ids = {c.observation_id for c in candidates.expired_shadows}
+    purged_tomb = backend.gc_tombstones(
+        retention_days=args.retention_days,
+        project=args.project or '',
+        only_ids=tomb_ids,
+    )
+    purged_shadow, revived_shadow = backend.gc_shadows(
+        retention_days=args.retention_days,
+        project=args.project or '',
+        only_ids=shadow_ids,
+    )
     print(
         f'tombstoned {tombstoned} expired-TTL observations; '
         f'physically deleted {purged_tomb} tombstones / {purged_shadow} shadows '
