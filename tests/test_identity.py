@@ -187,8 +187,28 @@ def test_agent_family_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
     assert source is IdentitySource.ENV
 
 
+def _clear_family_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove every source resolve_agent_family() consults below KIOKU_MESH_AGENT_FAMILY.
+
+    The test process itself usually runs under an agent launcher (CLAUDECODE=1
+    and friends), so the 'unknown' default is only observable once those
+    markers and the legacy env name are cleared.
+    """
+    for name in (
+        'MESH_MEM_AGENT_FAMILY',
+        'CLAUDECODE',
+        'CLAUDE_CODE_ENTRYPOINT',
+        'CODEX_SANDBOX',
+        'CODEX_HOME',
+        'GEMINI_CLI',
+        'GEMINI_SANDBOX',
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_agent_family_default_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv('KIOKU_MESH_AGENT_FAMILY', raising=False)
+    _clear_family_fallbacks(monkeypatch)
     value, source = resolve_agent_family()
     assert value == 'unknown'
     assert source is IdentitySource.DEFAULT
@@ -197,6 +217,7 @@ def test_agent_family_default_is_unknown(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_agent_family_treats_empty_env_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """Empty KIOKU_MESH_AGENT_FAMILY falls through to the default rather than producing an empty key segment."""
     monkeypatch.setenv('KIOKU_MESH_AGENT_FAMILY', '   ')
+    _clear_family_fallbacks(monkeypatch)
     value, source = resolve_agent_family()
     assert value == 'unknown'
     assert source is IdentitySource.DEFAULT

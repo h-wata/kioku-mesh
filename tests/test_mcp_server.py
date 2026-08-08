@@ -121,7 +121,13 @@ def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'save_observation',
-                {'content': 'hello from mcp smoke', 'project': 'mcp-smoke', 'tags': ['a', 'b']},
+                {
+                    'content': 'hello from mcp smoke',
+                    'project': 'mcp-smoke',
+                    'tags': ['a', 'b'],
+                    'subject': 'mcp smoke',
+                    'summary': 'save reaches the store through the MCP tool',
+                },
             )
             assert not result.is_error
             return result.data
@@ -461,6 +467,8 @@ def test_save_observation_rejects_invalid_memory_type(single_zenohd: Any) -> Non
                     'content': 'should not persist',
                     'project': 'mcp-mt-validate',
                     'memory_type': 'feature',  # invalid
+                    'subject': 'invalid memory type',
+                    'summary': 'must be rejected before persistence',
                 },
             )
             return result.data
@@ -479,7 +487,12 @@ def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: 
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'save_observation',
-                {'content': 'backward compat obs', 'project': 'mcp-compat'},
+                {
+                    'content': 'backward compat obs',
+                    'project': 'mcp-compat',
+                    'subject': 'optional field defaults',
+                    'summary': 'memory_type and importance keep their defaults',
+                },
             )
             assert not result.is_error
             return result.data
@@ -492,8 +505,8 @@ def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: 
     assert found is not None
     assert found.memory_type == 'note'
     assert found.importance == 2
-    assert found.subject == ''
-    assert found.summary == ''
+    assert found.subject == 'optional field defaults'
+    assert found.summary == 'memory_type and importance keep their defaults'
 
 
 def test_search_memory_summary_priority(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -1184,6 +1197,7 @@ def test_save_lint_warnings_field_present(monkeypatch: pytest.MonkeyPatch) -> No
                     'content': 'A detailed analysis of the write path with mutex lock added',
                     'memory_type': 'bug',
                     'subject': 'write_path_race',
+                    'summary': 'mutex added around the write path',
                 },
             )
             return result.data
@@ -1204,7 +1218,10 @@ def test_save_lint_generic_noise_warning(monkeypatch: pytest.MonkeyPatch) -> Non
 
     async def _go() -> str:
         async with Client(mcp) as client:
-            result = await client.call_tool('save_observation', {'content': 'tests pass'})
+            result = await client.call_tool(
+                'save_observation',
+                {'content': 'tests pass', 'subject': 'generic noise', 'summary': 'bare status tick'},
+            )
             return result.data
 
     msg = _run(_go())
@@ -1223,7 +1240,11 @@ def test_save_lint_secret_pattern_warning(monkeypatch: pytest.MonkeyPatch) -> No
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'save_observation',
-                {'content': 'config uses sk-ABCDEFGHIJKLMNOPQRST for auth'},  # pragma: allowlist secret
+                {
+                    'content': 'config uses sk-ABCDEFGHIJKLMNOPQRST for auth',  # pragma: allowlist secret
+                    'subject': 'secret pattern',
+                    'summary': 'config sample embeds an API-key-shaped token',
+                },
             )
             return result.data
 
@@ -1233,10 +1254,13 @@ def test_save_lint_secret_pattern_warning(monkeypatch: pytest.MonkeyPatch) -> No
     assert 'SECRET_PATTERN' in codes
 
 
-def test_save_lint_missing_subject_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Decision memory_type without subject triggers MISSING_SUBJECT warning."""
-    import json as _json
+def test_save_rejects_missing_subject(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty subject is rejected outright, not merely lint-warned.
 
+    Supersedes the MISSING_SUBJECT warn-only assertion: the lint rule still
+    exists in save_lint.py, but the MCP boundary now rejects such a save
+    before linting, so that warning is unreachable from this path.
+    """
     _mock_backend(monkeypatch)
 
     async def _go() -> str:
@@ -1248,9 +1272,8 @@ def test_save_lint_missing_subject_warning(monkeypatch: pytest.MonkeyPatch) -> N
             return result.data
 
     msg = _run(_go())
-    data = _json.loads(msg)
-    codes = [w['code'] for w in data['warnings']]
-    assert 'MISSING_SUBJECT' in codes
+    assert 'subject' in msg
+    assert 'required' in msg
 
 
 def test_save_lint_no_warning_for_normal_content(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1267,6 +1290,7 @@ def test_save_lint_no_warning_for_normal_content(monkeypatch: pytest.MonkeyPatch
                     'content': 'Root cause: race condition in flush path when two sessions write simultaneously.',
                     'memory_type': 'bug',
                     'subject': 'flush_race_condition',
+                    'summary': 'concurrent flushes raced on the same buffer',
                 },
             )
             return result.data
@@ -1284,7 +1308,12 @@ def test_save_lint_warn_only_save_succeeds(single_zenohd: Any) -> None:  # noqa:
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'save_observation',
-                {'content': 'done', 'project': 'lint-warn-only'},
+                {
+                    'content': 'done',
+                    'project': 'lint-warn-only',
+                    'subject': 'warn only',
+                    'summary': 'lint warnings do not block the save',
+                },
             )
             assert not result.is_error
             return result.data

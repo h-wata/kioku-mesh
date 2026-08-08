@@ -243,7 +243,7 @@ def test_c2_cmd_save_swallows_renderer_error(monkeypatch: pytest.MonkeyPatch) ->
         memory_type='decision',
         importance=3,
         subject='db',
-        summary='',
+        summary='PostgreSQL chosen over MySQL',
     )
 
     mock_backend = MagicMock()

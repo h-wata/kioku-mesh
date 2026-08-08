@@ -35,8 +35,8 @@ Observation は保存されるメモリ本体で、原則 immutable です。内
 | フィールド | 型 | 既定値 / 仕様 |
 | --- | --- | --- |
 | `content` | `str` | 本文。必須。 |
-| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY`。未設定時は `unknown`。 |
-| `client_id` | `str` | `KIOKU_MESH_CLIENT_ID`。未設定時は `unknown`。 |
+| `agent_family` | `str` | `KIOKU_MESH_AGENT_FAMILY` → 旧 `MESH_MEM_AGENT_FAMILY` (非推奨警告) → ランチャ検出 → `unknown`。 |
+| `client_id` | `str` | `KIOKU_MESH_CLIENT_ID` → 旧 `MESH_MEM_CLIENT_ID` (非推奨警告) → `<user>@<host>`。 |
 | `pc_id` | `str` | ホスト単位の永続 UUID。 |
 | `session_id` | `str` | プロセス単位 ID。 |
 | `project` | `str` | 任意のプロジェクト名。 |
@@ -45,8 +45,8 @@ Observation は保存されるメモリ本体で、原則 immutable です。内
 | `created_at` | `str` | UTC の `YYYY-MM-DDTHH:MM:SS.ffffffZ`。 |
 | `memory_type` | `str` | `note` / `decision` / `bug` / `pattern` / `config` / `summary`。 |
 | `importance` | `int` | 1-5。モデル生成時は範囲外を clamp、CLI は argparse で 1-5 のみ許可。既定値 2。 |
-| `subject` | `str` | 短いトピック名。 |
-| `summary` | `str` | 検索結果で本文より優先表示される 1 行要約。 |
+| `subject` | `str` | **必須 (CLI / MCP の保存経路)**。 短いトピック名。 |
+| `summary` | `str` | **必須 (CLI / MCP の保存経路)**。検索結果で本文より優先表示される 1 行要約。 |
 | `source_files` | `list[str]` | 関連ファイルパス。 |
 | `references` | `list[str]` | 関連する PR / Issue / 外部参照識別子。 |
 | `supersedes` | `list[str]` | 置き換え元 Observation ID。 |
@@ -93,8 +93,8 @@ Identity は保存時にサーバ側で解決されます。MCP の `save_observ
 
 | 識別子 | 解決方法 |
 | --- | --- |
-| `agent_family` | `KIOKU_MESH_AGENT_FAMILY`。未設定時 `unknown`。 |
-| `client_id` | `KIOKU_MESH_CLIENT_ID`。未設定時 `unknown`。 |
+| `agent_family` | `KIOKU_MESH_AGENT_FAMILY` → 旧 `MESH_MEM_AGENT_FAMILY` (非推奨警告つき) → ランチャ検出 (`CLAUDECODE` 等) → `unknown` (警告)。 |
+| `client_id` | `KIOKU_MESH_CLIENT_ID` → 旧 `MESH_MEM_CLIENT_ID` (非推奨警告つき) → `<user>@<host>`。 |
 | `pc_id` | `KIOKU_MESH_STATE_DIR/pc_id` に永続化。なければ UUID4 を生成。 |
 | `session_id` | `KIOKU_MESH_SESSION_ID`。未設定時は `{YYYYMMDDTHHMMSSZ}-{uuid8}` を生成し、プロセス内でキャッシュ。 |
 
@@ -243,11 +243,14 @@ Backend mode の解決順序:
   - `--project`, `--tags`
   - `--memory-type`: `note` / `decision` / `bug` / `pattern` / `config` / `summary`
   - `--importance`: 1-5
-  - `--subject`
-  - `--summary`
+  - `--subject`: 必須。空文字・`-` 等のプレースホルダは拒否。
+  - `--summary`: 必須。同上。
   - `--source-files`: カンマ区切り
   - `--references`: カンマ区切り
   - `--supersedes`: カンマ区切り
+- `backfill-metadata`
+  - `--project`, `--limit`, `--show`
+  - `--apply`: 既定は dry-run。渡したときだけ既存 Observation を書き換える。
 - `search [QUERY]`
   - `--agent-family`, `--client-id`, `--pc-id`, `--session-id`
   - `--project`

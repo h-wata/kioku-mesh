@@ -12,6 +12,23 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING**: `save_observation` (MCP) と `kioku-mesh save` (CLI) で
+  `subject` / `summary` を必須にした。空文字・空白のみに加え、`-` / `N/A` /
+  `TBD` 等のプレースホルダも欠落として拒否する。ADR-0028 Phase5 の
+  warn-only lint では効果が出ず、実データ 1058 件のうち subject 欠落 271 件・
+  summary 欠落 282 件 (両方欠落 232 件) が蓄積していたため、警告期間を置かず
+  即エラーとした。取り込み経路 (replication subscriber / index rebuild /
+  `Observation.from_json`) には適用しない — 旧バージョンの peer から届いた
+  payload を落とすとメッシュのデータが静かに欠落するため。CLI / MCP の
+  後方非互換変更であり、次リリースは semver 上 major bump または明示的な
+  移行措置が必要になる (ADR-0029)。
+- `agent_family` / `client_id` の解決順を
+  `KIOKU_MESH_*` → 旧 `MESH_MEM_*` (非推奨警告つき) → ランチャ検出 →
+  `unknown` に変更した。`unknown` へ落ちる場合は「識別子の設定が壊れている」
+  ことを警告として出す。
+
 ### Added
 
 - `kioku-mesh doctor` に identity チェックを追加した。MCP クライアント設定
@@ -48,6 +65,12 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   local index には `expires_at` 列を追加した (既存 DB は起動時に自動 migration、
   寿命を持たない既存行は無期限のまま)。
 
+- `kioku-mesh backfill-metadata` を追加した。subject / summary が欠落した
+  既存の観測を content から導出して補完する。既定は dry-run で、`--apply`
+  を渡したときだけ書き込む。`agent_family` は観測のキー
+  (`mem/obs/<family>/...`) の一部であり payload の書き換えでは修正できない
+  ため、件数の報告と設定修正の案内のみを行い、書き換えはしない。
+
 - 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
   全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
   現在のホストのものと誤認して引き継いでしまう問題があった。
@@ -80,6 +103,17 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   supersede の存在判定が superseder の `deleted_at` / `shadowed_at` しか
   見ておらず `expires_at` を見ていなかったため、期限切れ superseder は
   それ自身が結果から外れつつ旧観測も隠したままになっていた。
+
+- v1.0.0 で `MESH_MEM_*` 互換 shim を削除した際 (ADR-0029)、既存の MCP client
+  設定 (`~/.claude.json` / `~/.codex/config.toml`) が旧名のままだと、以後の
+  保存がすべて `agent_family=unknown` / `client_id=<user>@<host>` に静かに
+  落ちていた問題を修正した。実データでも `unknown` 445 件のうち 404 件が
+  v1.0.0 リリース月 (2026-07) に集中していた。identity 解決に限り旧名を
+  読み直し、使用時には非推奨警告 (再インストールの案内) を必ず出す。
+  あわせて Claude Code の `CLAUDECODE` 等、ランチャが子プロセスへ渡す
+  マーカーからの検出を追加した (`IdentitySource.DETECTED`)。Codex CLI の
+  MCP subprocess にはマーカーが渡らないため、旧名の読み直しが唯一の
+  救済経路になる。
 - `search_memory` / `recall_context` が同一 `observation_id` を複数回返す
   ことがあったバグを修正した。根本原因は `LocalIndex.upsert()` が
   `obs_fts` (FTS5) へ `INSERT OR REPLACE` していたが、FTS5 の仮想テーブルは

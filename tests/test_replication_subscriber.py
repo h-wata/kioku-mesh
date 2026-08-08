@@ -555,7 +555,9 @@ def test_cli_main_sets_rebuild_default_false(
     seed.upsert(_mk_obs('seed', project='rebuild-policy'))
     seed.close()
 
-    rc = cli_main(['save', 'cli-rebuild-skip-test', '-p', 'rebuild-policy'])
+    rc = cli_main(
+        ['save', 'cli-rebuild-skip-test', '-p', 'rebuild-policy', '--subject', 'rebuild skip', '--summary', 'skip']
+    )
     assert rc == 0
     assert not rebuild_calls, 'CLI default must skip rebuild_from_zenoh on a populated index'
 
@@ -579,7 +581,19 @@ def test_cli_main_with_rebuild_flag_runs_rebuild(
     monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
     monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
-    rc = cli_main(['--rebuild', 'save', 'cli-rebuild-on-test', '-p', 'rebuild-policy'])
+    rc = cli_main(
+        [
+            '--rebuild',
+            'save',
+            'cli-rebuild-on-test',
+            '-p',
+            'rebuild-policy',
+            '--subject',
+            'rebuild on',
+            '--summary',
+            'rebuild flag runs rebuild',
+        ]
+    )
     assert rc == 0
     assert rebuild_calls, '--rebuild must trigger rebuild_from_zenoh on first init'
 
@@ -609,7 +623,19 @@ def test_cli_rebuild_flag_overrides_skip_env(
     monkeypatch.setenv('KIOKU_MESH_SKIP_REBUILD', '1')
     monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
 
-    rc = cli_main(['--rebuild', 'save', 'cli-rebuild-vs-skip', '-p', 'rebuild-policy'])
+    rc = cli_main(
+        [
+            '--rebuild',
+            'save',
+            'cli-rebuild-vs-skip',
+            '-p',
+            'rebuild-policy',
+            '--subject',
+            'flag vs skip',
+            '--summary',
+            'flag beats skip env',
+        ]
+    )
     assert rc == 0
     assert rebuild_calls, '--rebuild must outrank KIOKU_MESH_SKIP_REBUILD=1 (codex P2)'
 
