@@ -88,6 +88,44 @@ def test_derive_summary_does_not_split_inside_dotted_tokens(content: str, token:
     assert '次の文' not in summary
 
 
+@pytest.mark.parametrize(
+    ('content', 'expected_tail'),
+    [
+        # The four live observations that a backfill dry-run would have cut at
+        # the enumeration marker, leaving a summary ending in ': 1.'.
+        # 5a82c4a31b1944836a2540975fb3ee24
+        (
+            'cube-webapp の落とし穴 3 件: 1. Node v22.14.0 では TypeScript type stripping が既定 OFF。',
+            'Node v22.14.0',
+        ),
+        # 142e3e911fe04da8913e12e1525e43a5
+        (
+            'robot_self_filter workspace build/dev notes: 1. Multiple worktrees + main checkout '
+            'all declare the same package. 2. Use a single overlay.',
+            'Multiple worktrees',
+        ),
+        # 16606fc3a9564d27b2b88f8be19965e5
+        (
+            'v0.8.0 リリース後の migration plan: 1. W1 TASK-241 release-apply 完了待ち。',
+            'W1 TASK-241',
+        ),
+        # b7c4dffc2e0347ae8daf52c15424022c
+        (
+            'Phase 1 pose refine 設計の根拠: 1. 補正粒度は per-timestamp (rig) がデフォルト。',
+            '補正粒度',
+        ),
+        # Same defect at the very start of the content, and with a two-digit marker.
+        ('1. First item ends here. 2. Second item.', 'First item'),
+        ('手順は以下: 12. 最後の項目を確認する。', '最後の項目'),
+    ],
+)
+def test_derive_summary_does_not_split_at_a_numbered_list_marker(content: str, expected_tail: str) -> None:
+    """A standalone '1.' is an enumeration marker — splitting there yields a summary ending in ': 1.'."""
+    summary = derive_summary(content)
+    assert expected_tail in summary
+    assert not summary.endswith(': 1.')
+
+
 def test_derive_summary_still_splits_english_sentences() -> None:
     assert derive_summary('This is a sentence. Next one.') == 'This is a sentence.'
 

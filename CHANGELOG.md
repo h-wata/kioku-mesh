@@ -18,10 +18,19 @@ ADR-0030.
 
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
-  identifiers, decimals). An ASCII `.` / `!` / `?` now ends a sentence only when
-  a space or the end of the text follows it, and a period closing a one-letter
-  token (`e.g.`) is treated as an abbreviation marker. A dry-run over the live
-  store went from 58/283 (20.5%) truncated summaries to 0.
+  identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
+  v22 …` used to derive the summary `… 落とし穴 3 件: 1.`). An ASCII `.` / `!` /
+  `?` now ends a sentence only when a space or the end of the text follows it,
+  and a period closing a one-letter token (`e.g.`) or a digits-only token
+  (`1.`, `12.`) is treated as a marker rather than a sentence end.
+
+  Measured by auditing **every** dry-run target whose derived summary ends in an
+  ASCII terminator while the content still has text after it — deliberately not
+  the narrower "the next character is alphanumeric" check, which by construction
+  cannot see a mis-split whose period is followed by a space. Over the 321
+  repairable observations in the live store that audit surfaces 6 candidates
+  before the fix (5 real mis-splits, 1 correct sentence end) and 2 after
+  (0 mis-splits — both are correct first sentences whose content continues).
 
 ### Changed
 

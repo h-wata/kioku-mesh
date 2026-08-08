@@ -55,6 +55,11 @@ _ASCII_TERMINATORS = '.!?'
 # '.' closing a one-letter token ('e.g.', 'i.e.', 'U.S.') is an abbreviation
 # marker, not a sentence end, even though a space follows it.
 _SINGLE_LETTER_ABBREV = re.compile(r'(?:^|[^A-Za-z0-9])[A-Za-z]\.$')
+# A standalone number followed by '.' ('落とし穴 3 件: 1. Node v22 …') is an
+# enumeration marker, not a sentence end — splitting there leaves a summary that
+# ends in ': 1.' and says nothing. The token has to be digits only, so a real
+# sentence end after a version ('Bumped to v0.8.0.') still splits.
+_DIGIT_LIST_MARKER = re.compile(r'(?:^|\s)\d{1,3}\.$')
 
 SUBJECT_MAX = 80
 SUMMARY_MAX = 200
@@ -130,8 +135,12 @@ def _first_sentence(text: str) -> str:
     Whitespace is already collapsed by the caller, so "followed by a space or
     by the end of the string" is the whole test that separates a sentence-ending
     ASCII period from the dots inside ``v0.8.0`` / ``watch.sh`` / ``192.168.3.44``.
-    Deliberately a heuristic and not a sentence tokenizer: this only has to keep
-    a backfilled one-line summary readable.
+    Two shapes survive that test without ending a sentence and are excluded
+    explicitly: a one-letter abbreviation (``e.g.``) and a numbered-list marker
+    (``…: 1. Node v22 …``). Deliberately a heuristic and not a sentence
+    tokenizer: this only has to keep a backfilled one-line summary readable, so
+    it errs toward carrying too much text (the summary is truncated anyway)
+    rather than toward cutting a summary down to ``…: 1.``.
     """
     for index, char in enumerate(text):
         if char in _FULLWIDTH_TERMINATORS:
@@ -142,6 +151,8 @@ def _first_sentence(text: str) -> str:
         if following and not following.isspace():
             continue
         if char == '.' and _SINGLE_LETTER_ABBREV.search(text[: index + 1]):
+            continue
+        if char == '.' and _DIGIT_LIST_MARKER.search(text[: index + 1]):
             continue
         return text[: index + 1]
     return text
