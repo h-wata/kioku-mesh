@@ -807,6 +807,232 @@ def check_legacy_namespace(
     )
 
 
+# -- Identity configuration check (TASK-275 §3.1) ------------------------------
+
+# Env var prefix retired in v1.0.0 (ADR-0029 / #266). Hand-written MCP client
+# configs that still carry it are how 286 consecutive observations came to be
+# saved as `unknown` for five weeks without anyone noticing.
+#
+# Deliberately reported as WARN, not FAIL: #275 reintroduces a deprecated
+# read of this prefix, so whether a config using it still works depends on
+# which revision is installed. This check reports the same thing either way —
+# the config names an env var the project has moved off — which is advice
+# that holds on both sides of that change.
+_LEGACY_ENV_PREFIX = 'MESH_MEM_'
+_CURRENT_ENV_PREFIX = 'KIOKU_MESH_'
+
+# Current identity env vars, quoted in the remediation hint so the fix is
+# copy-pasteable rather than a pointer to the docs.
+_IDENTITY_ENV_KEYS = ('KIOKU_MESH_AGENT_FAMILY', 'KIOKU_MESH_CLIENT_ID')
+
+# How many recent observations the unknown-dominance probe reads, and the
+# share of them that must be 'unknown' before it warns. 50 is roughly a day
+# of active multi-agent use, so a freshly-broken config surfaces within a
+# day rather than after a release cycle. 0.8 leaves room for the genuinely
+# unattributed writes (CLI `kioku-mesh save`, cron jobs) that are expected
+# to stay 'unknown' forever.
+_IDENTITY_SCAN_LIMIT = 50
+_UNKNOWN_DOMINANCE_RATIO = 0.8
+
+# agent_family values that mean "nobody told us who wrote this".
+_UNKNOWN_FAMILIES = ('', 'unknown')
+
+
+def _default_identity_config_paths() -> list[Path]:
+    """Return the MCP client config files this check inspects.
+
+    Claude Code keeps its MCP registrations in ``~/.claude.json``; Codex CLI
+    uses ``~/.codex/config.toml`` (path shared with :mod:`.mcp_install` so the
+    two never drift). Both are read-only inputs here.
+    """
+    from .mcp_install import _default_codex_config_path  # noqa: PLC0415
+
+    return [Path.home() / '.claude.json', _default_codex_config_path()]
+
+
+def _collect_legacy_env_keys(data: Any) -> list[str]:
+    """Return legacy-prefixed keys under ``data`` that have no current-prefix twin.
+
+    A key only counts when its ``KIOKU_MESH_*`` counterpart is absent from the
+    *same* mapping. A config setting both prefixes side by side is already
+    correct: ``KIOKU_MESH_*`` wins whether or not the deprecated fallback in
+    #275 is installed, so the legacy key is inert and reporting it would be
+    noise. That comparison is also what keeps this check independent of which
+    revision is running — it never asks whether the fallback exists, only
+    whether the config still relies on the old name alone.
+
+    Walks the parsed config structurally rather than grepping the raw text:
+    a substring scan would also fire on prose in a description field or on a
+    path that merely mentions the old name.
+    """
+    found: set[str] = set()
+    stack: list[Any] = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str) and key.startswith(_LEGACY_ENV_PREFIX):
+                    counterpart = _CURRENT_ENV_PREFIX + key[len(_LEGACY_ENV_PREFIX) :]
+                    if counterpart not in node:
+                        found.add(key)
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return sorted(found)
+
+
+def _load_config_mapping(path: Path) -> Any | None:
+    """Parse ``path`` as JSON or TOML; return None when it can't be read.
+
+    Fail-soft by contract: an unreadable or malformed client config is not
+    evidence of a stale identity setting, so the caller skips that file
+    instead of reporting a failure the user cannot act on.
+    """
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        if path.suffix == '.toml':
+            import tomllib  # noqa: PLC0415
+
+            return tomllib.loads(raw.decode('utf-8'))
+        return json.loads(raw)
+    except Exception as exc:  # noqa: BLE001
+        log.debug('identity check: could not parse %s (%s)', path, type(exc).__name__)
+        return None
+
+
+def _unknown_family_ratio(observations: list[Any]) -> float:
+    """Share of ``observations`` whose agent_family is unset or 'unknown'."""
+    if not observations:
+        return 0.0
+    unknown = sum(
+        1 for o in observations if (getattr(o, 'agent_family', '') or '').strip().lower() in _UNKNOWN_FAMILIES
+    )
+    return unknown / len(observations)
+
+
+def check_identity(
+    config_paths: list[Path] | None = None,
+    *,
+    observations: list[Any] | None = None,
+) -> CheckResult:
+    """Detect identity settings that have silently stopped taking effect.
+
+    Two independent symptoms of the same failure mode, folded into one check:
+
+    1. **Deprecated env prefix (WARN).** An MCP client config declares its
+       identity only through ``MESH_MEM_*`` keys, with no ``KIOKU_MESH_*``
+       counterpart alongside them. v1.0.0 removed the read of that prefix
+       (#266) and #275 reinstates it as a deprecated path, so the config is
+       either broken or on a deprecated path depending on the installed
+       revision — worth renaming either way, which is why this warns rather
+       than fails.
+    2. **Unknown dominance (WARN).** ``agent_family`` is unset or ``unknown``
+       on at least :data:`_UNKNOWN_DOMINANCE_RATIO` of the most recent
+       :data:`_IDENTITY_SCAN_LIMIT` observations — the observable consequence,
+       which also catches causes other than the deprecated prefix.
+
+    Both are WARN, so precedence decides only which one gets the headline:
+    the deprecated prefix wins, because it names the file and key to edit
+    while the ratio only reports the symptom. Both findings are always
+    reported in ``details`` regardless of which one sets the summary.
+
+    This check never writes: configs are read and parsed, never rewritten
+    (renaming keys in a user's editor-managed config is the user's call, and
+    ``kioku-mesh mcp install`` already does it deliberately). Missing configs
+    are normal — a host with neither client installed passes.
+
+    ``config_paths`` and ``observations`` are injectable for tests; the
+    defaults read the real client configs and the active backend.
+    """
+    paths = _default_identity_config_paths() if config_paths is None else config_paths
+
+    legacy_hits: list[dict[str, Any]] = []
+    inspected: list[str] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        data = _load_config_mapping(path)
+        if data is None:
+            # Unparseable config: recorded as inspected-but-skipped rather
+            # than treated as clean, so the summary can't claim coverage it
+            # doesn't have.
+            continue
+        inspected.append(str(path))
+        keys = _collect_legacy_env_keys(data)
+        if keys:
+            legacy_hits.append({'path': str(path), 'keys': keys})
+
+    # Unknown-dominance probe. Skipped (not failed) when the backend is
+    # unreachable — doctor runs on hosts whose zenohd is down, and that is
+    # what check_zenohd_reachable is for.
+    unknown_ratio: float | None = None
+    sampled = 0
+    if observations is None:
+        try:
+            from .memory.backend import get_backend  # noqa: PLC0415
+
+            observations = get_backend().search_observations(limit=_IDENTITY_SCAN_LIMIT)
+        except Exception as exc:  # noqa: BLE001
+            log.debug('identity check: could not read recent observations (%s)', type(exc).__name__)
+            observations = None
+    if observations is not None:
+        sampled = len(observations)
+        if sampled:
+            unknown_ratio = _unknown_family_ratio(observations)
+
+    details: dict[str, Any] = {
+        'legacy_env_prefix': _LEGACY_ENV_PREFIX,
+        'legacy_hits': legacy_hits,
+        'inspected_configs': inspected,
+        'sampled_observations': sampled,
+        'unknown_ratio': None if unknown_ratio is None else round(unknown_ratio, 3),
+        'unknown_threshold': _UNKNOWN_DOMINANCE_RATIO,
+    }
+
+    if legacy_hits:
+        where = ', '.join(f'{h["path"]} ({", ".join(h["keys"])})' for h in legacy_hits)
+        return CheckResult(
+            name='identity',
+            status=CheckStatus.WARN,
+            summary=f'MCP config declares identity only via deprecated {_LEGACY_ENV_PREFIX}* env vars: {where}',
+            hint=(
+                f'Rename them to {" / ".join(_IDENTITY_ENV_KEYS)}, or re-register with '
+                '`kioku-mesh mcp install`, then restart the MCP client.'
+            ),
+            details=details,
+        )
+
+    if unknown_ratio is not None and unknown_ratio >= _UNKNOWN_DOMINANCE_RATIO:
+        return CheckResult(
+            name='identity',
+            status=CheckStatus.WARN,
+            summary=(f'{unknown_ratio:.0%} of the last {sampled} observations have agent_family=unknown'),
+            hint=(
+                f'Set {" / ".join(_IDENTITY_ENV_KEYS)} in the MCP client env '
+                '(or run `kioku-mesh mcp install`) and restart the client.'
+            ),
+            details=details,
+        )
+
+    if not inspected and unknown_ratio is None:
+        return CheckResult(
+            name='identity',
+            status=CheckStatus.PASS,
+            summary='identity: no MCP client config found to check',
+            details=details,
+        )
+
+    return CheckResult(
+        name='identity',
+        status=CheckStatus.PASS,
+        summary='identity: no retired env vars in MCP configs, recent saves are attributed',
+        details=details,
+    )
+
+
 # -- Orchestration & rendering -------------------------------------------------
 
 
@@ -828,6 +1054,7 @@ def run_all_checks() -> list[CheckResult]:
         check_shadow_visibility(),
         check_conflicting_latest(),
         check_legacy_namespace(),
+        check_identity(),
     ]
 
 

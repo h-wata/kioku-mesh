@@ -14,6 +14,16 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
 
 ### Added
 
+- `kioku-mesh doctor` に identity チェックを追加した。MCP クライアント設定
+  (`~/.claude.json` / `~/.codex/config.toml`) が identity を非推奨の
+  `MESH_MEM_*` env var だけで宣言している場合と、直近 50 件の観測のうち
+  8 割以上が `agent_family=unknown` の場合に WARN を出す。前者は同じ
+  マッピング内に `KIOKU_MESH_*` の対応キーが無いときだけ報告するため、
+  両方を併記した設定は指摘しない。doctor は設定ファイルを読むだけで
+  一切書き換えない。v1.0.0 (#266) で `MESH_MEM_*` の読み取りを削除した際、
+  手書きの MCP 設定が旧 prefix のまま取り残され、5 週間・286 件の観測が
+  `unknown` で保存され続けたことに気付けなかったため。
+
 - 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
   全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
   現在のホストのものと誤認して引き継いでしまう問題があった。
