@@ -38,6 +38,7 @@ from .messaging.models import is_expired
 from .messaging.models import Message
 from .messaging.purge import purge_expired_msgs
 from .models import Observation
+from .models import resolve_expires_at
 from .models import VALID_MEMORY_TYPES
 from .store import get_index
 from .store import MAX_SEARCH
@@ -277,6 +278,8 @@ def save_observation(
     references: list[str] | None = None,
     supersedes: list[str] | None = None,
     visibility: str = '',
+    expires_at: str = '',
+    ttl_sec: int = 0,
 ) -> str:
     """Persist a work note / decision / discovery into the shared kioku-mesh memory.
 
@@ -321,12 +324,25 @@ def save_observation(
             default — the MCP client is trusted at the host boundary
             (ADR-0014); scope restrictions, if ever needed, belong in a
             future server-side allowlist.
+        expires_at: ISO 8601 instant after which this entry is disposable.
+            Use for records that are useful now but must not linger — a
+            verification ping, a "delete after the report lands" scratch
+            note. Expired entries stop appearing in ``recall_context`` /
+            ``search_memory`` and become candidates for
+            ``kioku-mesh gc-observations``. Omit for durable memory: an
+            entry worth ``importance`` 4-5 almost never wants a lifetime.
+        ttl_sec: convenience form of ``expires_at`` — seconds from now.
+            Ignored when ``expires_at`` is given.
 
     Returns:
         The generated ``observation_id``.
     """
     if memory_type not in VALID_MEMORY_TYPES:
         return f'memory_type must be one of {sorted(VALID_MEMORY_TYPES)}. got: {memory_type!r}'
+    try:
+        resolved_expires_at = resolve_expires_at(expires_at=expires_at, ttl_sec=ttl_sec)
+    except ValueError as e:
+        return str(e)
     try:
         effective_visibility, scope_id = resolve_write_visibility(visibility)
     except ValueError as e:
@@ -351,6 +367,7 @@ def save_observation(
         supersedes=supersedes or [],
         visibility=effective_visibility,
         scope_id=scope_id,
+        expires_at=resolved_expires_at,
     )
     backend = get_backend()
     backend.put_observation(obs)
@@ -360,6 +377,8 @@ def save_observation(
         'visibility': format_visibility(effective_visibility, scope_id),
         'warnings': [{'code': w.code, 'message': w.message} for w in lint_warnings],
     }
+    if resolved_expires_at:
+        result['expires_at'] = resolved_expires_at
     # ADR-0026 §A: surface likely-superseded entries so the agent can replace
     # them. Only when ``supersedes`` was not already provided. Suggestion
     # only — nothing is hidden or deleted here.
@@ -404,6 +423,8 @@ def search_memory(
     can be called directly.
     Set ``include_superseded=True`` to also return observations that have been
     superseded by a newer one (hidden by default, ADR-0021).
+    Observations whose ``expires_at`` has passed are always hidden here
+    (Issue #272); they are only reachable via ``get_memory`` by id.
     ``search_mode`` accepts 'and' (default) | 'or' | 'and_or'.
     'or': any query term matching is sufficient; base filters remain AND.
     'and_or': AND hits first, then OR hits fill remaining limit slots (recall mode).
@@ -575,7 +596,7 @@ def recall_context(
     """Recall current context with additive filters for memory_types, source_files, and references.
 
     Returns a deterministic grouped Markdown view of live observations.
-    Hidden states (tombstoned, shadowed, superseded) are excluded by default.
+    Hidden states (tombstoned, shadowed, superseded, expired) are excluded by default.
     Requires the local index (use search_memory as fallback if index is disabled).
 
     Args:

@@ -381,6 +381,115 @@ def bulk_purge_by_pc_id(
     )
 
 
+@dataclass(frozen=True)
+class GcCandidate:
+    """One row the stale-observation sweep would act on (Issue #272).
+
+    ``action`` is what ``--execute`` would do, not what already happened:
+    ``tombstone`` for a live-but-lapsed TTL row (soft delete, still
+    recoverable until the retention sweep catches it), ``physical-delete``
+    for rows that already sat in a hidden state past the retention window.
+    """
+
+    observation_id: str
+    reason: str
+    action: str
+    project: str = ''
+    detail: str = ''
+
+
+@dataclass
+class GcCandidates:
+    """Grouped output of :func:`collect_gc_candidates`."""
+
+    expired_ttl: list[GcCandidate] = field(default_factory=list)
+    expired_tombstones: list[GcCandidate] = field(default_factory=list)
+    expired_shadows: list[GcCandidate] = field(default_factory=list)
+
+    def all(self) -> list[GcCandidate]:
+        """Return every candidate, TTL first (the only bucket that soft-deletes)."""
+        return [*self.expired_ttl, *self.expired_tombstones, *self.expired_shadows]
+
+    def total(self) -> int:
+        """Return the candidate count across all three buckets."""
+        return len(self.expired_ttl) + len(self.expired_tombstones) + len(self.expired_shadows)
+
+
+def collect_gc_candidates(
+    idx: LocalIndex,
+    *,
+    retention_days: int = 30,
+    project: str = '',
+    now: datetime | None = None,
+) -> GcCandidates:
+    """Enumerate what a stale-observation sweep would touch, without touching it.
+
+    Read-only by construction — it only calls the three listing methods on
+    ``LocalIndex`` and never a delete path, so the dry-run CLI cannot destroy
+    anything even if a later refactor forgets the ``--execute`` gate.
+
+    Reuses the existing retention listings rather than re-deriving them:
+    :meth:`~.local_index.LocalIndex.list_tombstoned_obs_in_project` (#32) and
+    :meth:`~.local_index.LocalIndex.list_expired_shadowed_obs` (#70). The
+    tombstone listing is project-scoped by design, so an empty ``project``
+    fans out over :meth:`~.local_index.LocalIndex.distinct_projects` — that
+    covers every project present in the index but, unlike the global
+    ``mem/tomb/**`` scan, not orphan tombstones whose observation is absent
+    locally. Those are left to ``kioku-mesh gc``.
+
+    ``retention_days`` applies to the tombstone / shadow buckets only. TTL
+    expiry is an absolute instant chosen by the writer, so a lapsed row is a
+    candidate immediately — deferring it by a retention window would just
+    reintroduce the residue this sweep exists to remove.
+    """
+    if retention_days < 0:
+        raise ValueError(f'retention_days must be >= 0, got {retention_days}')
+    if now is None:
+        now = datetime.now(timezone.utc)
+    now_iso = now.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+    cutoff_iso = (now - timedelta(days=retention_days)).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+    out = GcCandidates()
+    if idx.disabled:
+        return out
+
+    for obs_id, proj, expires_at, summary in idx.list_expired_ttl_obs(now_iso=now_iso, project=project):
+        out.expired_ttl.append(
+            GcCandidate(
+                observation_id=obs_id,
+                reason='expired-ttl',
+                action='tombstone',
+                project=proj,
+                detail=f'expires_at={expires_at} summary={summary[:60]}',
+            )
+        )
+
+    projects = [project] if project else idx.distinct_projects()
+    for proj in projects:
+        for obs_id, _payload_json in idx.list_tombstoned_obs_in_project(proj, cutoff_iso):
+            out.expired_tombstones.append(
+                GcCandidate(
+                    observation_id=obs_id,
+                    reason='expired-tombstone',
+                    action='physical-delete',
+                    project=proj,
+                    detail=f'tombstoned before {cutoff_iso}',
+                )
+            )
+
+    for obs_id in idx.list_expired_shadowed_obs(cutoff_iso, project=project):
+        out.expired_shadows.append(
+            GcCandidate(
+                observation_id=obs_id,
+                reason='expired-shadow',
+                action='physical-delete',
+                project=project,
+                detail=f'shadowed before {cutoff_iso}',
+            )
+        )
+    return out
+
+
 def _gc_via_sqlite_index(idx: LocalIndex, cutoff_iso: str, project: str) -> int:
     """Project-scoped gc that drives deletes from the local SQLite index.
 

@@ -48,7 +48,9 @@ from .models import VALID_MEMORY_TYPES
 from .paths import data_share_leaf
 from .paths import resolve_app_dir
 from .store import _reset_session
+from .store import collect_gc_candidates
 from .store import execute_bulk_purge
+from .store import GcCandidates
 from .store import get_index
 from .store import get_session
 from .store import MAX_SEARCH
@@ -571,6 +573,106 @@ def _cmd_gc(args: argparse.Namespace) -> int:
         f'(revived {revived_shadow})'
     )
     return 0
+
+
+def _format_gc_candidates(candidates: GcCandidates) -> list[str]:
+    """Render the dry-run report for ``gc-observations`` as printable lines.
+
+    Split out from :func:`_cmd_gc_observations` so the exact operator-facing
+    text is assertable in tests without capturing stdout — the dry-run output
+    IS the safety contract of this command, so it is worth pinning.
+    """
+    lines: list[str] = []
+    for title, bucket in (
+        ('expired TTL (live → tombstone)', candidates.expired_ttl),
+        ('expired tombstones (→ physical delete)', candidates.expired_tombstones),
+        ('expired shadows (→ physical delete)', candidates.expired_shadows),
+    ):
+        lines.append(f'{title}: {len(bucket)}')
+        for c in bucket:
+            project_note = f' project={c.project}' if c.project else ''
+            lines.append(f'  {c.observation_id}  reason={c.reason}{project_note}  {c.detail}'.rstrip())
+    lines.append(f'total candidates: {candidates.total()}')
+    return lines
+
+
+def _cmd_gc_observations(args: argparse.Namespace) -> int:
+    """Report (and optionally sweep) stale observations. Dry-run unless ``--execute``.
+
+    Deliberately separate from ``gc``: ``gc`` is an immediate retention sweep
+    with no preview, which is exactly why the stale entries this command
+    targets accumulated unnoticed (Issue #272). Here the default is a report,
+    and destruction needs both ``--execute`` and a confirmation.
+    """
+    backend = get_backend()
+    # Phase1 pattern: in local mode the Zenoh sidecar index is empty, so read
+    # the backend's own index or the sweep reports zero candidates (B1 guard).
+    idx = getattr(backend, '_idx', None) or get_index()
+    if idx is None or idx.disabled:
+        print('gc-observations requires the local index (KIOKU_MESH_DISABLE_INDEX=1 is set).', file=sys.stderr)
+        return 2
+    try:
+        candidates = collect_gc_candidates(
+            idx,
+            retention_days=args.retention_days,
+            project=args.project or '',
+        )
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    project_note = f' (project={args.project})' if args.project else ''
+    print(f'stale observation sweep{project_note}, retention {args.retention_days} days:')
+    for line in _format_gc_candidates(candidates):
+        print(line)
+    if candidates.total() == 0:
+        print('nothing to clean up.')
+        return 0
+    if not args.execute:
+        print('Dry run — pass --execute to tombstone / delete the entries above.')
+        return 0
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                '--execute requires interactive confirmation. Pass --yes for non-interactive use.',
+                file=sys.stderr,
+            )
+            return 2
+        prompt = f"Act on {candidates.total()} stale observations? type 'yes' to confirm: "
+        try:
+            answer = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print('\ncancelled.', file=sys.stderr)
+            return 1
+        if answer != 'yes':
+            print('cancelled.', file=sys.stderr)
+            return 1
+
+    tombstoned = 0
+    failures = 0
+    for c in candidates.expired_ttl:
+        obs = idx.find_by_id(c.observation_id, include_deleted=True)
+        if obs is None:
+            failures += 1
+            continue
+        try:
+            backend.put_tombstone(obs, reason='expired ttl')
+            tombstoned += 1
+        except Exception as e:  # noqa: BLE001 — one bad row must not abort the sweep
+            failures += 1
+            print(f'  put_tombstone failed for {c.observation_id}: {e}', file=sys.stderr)
+    # The physical-delete buckets are exactly what the existing retention
+    # sweep already implements; re-deriving the deletes here would fork the
+    # cross-namespace safety net in gc_expired_tombstones / gc_expired_shadows.
+    purged_tomb = backend.gc_tombstones(retention_days=args.retention_days, project=args.project or '')
+    purged_shadow, revived_shadow = backend.gc_shadows(retention_days=args.retention_days, project=args.project or '')
+    print(
+        f'tombstoned {tombstoned} expired-TTL observations; '
+        f'physically deleted {purged_tomb} tombstones / {purged_shadow} shadows '
+        f'(revived {revived_shadow}, failures {failures})'
+    )
+    return 0 if failures == 0 else 1
 
 
 def _cmd_gc_by_pc_id(args: argparse.Namespace) -> int:
@@ -1964,6 +2066,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Skip physical deletion of shadow rows during retention sweep (tombstones only).',
     )
     p_gc.set_defaults(func=_cmd_gc)
+
+    p_gc_obs = sub.add_parser(
+        'gc-observations',
+        help='Report stale observations (expired TTL / tombstones / shadows). Dry-run by default.',
+    )
+    _attach_completer(
+        p_gc_obs.add_argument(
+            '-p',
+            '--project',
+            default='',
+            help='only consider the given project (default: every project in the index)',
+        ),
+        _complete_project,
+    )
+    p_gc_obs.add_argument(
+        '--retention-days',
+        dest='retention_days',
+        type=int,
+        default=30,
+        help=(
+            'retention in days for the tombstone / shadow buckets (default 30). '
+            'Expired TTL observations ignore this — their instant was chosen by the writer.'
+        ),
+    )
+    p_gc_obs.add_argument(
+        '--execute',
+        action='store_true',
+        help='actually tombstone expired-TTL rows and physically delete the retention buckets',
+    )
+    p_gc_obs.add_argument(
+        '--yes',
+        action='store_true',
+        help='skip interactive confirmation for --execute (for CI / automation)',
+    )
+    p_gc_obs.set_defaults(func=_cmd_gc_observations)
 
     p_get = sub.add_parser('get-memory', help='Get a single observation by observation_id')
     p_get.add_argument('observation_id', help='full 32-character observation_id')

@@ -38,6 +38,16 @@ changes require a semver-major bump or an explicit migration path (ADR-0029).
   何も無いホストを診断しただけで state ディレクトリや SQLite ファイルを
   作ってしまうのを防ぐため。既定は従来どおり `create=True`。
 
+- 観測の失効フローを追加した (#272)。使い捨ての観測に寿命を持たせられるよう
+  `save_observation` へ `expires_at` / `ttl_sec` を追加し、期限切れの観測は
+  `recall_context` / `search_memory` の既定結果から外れるようにした
+  (`get_memory` での id 指定参照は従来どおり可能)。あわせて掃除用の
+  `kioku-mesh gc-observations` を追加した。期限切れ TTL・保持期間を過ぎた
+  tombstone・同 shadow の 3 種を対象 id と理由付きで一覧表示する **dry-run が既定**で、
+  実際の tombstone 化 / 物理削除には `--execute` (と確認) が必要。
+  local index には `expires_at` 列を追加した (既存 DB は起動時に自動 migration、
+  寿命を持たない既存行は無期限のまま)。
+
 - 検索・recall 結果に書き込み元ホストの表示を追加した。メモリはメッシュ内の
   全ホストへ複製されるため、別 PC で保存された絶対パスや tmux pane 指定を
   現在のホストのものと誤認して引き継いでしまう問題があった。
