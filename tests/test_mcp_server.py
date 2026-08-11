@@ -1358,6 +1358,146 @@ def test_search_memory_unknown_search_mode_returns_error(single_zenohd: Any) -> 
 
 
 # ---------------------------------------------------------------------------
+# Issue #277: search_memory output byte cap + truncated display
+# ---------------------------------------------------------------------------
+
+
+def test_cap_search_output_under_limit_is_unchanged() -> None:
+    entries = ['first entry', 'second entry']
+    expected = '\n---\n'.join(entries)
+    result = mcp_server_module._cap_search_output(entries, max_bytes=10_000)
+    assert result == expected
+    assert 'truncated' not in result
+
+
+def test_cap_search_output_exact_boundary_is_unchanged() -> None:
+    entries = ['abc', 'defgh']
+    joined = '\n---\n'.join(entries)
+    exact_cap = len(joined.encode('utf-8'))
+    result = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap)
+    assert result == joined
+    assert 'truncated' not in result
+
+
+def test_cap_search_output_one_byte_over_boundary_truncates() -> None:
+    entries = ['abc', 'defgh']
+    joined = '\n---\n'.join(entries)
+    exact_cap = len(joined.encode('utf-8'))
+    result = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap - 1)
+    assert result != joined
+    assert 'truncated: showing 1 of 2 result(s)' in result
+    assert result.startswith('abc')
+    assert 'defgh' not in result
+
+
+def test_cap_search_output_multibyte_cut_does_not_corrupt_bytes() -> None:
+    # 'あ' is 3 UTF-8 bytes; a 10-byte budget lands mid-character (3*3=9 + 1 stray byte).
+    entry = 'あ' * 50
+    result = mcp_server_module._cap_search_output([entry], max_bytes=10)
+    # Must round-trip through UTF-8 without raising, and never exceed the byte budget.
+    encoded = result.split('\n[truncated')[0].encode('utf-8')
+    assert len(encoded) <= 10
+    assert result.split('\n[truncated')[0] == 'あああ'
+    assert 'truncated: showing 1 of 1 result(s)' in result
+
+
+def test_cap_search_output_single_entry_over_cap_shows_partial() -> None:
+    entry = 'x' * 100
+    result = mcp_server_module._cap_search_output([entry], max_bytes=20)
+    shown = result.split('\n[truncated')[0]
+    assert shown == 'x' * 20
+    assert 'truncated: showing 1 of 1 result(s)' in result
+
+
+def test_cap_search_output_prefix_marker_survives_and_counts_toward_budget() -> None:
+    marker = '(no AND match; fell back to OR)'
+    entries = ['first entry here', 'second entry here', 'third entry here']
+    joined = '\n---\n'.join(entries)
+    full_with_marker = f'{marker}\n{joined}'
+    exact_cap = len(full_with_marker.encode('utf-8'))
+
+    # Exactly enough budget for marker + all entries: unchanged, no truncation.
+    unchanged = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap, prefix=marker)
+    assert unchanged == full_with_marker
+    assert 'truncated' not in unchanged
+
+    # One byte short: marker must still be present and intact; an entry is dropped instead.
+    truncated = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap - 1, prefix=marker)
+    assert truncated.startswith(marker + '\n')
+    assert 'truncated: showing 2 of 3 result(s)' in truncated
+    assert 'third entry here' not in truncated
+
+
+def test_search_memory_output_truncated_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_memory truncates and reports it when results exceed the byte cap."""
+    from kioku_mesh import backend as backend_module
+
+    big_obs = [
+        Observation(
+            content='x' * 5_000,
+            summary='y' * 5_000,
+            agent_family='claude',
+            client_id='claude-code',
+            pc_id='mcp-pc',
+            session_id='mcp-sess',
+            project='mcp-bytecap',
+        )
+        for _ in range(5)
+    ]
+
+    class _BigResultsBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            return big_obs
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _BigResultsBackend())
+    monkeypatch.setattr(mcp_server_module, 'SEARCH_OUTPUT_MAX_BYTES', 4_000)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-bytecap'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert len(text.encode('utf-8')) < 5_500  # well under the unbounded ~25KB the 5 entries would be
+    assert 'truncated: showing' in text
+    assert 'result(s); output capped at 4000 bytes' in text
+
+
+def test_search_memory_output_under_cap_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_memory returns results verbatim (no truncation notice) when under the byte cap."""
+    from kioku_mesh import backend as backend_module
+
+    small_obs = [
+        Observation(
+            content='small content',
+            summary='small summary',
+            agent_family='claude',
+            client_id='claude-code',
+            pc_id='mcp-pc',
+            session_id='mcp-sess',
+            project='mcp-bytecap-small',
+        )
+    ]
+
+    class _SmallResultsBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            return small_obs
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _SmallResultsBackend())
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-bytecap-small'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'truncated' not in text
+    assert 'small summary' in text
+
+
+# ---------------------------------------------------------------------------
 # ADR-0028 Phase3: get_memory state field tests
 # ---------------------------------------------------------------------------
 

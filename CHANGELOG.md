@@ -65,6 +65,10 @@ ADR-0030.
   set, and the encoded item is then re-measured against a 72 KiB per-message
   budget as a backstop. A new `withheld_fields` list plus the notice text name
   what was dropped, so nothing goes missing silently.
+- `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES` (20,000
+  UTF-8 bytes); when exceeded, results are dropped from the tail and a
+  trailing `[truncated: showing N of M result(s); ...]` line is appended
+  (#277).
 
 ### Fixed
 
