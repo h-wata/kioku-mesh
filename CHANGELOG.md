@@ -57,6 +57,15 @@ ADR-0030.
   `TypeError` になり、status 出力全体が `failed to read shared memory` に落ちて
   いた）、欠損・解析不能な値は1件ずつスキップ、窓は `[now-7d, now]` として未来
   日時を除外し、スキップ件数を出力に明示するようにした。
+- `LocalMessageIndex.purge_expired`: no longer leaves orphan `acks` rows behind
+  when it deletes expired `messages` rows. Previously, re-registering a msg_id
+  after it had been purged would find the stale `acks` row and be reported as
+  already-acked by `check_messages`, silently hiding the message from the
+  receiver with no error or warning. `purge_expired` now also removes any
+  `acks` row with no matching `messages` row (unconditionally, so it
+  self-heals orphans left over from before this fix, with no separate
+  migration step needed). (#299)
+
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node

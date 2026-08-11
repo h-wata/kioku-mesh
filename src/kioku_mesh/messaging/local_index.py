@@ -144,6 +144,14 @@ class LocalMessageIndex:
 
         Client-side TTL purge only — Zenoh storage-level cleanup is deferred
         to a later phase (design memo Open Question #1).
+
+        Also deletes any acks rows left orphaned by this call (design doc
+        docs/design/0201-messaging-ack-timeout-policy.md §4.2): without this,
+        a later re-registration of the same msg_id would find a stale acks
+        row and be reported as already-acked, hiding it from the receiver
+        with no error or warning. The orphan cleanup is unconditional (not
+        scoped to msg_ids purged in this call) so it is self-healing for
+        acks rows left behind by earlier code that predates this fix.
         """
         effective_now = now if now is not None else datetime.now(timezone.utc)
         now_iso = _iso(effective_now)
@@ -152,8 +160,16 @@ class LocalMessageIndex:
                 'DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?',
                 (now_iso,),
             )
+            removed = cursor.rowcount
+            conn.execute(
+                'DELETE FROM acks WHERE NOT EXISTS ('
+                '  SELECT 1 FROM messages'
+                '  WHERE messages.msg_id = acks.msg_id'
+                '    AND messages.recipient_session_id = acks.recipient_session_id'
+                ')'
+            )
             conn.commit()
-            return cursor.rowcount
+            return removed
 
 
 def ack_message(

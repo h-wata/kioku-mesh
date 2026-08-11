@@ -26,7 +26,9 @@ from fastmcp import Client  # noqa: E402
 
 from kioku_mesh.mcp_server import mcp  # noqa: E402
 import kioku_mesh.mcp_server as mcp_module  # noqa: E402
+from kioku_mesh.messaging.local_index import _iso  # noqa: E402
 from kioku_mesh.messaging.local_index import LocalMessageIndex  # noqa: E402
+from kioku_mesh.messaging.models import Ack  # noqa: E402
 from kioku_mesh.messaging.models import Message  # noqa: E402
 from kioku_mesh.messaging.purge import purge_expired_msgs  # noqa: E402
 
@@ -204,6 +206,114 @@ class TestPurgeExpiredMsgs:
         count, scan_ok = purge_expired_msgs(session, index)
         assert scan_ok is True
         assert count == 0  # delete failed, so count stays 0
+
+
+# ---------------------------------------------------------------------------
+# LocalMessageIndex.purge_expired — orphan acks (design doc §4.2 pitfall)
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeExpiredOrphanAcks:
+    """Regression tests for the purge-asymmetry bug.
+
+    purge_expired() must not leave behind acks rows for messages it deletes,
+    or a re-put of the same msg_id is silently invisible to the receiver
+    (see docs/design/0201-messaging-ack-timeout-policy.md §4.2).
+    """
+
+    def _make_index(self, tmp_path: Path) -> LocalMessageIndex:
+        return LocalMessageIndex(tmp_path / 'messaging' / 'inbox.db')
+
+    def test_reput_after_purge_is_visible_again(self, tmp_path: Path) -> None:
+        """Core regression: re-registering a purged msg_id must not be treated as acked."""
+        index = self._make_index(tmp_path)
+        msg = _make_msg(expires_at=_past(1), session_id='sess-1')
+
+        index.register(msg, 'sess-1')
+        index.record_ack(Ack(msg_id=msg.msg_id, recipient_session_id='sess-1'))
+        assert index.is_acked(msg.msg_id, 'sess-1') is True
+
+        removed = index.purge_expired()
+        assert removed == 1
+
+        # Same msg_id re-put (sender resends before the "reuse msg_id" ban lands
+        # everywhere, or a pre-existing orphan from before this fix) must be
+        # visible again — not silently swallowed by a stale acks row.
+        inserted = index.register(msg, 'sess-1')
+        assert inserted is True
+        assert index.is_acked(msg.msg_id, 'sess-1') is False
+
+    def test_purge_zero_messages_is_noop(self, tmp_path: Path) -> None:
+        index = self._make_index(tmp_path)
+        assert index.purge_expired() == 0
+
+    def test_purge_messages_only_no_acks(self, tmp_path: Path) -> None:
+        """An expired message with no ack at all is purged without error."""
+        index = self._make_index(tmp_path)
+        msg = _make_msg(expires_at=_past(1), session_id='sess-2')
+        index.register(msg, 'sess-2')
+
+        assert index.purge_expired() == 1
+        assert index.find_scope(msg.msg_id, 'sess-2') is None
+
+    def test_purge_cleans_preexisting_orphan_ack_with_no_message_row(self, tmp_path: Path) -> None:
+        """Migration case: an orphan ack with no corresponding message row.
+
+        e.g. left behind by a purge_expired call under the old code, is
+        cleaned up by a later purge_expired call, without a message ever
+        having been registered.
+        """
+        index = self._make_index(tmp_path)
+        with index._connect() as conn:  # noqa: SLF001 — test-only direct DB access
+            conn.execute(
+                'INSERT INTO acks (msg_id, recipient_session_id, acked_at) VALUES (?, ?, ?)',
+                ('orphan-preexisting', 'sess-3', _iso(_utc_now())),
+            )
+            conn.commit()
+        assert index.is_acked('orphan-preexisting', 'sess-3') is True
+
+        index.purge_expired()
+
+        assert index.is_acked('orphan-preexisting', 'sess-3') is False
+
+    def test_purge_multiple_receivers_only_cleans_expired_receiver_acks(self, tmp_path: Path) -> None:
+        """Same msg_id delivered to two receivers: purging one is isolated.
+
+        Purging one receiver's expired copy must not disturb the other
+        receiver's still-live copy or ack.
+        """
+        index = self._make_index(tmp_path)
+        msg_id = 'shared-msg-id'
+        expired_msg = _make_msg(expires_at=_past(1), session_id='recv-expired')
+        expired_msg.msg_id = msg_id
+        live_msg = _make_msg(expires_at=_future(900), session_id='recv-live')
+        live_msg.msg_id = msg_id
+
+        index.register(expired_msg, 'recv-expired')
+        index.record_ack(Ack(msg_id=msg_id, recipient_session_id='recv-expired'))
+        index.register(live_msg, 'recv-live')
+        index.record_ack(Ack(msg_id=msg_id, recipient_session_id='recv-live'))
+
+        removed = index.purge_expired()
+        assert removed == 1
+
+        # Expired receiver's ack is gone along with its message row.
+        assert index.is_acked(msg_id, 'recv-expired') is False
+        # Live receiver's message + ack are untouched.
+        assert index.find_scope(msg_id, 'recv-live') == live_msg.scope
+        assert index.is_acked(msg_id, 'recv-live') is True
+
+    def test_purge_after_reput_of_different_msg_id_is_unaffected(self, tmp_path: Path) -> None:
+        """Sanity: purge of one expired msg_id does not disturb an unrelated live msg_id."""
+        index = self._make_index(tmp_path)
+        expired = _make_msg(expires_at=_past(1), session_id='sess-4')
+        other = _make_msg(expires_at=_future(900), session_id='sess-4')
+
+        index.register(expired, 'sess-4')
+        index.register(other, 'sess-4')
+
+        assert index.purge_expired() == 1
+        assert index.find_scope(other.msg_id, 'sess-4') == other.scope
 
 
 # ---------------------------------------------------------------------------
