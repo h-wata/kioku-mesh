@@ -1947,6 +1947,55 @@ def _cmd_orphan_acks_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_orphan_acks_status(args: argparse.Namespace) -> int:
+    """Report the N4 rollout state of one inbox database.
+
+    Exit code is the machine-readable half of the answer: 0 when this node is
+    done, 1 when something still blocks it. That is what makes it usable as the
+    per-node check in the fleet rollout procedure without parsing text.
+    """
+    from .messaging import orphan_acks
+
+    db_path = _messaging_db_path(args)
+    if not db_path.exists():
+        print(f'error: no messaging index at {db_path}', file=sys.stderr)
+        return 2
+    status = orphan_acks.rollout_status(db_path)
+
+    if args.format == 'json':
+        print(json.dumps(status.as_dict(), ensure_ascii=False, indent=2))
+        return 0 if status.complete else 1
+
+    print(f'database:       {status.db_path}')
+    print(f'writer version: {status.writer_version}')
+    print(f'schema:         v{status.schema_version} (expected v{status.expected_schema_version})')
+    print(
+        f'quarantined:    {status.quarantined_total}'
+        f' (unresolved {status.quarantined_unresolved}, after migration {status.quarantined_after_migration})'
+    )
+    if status.quarantined_by_state:
+        print(f'  by state:       {status.quarantined_by_state}')
+        print(f'  by provenance:  {status.quarantined_by_provenance}')
+        print(f'  migrated_at:    {status.oldest_migrated_at} .. {status.newest_migrated_at}')
+    print(f'unmatched acks: {status.unmatched_acks_outside_quarantine} (outside the quarantine)')
+    print(f'pending acks:   {status.pending_acks}')
+    print(f'tombstones:     {status.tombstones}')
+    if status.complete:
+        print('\nrollout: complete on this node.')
+        if status.quarantined_unresolved:
+            # Said out loud so "complete" is never read as "nothing left to
+            # look at": unresolved rows are a standing operator decision.
+            print(
+                f'note: {status.quarantined_unresolved} quarantined pair(s) are still unresolved. '
+                'That is allowed — they are resolved one pair at a time, or not at all.'
+            )
+        return 0
+    print('\nrollout: NOT complete:')
+    for blocker in status.blockers:
+        print(f'  - {blocker}')
+    return 1
+
+
 def _cmd_orphan_acks_recover(args: argparse.Namespace) -> int:
     from .messaging import orphan_acks
 
@@ -2556,6 +2605,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p_orphan_list.add_argument('--cursor', help='continue from a previous page')
     p_orphan_list.add_argument('--format', choices=['text', 'json'], default='text', help='output format')
     p_orphan_list.set_defaults(func=_cmd_orphan_acks_list)
+
+    p_orphan_status = p_orphan_sub.add_parser(
+        'status',
+        help="Report this node's N4 rollout state. Read-only. Exit 0 = complete, 1 = not complete.",
+        description=(
+            'Per-database rollout check for the ack-state migration. Reports the schema\n'
+            'version, the writer version running here, and the quarantine counts, then says\n'
+            'whether anything still blocks completion on this node.\n\n'
+            'A fleet is done when every node exits 0 with the same writer version; this\n'
+            'command cannot see other nodes and does not guess about them.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_orphan_status.add_argument('--db', help='inbox database path (default: the local state dir)')
+    p_orphan_status.add_argument('--format', choices=['text', 'json'], default='text', help='output format')
+    p_orphan_status.set_defaults(func=_cmd_orphan_acks_status)
 
     p_orphan_recover = p_orphan_sub.add_parser(
         'recover',
