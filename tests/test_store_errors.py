@@ -876,6 +876,35 @@ class TestSearchViaZenohBaseFilterSurvivesFallbackQueryMatch:
             out_of_range.observation_id not in ids
         ), f'out-of-range obs must not resurface even though it matches the query in {search_mode!r} mode'
 
+    def test_until_excludes_after_range_query_matching_obs_non_cursor(
+        self, monkeypatch: pytest.MonkeyPatch, search_mode: str
+    ) -> None:
+        """Non-cursor ``until_iso`` upper bound must exclude obs created after it (#230/#292 review)."""
+        in_range = Observation(content='alpha beta', project='base-filter-until')
+        in_range.created_at = '2025-06-15T00:00:00.000000Z'
+        after_until = Observation(content='alpha beta', project='base-filter-until')
+        after_until.created_at = '2025-08-01T00:00:00.000000Z'  # after until_iso
+        fake = _FakeSession(
+            [
+                [],  # tombstones empty
+                [_ok_reply(in_range), _ok_reply(after_until)],
+            ]
+        )
+        _install_fake_session(monkeypatch, fake)
+
+        results = store.search_observations(
+            query='alpha beta',
+            project='base-filter-until',
+            search_mode=search_mode,
+            until_iso='2025-07-01T00:00:00.000000Z',
+        )
+
+        ids = {o.observation_id for o in results}
+        assert in_range.observation_id in ids, 'in-range query match must survive the base filter'
+        assert (
+            after_until.observation_id not in ids
+        ), f'after-until obs must not resurface even though it matches the query in {search_mode!r} mode'
+
     def test_cursor_excludes_boundary_query_matching_obs(
         self, monkeypatch: pytest.MonkeyPatch, search_mode: str
     ) -> None:
