@@ -19,12 +19,19 @@ Design notes:
   drop user comments and reformat unrelated sections. Block-level
   substitution preserves everything outside ``[mcp_servers.<name>]``
   and its nested tables.
+- ``--repair`` goes one step finer: it rewrites only the identity key
+  tokens inside the target entry's env, so that entry's own ``args``,
+  ``enabled``, ``startup_timeout_sec``, comments and value quoting also
+  survive. The result is re-parsed and compared against the intended
+  document before anything is written.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 import re
@@ -68,12 +75,20 @@ class InstallPlan:
 
     ``command`` is the absolute path to ``kioku-mesh-mcp``. ``env`` is the
     fully-resolved env block (defaults already merged with user overrides).
+
+    ``args``, ``scope`` and ``transport`` only matter to the Claude Code
+    path. They carry the defaults a fresh install uses; ``--repair`` fills
+    them from the entry it read back so a re-registration reproduces the
+    original registration instead of flattening it (Codex review B1 on #287).
     """
 
     client: MCPClient
     name: str
     command: str
     env: dict[str, str] = field(default_factory=dict)
+    args: tuple[str, ...] = ()
+    scope: str = 'user'
+    transport: str = 'stdio'
 
 
 # TOML bare keys allow only ASCII letters, digits, underscore, and hyphen
@@ -146,12 +161,20 @@ def build_install_plan(
 
 
 def _build_claude_add_command(claude_binary: str, plan: InstallPlan) -> list[str]:
-    """Build the ``claude mcp add`` argv. Pure — for both dry-run and execution."""
-    cmd: list[str] = [claude_binary, 'mcp', 'add', plan.name, '-s', 'user']
+    """Build the ``claude mcp add`` argv. Pure — for both dry-run and execution.
+
+    ``-t`` is only emitted for non-stdio transports: stdio is the CLI default
+    and omitting it keeps the fresh-install argv identical to what previous
+    versions produced.
+    """
+    cmd: list[str] = [claude_binary, 'mcp', 'add', plan.name, '-s', plan.scope]
+    if plan.transport and plan.transport != 'stdio':
+        cmd.extend(['-t', plan.transport])
     for key, value in plan.env.items():
         cmd.extend(['-e', f'{key}={value}'])
     cmd.append('--')
     cmd.append(plan.command)
+    cmd.extend(plan.args)
     return cmd
 
 
@@ -220,6 +243,38 @@ def _default_codex_config_path() -> Path:
     return Path.home() / '.codex' / 'config.toml'
 
 
+_TOML_BASIC_STRING_ESCAPES = {
+    '\\': '\\\\',
+    '"': '\\"',
+    '\b': '\\b',
+    '\t': '\\t',
+    '\n': '\\n',
+    '\f': '\\f',
+    '\r': '\\r',
+}
+
+
+def _toml_basic_string(value: str) -> str:
+    r"""Render ``value`` as a TOML 1.0 basic string, escaping what the spec requires.
+
+    Interpolating a raw value into ``"..."`` breaks on quotes and backslashes
+    (a Windows path or a value containing ``"`` produced an unparseable file —
+    Codex review B3 on #287). Control characters other than the ones with a
+    short escape get the ``\\uXXXX`` form, which is the only legal spelling
+    for them inside a basic string.
+    """
+    out = []
+    for ch in value:
+        escaped = _TOML_BASIC_STRING_ESCAPES.get(ch)
+        if escaped is not None:
+            out.append(escaped)
+        elif ch < ' ' or ch == '\x7f':
+            out.append(f'\\u{ord(ch):04X}')
+        else:
+            out.append(ch)
+    return '"' + ''.join(out) + '"'
+
+
 def _render_codex_toml_block(plan: InstallPlan) -> str:
     """Render the TOML block for one ``[mcp_servers.<name>]`` entry.
 
@@ -230,12 +285,12 @@ def _render_codex_toml_block(plan: InstallPlan) -> str:
     lines = [
         '# Added by `kioku-mesh mcp install --client codex-cli`. Re-run with --force to update.',
         f'[mcp_servers.{plan.name}]',
-        f'command = "{plan.command}"',
+        f'command = {_toml_basic_string(plan.command)}',
         '',
         f'[mcp_servers.{plan.name}.env]',
     ]
     for key, value in plan.env.items():
-        lines.append(f'{key} = "{value}"')
+        lines.append(f'{key} = {_toml_basic_string(value)}')
     return '\n'.join(lines)
 
 
@@ -253,6 +308,26 @@ def _replace_codex_block(existing: str, name: str, new_block: str) -> str:
     don't get clobbered.
     """
     lines = existing.split('\n')
+    span = _find_codex_block_span(lines, name)
+
+    if span is None:
+        # No existing block — fall through to append at end of file.
+        suffix = '' if existing.endswith('\n') else '\n'
+        return existing + suffix + '\n' + new_block + '\n'
+
+    start_idx, end_idx = span
+    new_lines = lines[:start_idx] + new_block.split('\n') + lines[end_idx:]
+    return '\n'.join(new_lines)
+
+
+def _find_codex_block_span(lines: list[str], name: str) -> tuple[int, int] | None:
+    """Return ``(start, end)`` line indices of the ``[mcp_servers.<name>]`` block.
+
+    ``end`` is exclusive and points at the next unrelated table header (or
+    EOF). Returns ``None`` when the entry has no table header of its own —
+    e.g. it lives inside an inline ``[mcp_servers]`` table, a shape the
+    line-oriented editors here deliberately refuse to touch.
+    """
     server_header = f'[mcp_servers.{name}]'
     nested_prefix = f'[mcp_servers.{name}.'
 
@@ -269,12 +344,8 @@ def _replace_codex_block(existing: str, name: str, new_block: str) -> str:
             break
 
     if start_idx is None:
-        # No existing block — fall through to append at end of file.
-        suffix = '' if existing.endswith('\n') else '\n'
-        return existing + suffix + '\n' + new_block + '\n'
-
-    new_lines = lines[:start_idx] + new_block.split('\n') + lines[end_idx:]
-    return '\n'.join(new_lines)
+        return None
+    return start_idx, end_idx
 
 
 def install_codex_cli(
@@ -350,22 +421,106 @@ _CURRENT_ENV_PREFIX = 'KIOKU_MESH_'
 _IDENTITY_ENV_SUFFIXES = ('AGENT_FAMILY', 'CLIENT_ID')
 
 
-def _repair_identity_env(env: dict[str, str]) -> dict[str, str]:
-    """Rename retired ``MESH_MEM_*`` identity keys to their ``KIOKU_MESH_*`` twin.
+def _identity_env_renames(env: dict[str, str]) -> dict[str, str]:
+    """Return the ``{legacy_key: current_key}`` renames ``--repair`` would apply.
 
     Only the identity suffixes in :data:`_IDENTITY_ENV_SUFFIXES` are touched,
     and only when the current-prefix key is *absent* from ``env`` — the exact
     condition doctor.py's ``check_identity`` FAILs on. A config that already
-    carries both names, or unrelated user env vars, comes back unchanged so
+    carries both names, or unrelated user env vars, yields no renames so
     ``--repair`` never rewrites anything the user didn't ask it to fix.
     """
-    repaired = dict(env)
+    renames: dict[str, str] = {}
     for suffix in _IDENTITY_ENV_SUFFIXES:
         legacy_key = _LEGACY_ENV_PREFIX + suffix
         current_key = _CURRENT_ENV_PREFIX + suffix
         if legacy_key in env and current_key not in env:
-            repaired[current_key] = repaired.pop(legacy_key)
-    return repaired
+            renames[legacy_key] = current_key
+    return renames
+
+
+def _repair_identity_env(env: dict[str, str]) -> dict[str, str]:
+    """Apply :func:`_identity_env_renames` to ``env``, preserving key order."""
+    renames = _identity_env_renames(env)
+    if not renames:
+        return dict(env)
+    return {renames.get(key, key): value for key, value in env.items()}
+
+
+def _rename_codex_env_key_line(line: str, legacy: str, current: str) -> tuple[str, int]:
+    """Rename a bare or quoted ``legacy`` key at the head of a key/value line.
+
+    Only the key token is touched — the ``=`` spacing, the value text (basic
+    string, literal string, whatever the user wrote) and any trailing comment
+    come through byte-for-byte, which is what makes this safe where
+    re-rendering the block was not (Codex review B3 on #287).
+    """
+    quoted = f'{re.escape(legacy)}|"{re.escape(legacy)}"|\'{re.escape(legacy)}\''
+    pattern = re.compile(r'^(\s*)(?:' + quoted + r')(\s*=)')
+    return pattern.subn(lambda m: f'{m.group(1)}{current}{m.group(2)}', line, count=1)
+
+
+def _rename_codex_env_key_inline(line: str, legacy: str, current: str) -> tuple[str, int]:
+    """Rename ``legacy`` inside an inline ``env = { ... }`` table on one line."""
+    pattern = re.compile(r'(?<![A-Za-z0-9_.-])(["\']?)' + re.escape(legacy) + r'\1(\s*=)')
+    return pattern.subn(lambda m: f'{current}{m.group(2)}', line, count=1)
+
+
+_CODEX_INLINE_ENV_RE = re.compile(r'^\s*(?:env|"env"|\'env\')\s*=\s*\{')
+
+
+def _rename_codex_env_keys(existing: str, name: str, renames: dict[str, str]) -> str:
+    """Rewrite only the ``renames`` key tokens inside ``mcp_servers.<name>``'s env.
+
+    Everything else in the file — including the entry's own ``args``,
+    ``enabled``, ``startup_timeout_sec``, comments and formatting — is left
+    untouched, because nothing is re-rendered.
+
+    Raises:
+        RuntimeError: when the entry has no table header of its own, or when a
+            key that TOML parsing said is present cannot be located as a line
+            we can safely edit. Both are fail-closed: the caller writes nothing.
+    """
+    lines = existing.split('\n')
+    span = _find_codex_block_span(lines, name)
+    if span is None:
+        raise RuntimeError(
+            f'could not locate a [mcp_servers.{name}] table header to edit; '
+            'unsupported layout for --repair (edit the config by hand).'
+        )
+    start_idx, end_idx = span
+    entry_header = f'[mcp_servers.{name}]'
+    env_header = f'[mcp_servers.{name}.env]'
+    pending = dict(renames)
+    current_header = ''
+
+    for i in range(start_idx, end_idx):
+        raw = lines[i]
+        stripped = raw.lstrip()
+        if stripped.startswith('['):
+            head, sep, _rest = stripped.partition(']')
+            current_header = head + sep
+            continue
+        if not pending:
+            break
+        inline_env = current_header == entry_header and _CODEX_INLINE_ENV_RE.match(raw)
+        if current_header != env_header and not inline_env:
+            continue
+        for legacy, current_key in list(pending.items()):
+            if inline_env:
+                new_line, hits = _rename_codex_env_key_inline(raw, legacy, current_key)
+            else:
+                new_line, hits = _rename_codex_env_key_line(raw, legacy, current_key)
+            if hits:
+                lines[i] = raw = new_line
+                del pending[legacy]
+
+    if pending:
+        raise RuntimeError(
+            f'could not locate env key(s) {sorted(pending)} as editable lines in '
+            f'mcp_servers.{name}; unsupported layout for --repair (edit the config by hand).'
+        )
+    return '\n'.join(lines)
 
 
 def repair_codex_cli(
@@ -377,8 +532,12 @@ def repair_codex_cli(
 
     Reads the entry straight out of the TOML (same file ``install_codex_cli``
     writes), applies :func:`_repair_identity_env` to its ``env`` table only,
-    and rewrites just that block via ``_replace_codex_block`` — command and
-    any non-identity env stay byte-for-byte what they were.
+    and rewrites *just the identity key tokens* in place — command, args,
+    ``enabled``, ``startup_timeout_sec``, comments, formatting and every
+    non-identity env value stay byte-for-byte what they were. The result is
+    re-parsed and diffed against the intended document before anything is
+    written, so a layout this editor mishandles fails closed instead of
+    landing a broken config (Codex review B3 on #287).
     """
     target = config_path or _default_codex_config_path()
     if not target.is_file():
@@ -400,43 +559,154 @@ def repair_codex_cli(
         )
 
     env = entry.get('env', {}) or {}
-    repaired_env = _repair_identity_env(env)
-    if repaired_env == env:
+    renames = _identity_env_renames(env)
+    if not renames:
         return f'mcp_servers.{name} in {target} already uses the current KIOKU_MESH_* prefix; nothing to repair.'
 
-    plan = InstallPlan(client=MCPClient.CODEX_CLI, name=name, command=entry.get('command', ''), env=repaired_env)
-    new_text = _replace_codex_block(existing_text, name, _render_codex_toml_block(plan))
+    new_text = _rename_codex_env_keys(existing_text, name, renames)
+
+    # Fail closed: the rewritten file must parse, and must differ from the
+    # original in exactly the way we intended — nothing else.
+    expected = copy.deepcopy(data)
+    expected['mcp_servers'][name]['env'] = _repair_identity_env(env)
+    try:
+        actual = tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as e:
+        raise RuntimeError(f'refusing to write {target}: repaired content is not valid TOML: {e}') from e
+    if actual != expected:
+        raise RuntimeError(
+            f'refusing to write {target}: repaired content does not match the intended '
+            f'mcp_servers.{name} entry (unsupported layout for --repair).'
+        )
+
     target.write_text(new_text, encoding='utf-8')
     return f'repaired identity env for mcp_servers.{name} in {target}'
 
 
-def _parse_claude_mcp_get(output: str) -> tuple[str, dict[str, str]] | None:
-    """Parse ``claude mcp get <name>`` text output into ``(command, env)``.
+@dataclass(frozen=True)
+class ClaudeEntry:
+    """Everything ``claude mcp get`` tells us about one registration.
 
-    The format is indented ``Key: value`` lines with an ``Environment:``
-    section whose children are bare ``KEY=VALUE`` lines (see ``claude mcp get
-    --help``; there is no ``--json`` output for this subcommand). Returns
-    ``None`` when no ``Command:`` line is found — an unrecognized shape we
-    should not guess about rather than silently repair against.
+    Fields are ``None`` when the output didn't carry them at all, which is
+    what :func:`_claude_entry_restore_blockers` turns into a refusal — a
+    field we didn't read is a field we can't put back.
+    """
+
+    command: str
+    scope: str | None
+    transport: str | None
+    args: tuple[str, ...] | None
+    env: dict[str, str]
+    problems: tuple[str, ...] = ()
+
+
+# Claude Code prints ``Scope: User config (available in all your projects)``;
+# the CLI flag wants the bare word. Anything else is unmapped on purpose.
+_CLAUDE_SCOPE_WORDS = {'local': 'local', 'user': 'user', 'project': 'project'}
+
+# Env entries are printed as bare ``KEY=VALUE``. A value containing newlines
+# is printed verbatim, so its continuation lines land unindented at column 0
+# (verified against Claude Code 2.1.227) — they are recognized by *not*
+# matching this pattern rather than by indentation.
+_CLAUDE_ENV_KEY_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
+
+_CLAUDE_GET_TRAILER = 'To remove this server, run:'
+
+
+def _parse_claude_mcp_get(output: str) -> ClaudeEntry | None:
+    """Parse ``claude mcp get <name>`` text output into a :class:`ClaudeEntry`.
+
+    The format is indented ``Key: value`` lines (``Scope``, ``Type``,
+    ``Command``, ``Args``) followed by an ``Environment:`` section whose
+    children are bare ``KEY=VALUE`` lines; there is no ``--json`` output for
+    this subcommand. Returns ``None`` when no ``Command:`` line is found — an
+    unrecognized shape we should not guess about rather than silently repair
+    against.
+
+    The env section runs to the first blank line (or the ``To remove this
+    server`` trailer), and lines inside it that aren't ``KEY=`` starts are
+    continuations of the previous value. That is what keeps values ending in
+    ``:`` and multi-line values intact, both of which the first version of
+    this parser dropped (Codex review B1 on #287).
     """
     command: str | None = None
+    scope_raw: str | None = None
+    transport: str | None = None
+    args_raw: str | None = None
     env: dict[str, str] = {}
-    in_env = False
-    for line in output.splitlines():
-        stripped = line.strip()
+    problems: list[str] = []
+
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        if stripped == 'Environment:':
+            i += 1
+            last_key: str | None = None
+            while i < len(lines):
+                cur = lines[i]
+                if not cur.strip() or cur.lstrip().startswith(_CLAUDE_GET_TRAILER):
+                    break
+                match = _CLAUDE_ENV_KEY_RE.match(cur)
+                if match:
+                    last_key = match.group(1)
+                    env[last_key] = match.group(2)
+                elif last_key is not None:
+                    env[last_key] += '\n' + cur
+                else:
+                    problems.append(f'unparseable Environment line: {cur!r}')
+                i += 1
+            continue
         if stripped.startswith('Command:'):
             command = stripped[len('Command:') :].strip()
-            in_env = False
-        elif stripped == 'Environment:':
-            in_env = True
-        elif stripped.endswith(':') or not stripped:
-            in_env = False
-        elif in_env and '=' in stripped:
-            key, _, value = stripped.partition('=')
-            env[key] = value
+        elif stripped.startswith('Scope:'):
+            scope_raw = stripped[len('Scope:') :].strip()
+        elif stripped.startswith('Type:'):
+            transport = stripped[len('Type:') :].strip()
+        elif stripped.startswith('Args:'):
+            args_raw = stripped[len('Args:') :].strip()
+        i += 1
+
     if command is None:
         return None
-    return command, env
+
+    scope: str | None = None
+    if scope_raw is not None:
+        first_word = scope_raw.split()[0].lower() if scope_raw.split() else ''
+        scope = _CLAUDE_SCOPE_WORDS.get(first_word)
+        if scope is None:
+            problems.append(f'unrecognized Scope: {scope_raw!r}')
+    args = None if args_raw is None else tuple(args_raw.split())
+    return ClaudeEntry(
+        command=command,
+        scope=scope,
+        transport=transport,
+        args=args,
+        env=env,
+        problems=tuple(problems),
+    )
+
+
+def _claude_entry_restore_blockers(entry: ClaudeEntry) -> list[str]:
+    """Return reasons ``entry`` could not be re-registered exactly as it stands.
+
+    ``--repair`` has to delete the registration before it can re-create it,
+    so anything we cannot reproduce has to stop the operation *before* the
+    remove rather than surface as a silently downgraded entry.
+    """
+    blockers = list(entry.problems)
+    if not entry.command:
+        blockers.append('Command is empty')
+    if entry.scope is None:
+        blockers.append('Scope is missing or unrecognized')
+    if entry.transport is None:
+        blockers.append('Type (transport) is missing')
+    elif entry.transport != 'stdio':
+        blockers.append(f'transport {entry.transport!r} is not stdio; re-registering it is not supported')
+    if entry.args is None:
+        blockers.append('Args line is missing')
+    return blockers
 
 
 def repair_claude_code(
@@ -454,7 +724,14 @@ def repair_claude_code(
     re-registers with the merged env via remove+add — the same primitives
     ``install_claude_code``'s ``--force`` path already uses. Unlike
     ``--force``, the env sent to ``add`` is the *previous* env with only the
-    identity keys renamed, so unrelated ``-e`` values the user set survive.
+    identity keys renamed, so unrelated ``-e`` values the user set survive,
+    and so do the entry's scope and args.
+
+    There is no delete-free update route in the Claude CLI (``claude mcp``
+    offers add / add-json / remove and no update), so the remove+add window
+    is unavoidable. It is made survivable instead: the full pre-remove entry
+    is kept and a failed ``add`` triggers a rollback ``add`` of the original
+    (Codex review B2 on #287).
     """
     resolver = which or shutil.which
     claude = resolver('claude')
@@ -472,25 +749,55 @@ def repair_claude_code(
             'Run `kioku-mesh mcp install --client claude-code` first.'
         )
 
-    parsed = _parse_claude_mcp_get(get_result.stdout)
-    if parsed is None:
+    entry = _parse_claude_mcp_get(get_result.stdout)
+    if entry is None:
         raise RuntimeError(f'could not parse `claude mcp get {name}` output; unrecognized format for --repair.')
-    command, env = parsed
 
-    repaired_env = _repair_identity_env(env)
-    if repaired_env == env:
+    if not _identity_env_renames(entry.env):
         return f'{name!r} already uses the current KIOKU_MESH_* prefix; nothing to repair.'
 
-    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name=name, command=command, env=repaired_env)
-    remove_result = runner([claude, 'mcp', 'remove', name])
+    blockers = _claude_entry_restore_blockers(entry)
+    if blockers:
+        raise RuntimeError(
+            f'refusing to repair {name!r}: `claude mcp get {name}` output cannot be reproduced '
+            f'losslessly ({"; ".join(blockers)}). Nothing was removed — rename the '
+            'MESH_MEM_* identity env by hand, or re-run `kioku-mesh mcp install '
+            '--client claude-code --force`.'
+        )
+
+    original_plan = InstallPlan(
+        client=MCPClient.CLAUDE_CODE,
+        name=name,
+        command=entry.command,
+        env=dict(entry.env),
+        args=entry.args or (),
+        scope=entry.scope or 'user',
+        transport=entry.transport or 'stdio',
+    )
+    repaired_plan = replace(original_plan, env=_repair_identity_env(entry.env))
+
+    remove_result = runner([claude, 'mcp', 'remove', name, '-s', original_plan.scope])
     if remove_result.returncode != 0:
         stderr = (remove_result.stderr or '').strip() or '(no stderr)'
         raise RuntimeError(f'claude mcp remove {name} failed (rc={remove_result.returncode}): {stderr}')
 
-    add_result = runner(_build_claude_add_command(claude, plan))
+    add_result = runner(_build_claude_add_command(claude, repaired_plan))
     if add_result.returncode != 0:
-        stderr = (add_result.stderr or '').strip()
-        raise RuntimeError(f'claude mcp add failed (rc={add_result.returncode}): {stderr}')
+        stderr = (add_result.stderr or '').strip() or '(no stderr)'
+        rollback_argv = _build_claude_add_command(claude, original_plan)
+        rollback_result = runner(rollback_argv)
+        if rollback_result.returncode == 0:
+            raise RuntimeError(
+                f'claude mcp add failed (rc={add_result.returncode}): {stderr}. '
+                f'The previous {name!r} entry was restored unchanged; nothing was lost.'
+            )
+        rollback_stderr = (rollback_result.stderr or '').strip() or '(no stderr)'
+        restore_cmd = ' '.join(shlex.quote(part) for part in rollback_argv)
+        raise RuntimeError(
+            f'claude mcp add failed (rc={add_result.returncode}): {stderr}. '
+            f'Rollback of the previous entry ALSO failed (rc={rollback_result.returncode}): '
+            f'{rollback_stderr}. {name!r} is currently unregistered — restore it with: {restore_cmd}'
+        )
     return f'repaired identity env for {name!r} in Claude Code'
 
 

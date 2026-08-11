@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import tomllib
+from typing import Callable
 
 import pytest
 
 from kioku_mesh import mcp_install
 from kioku_mesh.__main__ import main as cli_main
 from kioku_mesh.mcp_install import _build_claude_add_command
+from kioku_mesh.mcp_install import _parse_claude_mcp_get
 from kioku_mesh.mcp_install import _render_codex_toml_block
 from kioku_mesh.mcp_install import _repair_identity_env
 from kioku_mesh.mcp_install import _replace_codex_block
@@ -232,6 +235,20 @@ def test_render_codex_toml_block_shape() -> None:
     assert 'B = "2"' in block
 
 
+def test_render_codex_toml_block_escapes_quotes_and_backslashes() -> None:
+    r"""Values with `"` or `\\` must round-trip as valid TOML, not break the file."""
+    plan = InstallPlan(
+        client=MCPClient.CODEX_CLI,
+        name='kioku_mesh',
+        command='/tmp/a"b',
+        env={'WINPATH': 'C:\\tools\\bin', 'QUOTED': 'say "hi"'},
+    )
+    block = _render_codex_toml_block(plan)
+    entry = tomllib.loads(block)['mcp_servers']['kioku_mesh']  # must not raise
+    assert entry['command'] == '/tmp/a"b'
+    assert entry['env'] == {'WINPATH': 'C:\\tools\\bin', 'QUOTED': 'say "hi"'}
+
+
 def test_install_codex_cli_writes_new_file(tmp_path: Path) -> None:
     plan = InstallPlan(client=MCPClient.CODEX_CLI, name='kioku_mesh', command='/x/mesh-mem-mcp', env={'A': '1'})
     target = tmp_path / 'sub' / 'config.toml'
@@ -442,6 +459,89 @@ def test_repair_codex_cli_errors_when_file_missing(tmp_path: Path) -> None:
     assert msg.startswith('error:')
 
 
+def test_repair_codex_cli_preserves_other_fields_and_comments_in_target_block(tmp_path: Path) -> None:
+    """Only the identity key tokens change — args / enabled / timeout / comments stay."""
+    target = tmp_path / 'config.toml'
+    original = (
+        '[mcp_servers.kioku_mesh]\n'
+        'command = "/home/user/.local/bin/kioku-mesh-mcp"\n'
+        'args = ["--verbose", "--flag"]\n'
+        'enabled = true\n'
+        'startup_timeout_sec = 45\n'
+        '\n'
+        '# keep this note about the env block\n'
+        '[mcp_servers.kioku_mesh.env]\n'
+        'MESH_MEM_AGENT_FAMILY = "codex"  # trailing comment\n'
+        'MY_CUSTOM_TIMEOUT = "30"\n'
+    )
+    target.write_text(original)
+
+    msg = repair_codex_cli(config_path=target)
+
+    assert 'repaired' in msg
+    body = target.read_text()
+    assert 'args = ["--verbose", "--flag"]' in body
+    assert 'enabled = true' in body
+    assert 'startup_timeout_sec = 45' in body
+    assert '# keep this note about the env block' in body
+    assert 'KIOKU_MESH_AGENT_FAMILY = "codex"  # trailing comment' in body
+    assert 'MESH_MEM_AGENT_FAMILY' not in body
+    entry = tomllib.loads(body)['mcp_servers']['kioku_mesh']
+    assert entry['args'] == ['--verbose', '--flag']
+    assert entry['enabled'] is True
+    assert entry['startup_timeout_sec'] == 45
+    assert entry['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'codex', 'MY_CUSTOM_TIMEOUT': '30'}
+
+
+def test_repair_codex_cli_keeps_quoted_values_valid_toml(tmp_path: Path) -> None:
+    """Values that would need escaping survive because nothing is re-rendered."""
+    target = tmp_path / 'config.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\n'
+        "command = '/tmp/a\"b'\n"
+        '\n'
+        '[mcp_servers.kioku_mesh.env]\n'
+        "KEEP = 'a\"b'\n"
+        'WINPATH = "C:\\\\tools\\\\bin"\n'
+        'MESH_MEM_CLIENT_ID = "codex-cli"\n'
+    )
+
+    msg = repair_codex_cli(config_path=target)
+
+    assert 'repaired' in msg
+    entry = tomllib.loads(target.read_text())['mcp_servers']['kioku_mesh']  # must not raise
+    assert entry['command'] == '/tmp/a"b'
+    assert entry['env'] == {'KEEP': 'a"b', 'WINPATH': 'C:\\tools\\bin', 'KIOKU_MESH_CLIENT_ID': 'codex-cli'}
+
+
+def test_repair_codex_cli_renames_key_inside_inline_env_table(tmp_path: Path) -> None:
+    target = tmp_path / 'config.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\ncommand = "/x"\nenv = { MESH_MEM_AGENT_FAMILY = "codex", OTHER = "1" }\n'
+    )
+
+    msg = repair_codex_cli(config_path=target)
+
+    assert 'repaired' in msg
+    body = target.read_text()
+    assert body.endswith('env = { KIOKU_MESH_AGENT_FAMILY = "codex", OTHER = "1" }\n')
+    assert tomllib.loads(body)['mcp_servers']['kioku_mesh']['env'] == {
+        'KIOKU_MESH_AGENT_FAMILY': 'codex',
+        'OTHER': '1',
+    }
+
+
+def test_repair_codex_cli_fails_closed_on_layout_it_cannot_edit(tmp_path: Path) -> None:
+    """An entry with no table header of its own is refused, leaving the file alone."""
+    target = tmp_path / 'config.toml'
+    original = '[mcp_servers]\nkioku_mesh = { command = "/x", env = { MESH_MEM_AGENT_FAMILY = "codex" } }\n'
+    target.write_text(original)
+
+    with pytest.raises(RuntimeError, match='unsupported layout'):
+        repair_codex_cli(config_path=target)
+    assert target.read_text() == original
+
+
 # -- repair_claude_code ------------------------------------------------------------
 
 _CLAUDE_MCP_GET_OUTPUT = (
@@ -506,6 +606,162 @@ def test_repair_claude_code_errors_when_not_registered() -> None:
 def test_repair_claude_code_missing_claude_binary() -> None:
     with pytest.raises(FileNotFoundError, match='claude binary'):
         repair_claude_code(which=lambda _n: None)
+
+
+def _claude_get_output(
+    *,
+    scope: str = 'User config (available in all your projects)',
+    transport: str | None = 'stdio',
+    command: str | None = '/home/user/.local/bin/kioku-mesh-mcp',
+    args: str | None = '',
+    env_lines: str = '    MESH_MEM_AGENT_FAMILY=claude\n',
+) -> str:
+    """Build a `claude mcp get` fixture; ``None`` drops the line entirely."""
+    out = 'kioku_mesh:\n'
+    if scope is not None:
+        out += f'  Scope: {scope}\n'
+    out += '  Status: ✔ Connected\n'
+    if transport is not None:
+        out += f'  Type: {transport}\n'
+    if command is not None:
+        out += f'  Command: {command}\n'
+    if args is not None:
+        out += f'  Args: {args}\n' if args else '  Args:\n'
+    out += '  Environment:\n' + env_lines
+    return out + '\nTo remove this server, run: claude mcp remove kioku_mesh -s user\n'
+
+
+def _recording_runner(
+    output: str,
+    *,
+    add_rc: int = 0,
+    rollback_rc: int = 0,
+) -> tuple[list[list[str]], Callable[[list[str]], subprocess.CompletedProcess[str]]]:
+    """Fake ``claude`` runner recording argv; ``add_rc`` fails the first add only."""
+    invocations: list[list[str]] = []
+
+    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        invocations.append(argv[1:])
+        if argv[1:3] == ['mcp', 'get']:
+            return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
+        if argv[1:3] == ['mcp', 'add']:
+            adds = [c for c in invocations if c[:2] == ['mcp', 'add']]
+            if len(adds) == 1:
+                return subprocess.CompletedProcess(argv, add_rc, stdout='', stderr='add boom')
+            return subprocess.CompletedProcess(argv, rollback_rc, stdout='', stderr='rollback boom')
+        return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+
+    return invocations, fake_run
+
+
+@pytest.mark.parametrize(
+    ('scope_line', 'expected_scope'),
+    [
+        ('Local config (private to you in this project)', 'local'),
+        ('Project config (shared via .mcp.json)', 'project'),
+        ('User config (available in all your projects)', 'user'),
+    ],
+)
+def test_repair_claude_code_preserves_scope_and_args(scope_line: str, expected_scope: str) -> None:
+    """B1: scope and non-empty args must survive the remove/add round trip."""
+    output = _claude_get_output(scope=scope_line, args='--mode custom --flag')
+    invocations, fake_run = _recording_runner(output)
+
+    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    assert 'repaired' in msg
+    remove_call, add_call = invocations[1], invocations[2]
+    assert remove_call == ['mcp', 'remove', 'kioku_mesh', '-s', expected_scope]
+    assert add_call[:6] == ['mcp', 'add', 'kioku_mesh', '-s', expected_scope, '-e']
+    assert add_call[-5:] == ['--', '/home/user/.local/bin/kioku-mesh-mcp', '--mode', 'custom', '--flag']
+
+
+def test_repair_claude_code_preserves_env_value_ending_with_colon() -> None:
+    """B1: the old parser treated a trailing `:` as a section header and dropped the key."""
+    output = _claude_get_output(
+        env_lines='    KEEP=ends-with-colon:\n    MESH_MEM_AGENT_FAMILY=claude\n',
+    )
+    invocations, fake_run = _recording_runner(output)
+
+    repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    assert 'KEEP=ends-with-colon:' in invocations[2]
+
+
+def test_repair_claude_code_preserves_multiline_env_value() -> None:
+    """B1: a value with a newline prints its continuation unindented at column 0."""
+    output = _claude_get_output(
+        env_lines='    MULTI=line one\nline two\n    MESH_MEM_CLIENT_ID=claude-code\n',
+    )
+    invocations, fake_run = _recording_runner(output)
+
+    repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    add_call = invocations[2]
+    assert 'MULTI=line one\nline two' in add_call
+    assert 'KIOKU_MESH_CLIENT_ID=claude-code' in add_call
+
+
+@pytest.mark.parametrize(
+    ('kwargs', 'expected'),
+    [
+        ({'command': ''}, 'Command is empty'),
+        ({'scope': None}, 'Scope is missing'),
+        ({'scope': 'Workspace config (new in 3.x)'}, 'unrecognized Scope'),
+        ({'transport': None}, 'transport) is missing'),
+        ({'transport': 'http'}, "transport 'http' is not stdio"),
+        ({'args': None}, 'Args line is missing'),
+    ],
+)
+def test_repair_claude_code_fails_closed_before_remove(kwargs: dict[str, str | None], expected: str) -> None:
+    """B1: anything we cannot reproduce stops the repair *before* the destructive remove."""
+    invocations, fake_run = _recording_runner(_claude_get_output(**kwargs))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    message = str(excinfo.value)
+    assert 'cannot be reproduced losslessly' in message
+    assert expected in message  # the refusal names the field it could not reproduce
+    assert [c[:2] for c in invocations] == [['mcp', 'get']]  # nothing was removed
+
+
+def test_repair_claude_code_rolls_back_when_add_fails() -> None:
+    """B2: a failed add must re-add the original entry rather than leave it deleted."""
+    output = _claude_get_output(
+        scope='Local config (private to you in this project)',
+        args='--mode custom',
+        env_lines='    ZENOH_CONNECT=tcp/127.0.0.1:7447\n    MESH_MEM_AGENT_FAMILY=claude\n',
+    )
+    invocations, fake_run = _recording_runner(output, add_rc=9)
+
+    with pytest.raises(RuntimeError, match='was restored unchanged'):
+        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    assert [c[:2] for c in invocations] == [['mcp', 'get'], ['mcp', 'remove'], ['mcp', 'add'], ['mcp', 'add']]
+    rollback = invocations[3]
+    assert rollback[:5] == ['mcp', 'add', 'kioku_mesh', '-s', 'local']
+    assert 'MESH_MEM_AGENT_FAMILY=claude' in rollback  # original identity env restored verbatim
+    assert 'KIOKU_MESH_AGENT_FAMILY=claude' not in rollback
+    assert 'ZENOH_CONNECT=tcp/127.0.0.1:7447' in rollback
+    assert rollback[-4:] == ['--', '/home/user/.local/bin/kioku-mesh-mcp', '--mode', 'custom']
+
+
+def test_repair_claude_code_reports_when_rollback_also_fails() -> None:
+    """B2: if restore fails too, say the entry is gone and hand back the exact argv."""
+    invocations, fake_run = _recording_runner(_claude_get_output(), add_rc=9, rollback_rc=7)
+
+    with pytest.raises(RuntimeError, match='currently unregistered') as excinfo:
+        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    message = str(excinfo.value)
+    assert 'rollback boom' in message
+    assert 'MESH_MEM_AGENT_FAMILY=claude' in message  # restore command is copy-pasteable
+    assert len(invocations) == 4
+
+
+def test_parse_claude_mcp_get_returns_none_without_command_line() -> None:
+    assert _parse_claude_mcp_get('kioku_mesh:\n  Scope: User config\n') is None
 
 
 # -- repair dispatch ----------------------------------------------------------------

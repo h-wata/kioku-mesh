@@ -85,6 +85,27 @@ ADR-0030.
   parse for Codex CLI) before writing back, rather than resetting the whole
   entry the way `--force` does. (#279)
 
+  "Everything else untouched" is enforced rather than assumed:
+
+  - Claude Code: the entry's scope (`local` / `user` / `project`), args and
+    full env — including values that end in `:` and values spanning several
+    lines — are read back out of `claude mcp get` and re-registered as they
+    were. Output this parser cannot reproduce (empty `Command`, missing or
+    unknown `Scope`, a non-stdio transport, a missing `Args` line) aborts the
+    repair *before* the entry is removed.
+  - Claude Code: the CLI has no delete-free update route, so the pre-remove
+    entry is kept and a failed `add` triggers a rollback `add` of the original.
+    If that rollback also fails, the error says the entry is unregistered and
+    prints the exact argv that restores it.
+  - Codex CLI: only the identity key tokens inside the target entry's env are
+    rewritten, so that entry's own `args` / `enabled` / `startup_timeout_sec`,
+    its comments and its value quoting survive verbatim. The rewritten file is
+    re-parsed and compared against the intended document before it is written;
+    a layout the editor cannot handle fails closed with the file untouched.
+  - `mcp install --client codex-cli` now escapes values per TOML 1.0, so a
+    command path or env value containing `"` or `\` no longer produces a
+    config that fails to parse.
+
 ### Fixed
 
 - Messaging: acknowledgement rows with no matching message are no longer read
