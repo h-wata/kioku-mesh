@@ -30,6 +30,7 @@ import sqlite3
 import pytest
 
 from kioku_mesh.__main__ import main as cli_main
+from kioku_mesh.messaging import local_index as local_index_module
 from kioku_mesh.messaging import orphan_acks
 from kioku_mesh.messaging.local_index import LocalMessageIndex
 from kioku_mesh.messaging.local_index import MESSAGING_SCHEMA_VERSION
@@ -306,3 +307,9 @@ def test_the_cli_still_refuses_the_removed_bulk_cleanup_command() -> None:
         cli_main(['messaging', 'purge-orphan-acks'])
 
     assert exc.value.code == 2
+
+
+def test_the_index_still_exposes_no_bulk_purge_api() -> None:
+    """The CLI guard above only stops one caller. The API itself must not exist either."""
+    assert not hasattr(LocalMessageIndex, 'purge_orphan_acks')
+    assert not hasattr(local_index_module, 'ORPHAN_ACK_GRACE_SEC')
