@@ -17,6 +17,17 @@ ADR-0030.
 ### Added
 
 - `get_memory_status` に直近7日の family 別 save 数を追加 (#280)
+- `search_memory` / `recall_context`: read-side project aliases
+  (`mesh-mem` ↔ `kioku-mesh`). A project filter now matches every stored
+  `project` label of the same logical project in **both** directions: the
+  canonical name reaches the pre-rename history saved under the legacy name
+  (the Issue #278 symptom), and the legacy name still reaches rows saved under
+  the canonical one. Both labels are OR-ed inside a single backend query, so
+  results keep their order and carry no duplicates. The mapping lives in a
+  small hardcoded table (`core/project_alias.py`) and is applied only to the
+  incoming search filter; `save_observation` still persists the literal
+  `project` value it was given. `recall_context` names the expansion in its
+  `filters:` line (`project='kioku-mesh' (also matching 'mesh-mem')`) (#278).
 
 ### Fixed
 

@@ -10,6 +10,7 @@ CLI and MCP server code paths are identical for both modes.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import dataclasses
 from datetime import datetime
 from datetime import timedelta
@@ -52,7 +53,7 @@ class MemoryBackend(Protocol):
         client_id: str = '',
         pc_id: str = '',
         session_id: str = '',
-        project: str = '',
+        project: str | Sequence[str] = '',
         since_iso: str = '',
         until_iso: str = '',
         cursor_observation_id: str = '',
@@ -125,7 +126,7 @@ class LocalBackend:
         client_id: str = '',
         pc_id: str = '',
         session_id: str = '',
-        project: str = '',
+        project: str | Sequence[str] = '',
         since_iso: str = '',
         until_iso: str = '',
         cursor_observation_id: str = '',
@@ -291,7 +292,7 @@ class ZenohBackend:
         client_id: str = '',
         pc_id: str = '',
         session_id: str = '',
-        project: str = '',
+        project: str | Sequence[str] = '',
         since_iso: str = '',
         until_iso: str = '',
         cursor_observation_id: str = '',

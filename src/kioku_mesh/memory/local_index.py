@@ -27,6 +27,7 @@ Schema validated by TASK-134 spike at 50k rows: rebuild ~0.4s, query p99
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import dataclasses
 import logging
 import os
@@ -42,6 +43,7 @@ from ..core.keyspace import OBS_READ_KEY_EXPR
 from ..core.keyspace import TOMB_READ_KEY_EXPR
 from ..core.models import Observation
 from ..core.models import Tombstone
+from ..core.project_alias import normalize_project_filter
 
 log = logging.getLogger(__name__)
 
@@ -530,7 +532,7 @@ class LocalIndex:
     def search(
         self,
         *,
-        project: str = '',
+        project: str | Sequence[str] = '',
         agent_family: str = '',
         client_id: str = '',
         pc_id: str = '',
@@ -565,6 +567,10 @@ class LocalIndex:
           'and_or': AND phase first; OR phase fills remaining limit slots.
         Base filters (deleted/shadowed/superseded/project/identity/since) are
         AND-combined in every mode. Unknown values raise ValueError.
+
+        ``project`` accepts a single name or a sequence of names (Issue #278:
+        a renamed project keeps history under both labels). The values are
+        OR-ed against each other and still AND-ed with every other filter.
 
         ``include_deleted=True`` returns both tombstoned and rebuild-shadowed
         rows. The name is historical but the behavior is intentionally "show
@@ -679,9 +685,15 @@ class LocalIndex:
             )
             if not include_expired:
                 params.append(resolved_now)
-        if project:
-            where.append('project = ?')
-            params.append(project)
+        # Issue #278: ``project`` may carry several literal values that belong
+        # to the same logical project (a rename leaves history under the old
+        # name). One ``IN`` list keeps that a single query, so results stay
+        # ordered and deduplicated by construction.
+        project_values = normalize_project_filter(project)
+        if project_values:
+            placeholders = ', '.join('?' * len(project_values))
+            where.append(f'project IN ({placeholders})')
+            params.extend(project_values)
         if agent_family:
             where.append("json_extract(payload_json, '$.agent_family') = ?")
             params.append(agent_family)

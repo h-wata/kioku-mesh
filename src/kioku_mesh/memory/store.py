@@ -26,6 +26,7 @@ on). Patching functions that still live here (``get_index``,
 attribute the siblings read) keeps working.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 import logging
@@ -37,6 +38,7 @@ from ..core.keyspace import obs_selector
 from ..core.keyspace import tomb_selector
 from ..core.models import Observation
 from ..core.models import Tombstone
+from ..core.project_alias import normalize_project_filter
 from ..core.transport import _iter_ok_replies
 from ..core.transport import _now_iso_utc  # noqa: F401  (façade re-export, #167)
 from ..core.transport import _open_session  # noqa: F401  (façade re-export, #167)
@@ -257,7 +259,7 @@ def search_observations(
     client_id: str = '',
     pc_id: str = '',
     session_id: str = '',
-    project: str = '',
+    project: str | Sequence[str] = '',
     since_iso: str = '',
     until_iso: str = '',
     cursor_observation_id: str = '',
@@ -271,6 +273,10 @@ def search_observations(
     default (sub-100ms at 50k per TASK-134 spike). The legacy Zenoh full-
     scan path stays available behind ``KIOKU_MESH_DISABLE_INDEX=1`` so
     operators can flip back if the index is unavailable.
+
+    ``project`` accepts a single name or a sequence of names; the values are
+    OR-ed with each other and AND-ed with the other filters (Issue #278:
+    a renamed project keeps history under both labels).
 
     ``limit`` defaults to 50, max 10000 (``MAX_SEARCH``). ``until_iso``
     is an inclusive upper bound on ``created_at``; pairing it with
@@ -319,7 +325,7 @@ def _search_via_zenoh(
     client_id: str,
     pc_id: str,
     session_id: str,
-    project: str,
+    project: str | Sequence[str],
     since_iso: str,
     until_iso: str = '',
     cursor_observation_id: str = '',
@@ -344,6 +350,10 @@ def _search_via_zenoh(
         :meth:`LocalIndex.search` semantics.  Base filters (project /
         since / until / tombstones) remain AND-combined in every mode.
     """
+    # Issue #278: a project filter may list several literal values that belong
+    # to the same logical project (rename history). Mirrors the SQL ``IN``
+    # list on the index path.
+    project_values = normalize_project_filter(project)
     since_dt = _parse_iso(since_iso)
     until_dt = _parse_iso(until_iso)
 
@@ -390,7 +400,7 @@ def _search_via_zenoh(
             continue
         if obs.observation_id in tombs:
             continue
-        if project and obs.project != project:
+        if project_values and obs.project not in project_values:
             continue
         if since_dt or until_dt:
             obs_dt = _parse_iso(obs.created_at)
