@@ -16,6 +16,9 @@ import time
 
 import pytest
 
+from .wait_helpers import handshake
+from .wait_helpers import wait_until
+
 # Ensure subprocess calls resolve mesh_mem from this worktree, not another
 # editable-installed worktree that may be active on the same interpreter.
 _WORKTREE_SRC = str(Path(__file__).parent.parent / 'src')
@@ -46,6 +49,34 @@ def _subprocess_env(**extra: str) -> dict[str, str]:
     env['PYTHONPATH'] = _WORKTREE_SRC
     env.update(extra)
     return env
+
+
+def _wait_for_search_hit(
+    env: dict[str, str], query: str, needle: str, *, description: str
+) -> subprocess.CompletedProcess[str]:
+    """Poll `kioku_mesh search <query>` until stdout contains `needle`.
+
+    Each poll spawns a real subprocess (interpreter start + zenoh session
+    open/close), which is not cheap, so this sleeps a coarse 0.3s between
+    attempts rather than wait_until's default 10ms — that default is tuned
+    for in-process predicates, not subprocess spawns.
+    """
+    last: dict[str, subprocess.CompletedProcess[str]] = {}
+
+    def _check() -> bool:
+        time.sleep(0.3)
+        result = subprocess.run(
+            [sys.executable, '-m', 'kioku_mesh', 'search', query],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        last['result'] = result
+        return result.returncode == 0 and needle in result.stdout
+
+    wait_until(_check, description)
+    return last['result']
 
 
 def test_router_session_open_close() -> None:
@@ -82,10 +113,14 @@ def test_inprocess_pubsub() -> None:
 
     received: list[bytes] = []
     sub = router.declare_subscriber('test/topic', lambda s: received.append(bytes(s.payload)))
-    time.sleep(0.2)
-    peer.put('test/topic', b'hello')
-    time.sleep(0.5)
-    assert len(received) > 0
+    # The subscriber's declaration must reach `peer` through the router before
+    # a put is deliverable; re-publish until it lands rather than sleeping for
+    # a duration picked to be "usually enough" (see wait_helpers.handshake).
+    handshake(
+        lambda: peer.put('test/topic', b'hello'),
+        lambda: len(received) > 0,
+        'peer put reaching router subscriber',
+    )
     assert received[0] == b'hello'
 
     sub.undeclare()
@@ -122,6 +157,13 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
         router_proc.wait(timeout=3)
         pytest.fail(f'Embedded router did not start on {listen} within 10s')
 
+    # Not converted to a poll: nothing observable exists yet to poll for.
+    # This waits for the *router's own* index subscriber declaration to
+    # settle before the peer's one-shot put below — if that declaration
+    # isn't live yet, the put is dropped outright (not queued, per
+    # wait_helpers' docstring) and no amount of waiting on the later search
+    # would recover it. There's no CLI/subprocess-observable signal for
+    # "router subscriber declared" to poll instead.
     time.sleep(1.0)  # let index subscriber connect and stabilise
 
     unique_content = f'mesh-exchange-{port}-unique-content'
@@ -153,8 +195,6 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
         )
         assert save_result.returncode == 0, save_result.stderr
 
-        time.sleep(1.5)  # wait for replication subscriber to write to router SQLite
-
         # Router search: uses ROUTER's state_dir — must hit via mesh replication
         router_search_env = _subprocess_env(
             ZENOH_CONNECT=listen,
@@ -162,12 +202,14 @@ def test_actual_mesh_exchange(tmp_path: Path) -> None:
             KIOKU_MESH_STATE_DIR=router_state,
             XDG_CONFIG_HOME=xdg_dir,
         )
-        search_result = subprocess.run(
-            [sys.executable, '-m', 'kioku_mesh', 'search', 'mesh-exchange'],
-            env=router_search_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
+        search_result = _wait_for_search_hit(
+            router_search_env,
+            'mesh-exchange',
+            unique_content,
+            description=(
+                f'replication subscriber to write {unique_content!r} to router SQLite '
+                f'(router_state={router_state}, peer_state={peer_state})'
+            ),
         )
         assert search_result.returncode == 0, search_result.stderr
         assert unique_content in search_result.stdout, (
@@ -271,6 +313,10 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
         router_proc.wait(timeout=3)
         pytest.fail(f'Router did not start on {router_listen}')
 
+    # Not converted to a poll: `_wait_for_tcp` above only proves the router's
+    # TCP listener accepted a connection, not that its zenoh session is fully
+    # up for a *new* peer's declaration exchange. No CLI/subprocess-observable
+    # signal exists for that readiness, so this stays a fixed buffer.
     time.sleep(0.5)
 
     join_proc = subprocess.Popen(
@@ -280,6 +326,13 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
         env=_subprocess_env(KIOKU_MESH_STATE_DIR=join_state, XDG_CONFIG_HOME=xdg_dir),
     )
 
+    # Not converted to a poll: `mesh join` prints "Press Ctrl-C to stop." (see
+    # __main__._cmd_mesh_join) *before* it calls get_index() to start the
+    # replication subscriber, so that stdout line is not a valid readiness
+    # sentinel — waiting for it would be a poll that lies. Without a genuine
+    # sentinel this stays a fixed wait for the subscriber declaration to
+    # settle before the router-side save below is published (same
+    # not-queued-if-early risk documented in wait_helpers.handshake).
     time.sleep(1.0)  # let join subscriber connect
 
     try:
@@ -318,8 +371,6 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
         )
         assert save_result.returncode == 0, save_result.stderr
 
-        time.sleep(1.5)  # wait for replication to join's SQLite
-
         # join process's SQLite should now contain the save
         join_search_env = _subprocess_env(
             ZENOH_CONNECT=router_listen,
@@ -327,12 +378,11 @@ def test_mesh_join_long_running(tmp_path: Path) -> None:
             KIOKU_MESH_STATE_DIR=join_state,
             XDG_CONFIG_HOME=xdg_dir,
         )
-        search_result = subprocess.run(
-            [sys.executable, '-m', 'kioku_mesh', 'search', 'join-roundtrip'],
-            env=join_search_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
+        search_result = _wait_for_search_hit(
+            join_search_env,
+            'join-roundtrip',
+            unique_content,
+            description=(f'replication to write {unique_content!r} to join process SQLite (join_state={join_state})'),
         )
         assert search_result.returncode == 0, search_result.stderr
         assert unique_content in search_result.stdout, (

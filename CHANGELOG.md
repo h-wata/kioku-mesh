@@ -100,6 +100,20 @@ ADR-0030.
   30 consecutive runs of the two files: 0 failures before and after,
   36.6s → 8.0s per run.
 
+- tests: the same fixed-sleep pattern is now also gone from the rest of the
+  suite. `tests/test_mcp_cli.py`, `test_mcp_server.py`, `test_store_single.py`,
+  `test_visibility_write.py`, `test_mesh_embedded_router.py`,
+  `test_local_backend.py` and `test_messaging_presence.py` now wait on the
+  condition each site depends on, reusing `tests/wait_helpers.py`. Of the 64
+  sleep sites audited across these files (`test_local_index.py` included), 57
+  became waits; 3 in `test_mesh_embedded_router.py` keep a fixed sleep because
+  no observable substitute condition exists (documented inline), 1 was already
+  inside an existing poll, and 3 in `test_local_index.py` sleep only to force a
+  `created_at` clock gap unrelated to Zenoh declaration exchange, so they stay
+  fixed sleeps too. No flakiness was observed in either version over 30
+  consecutive runs of the 7 changed files (0 failures before and after); the
+  waits also cut the run time, 36.6s → 18.2s per run.
+
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node

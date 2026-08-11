@@ -15,12 +15,13 @@ from kioku_mesh import store
 from kioku_mesh import transport
 from kioku_mesh.models import Observation
 
+from .wait_helpers import wait_until
+
 # Zenoh put / delete is asynchronous — ingestion by the storage plugin happens
-# on its own thread. We settle briefly after any write before querying so
-# read-your-writes consistency is honored. 250ms is well below the 5s GET
-# timeout and empirically enough to soak up the queue even when other session
-# fixtures (dual_zenohd) run in parallel.
-_INGEST_SETTLE = 0.25
+# on its own thread, so a query issued right after a put/tombstone can miss
+# it. Rather than sleeping for a duration picked to be "usually enough",
+# every site below waits for the condition it actually depends on (see
+# tests/wait_helpers.py).
 
 
 def _mk_obs(
@@ -49,7 +50,11 @@ def _mk_obs(
 def test_save_then_search_roundtrip(single_zenohd: Any) -> None:  # noqa: ARG001 — fixture side-effect
     obs = _mk_obs('hello mesh', project='demo', tags=['a', 'b'])
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        in {r.observation_id for r in store.search_observations(query='hello', project='demo')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     results = store.search_observations(query='hello', project='demo')
     ids = [r.observation_id for r in results]
@@ -63,14 +68,20 @@ def test_save_then_search_roundtrip(single_zenohd: Any) -> None:  # noqa: ARG001
 def test_tombstone_hides_observation(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('about to be tombstoned', project='tomb-demo')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='tomb-demo')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     # Sanity: visible before tombstone.
     pre = store.search_observations(project='tomb-demo')
     assert obs.observation_id in [r.observation_id for r in pre]
 
     store.put_tombstone(obs, reason='test')
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id not in {r.observation_id for r in store.search_observations(project='tomb-demo')},
+        f'{obs.observation_id} to drop out of search after tombstone',
+    )
 
     post = store.search_observations(project='tomb-demo')
     assert obs.observation_id not in [r.observation_id for r in post]
@@ -92,7 +103,10 @@ def test_reconnect_after_session_reset(single_zenohd: Any) -> None:  # noqa: ARG
 
     obs2 = _mk_obs('after reset', project='reconnect')
     store.put_observation(obs2)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs2.observation_id in {r.observation_id for r in store.search_observations(project='reconnect')},
+        f'{obs2.observation_id} to appear in search after reconnect',
+    )
 
     results = store.search_observations(project='reconnect')
     ids = {r.observation_id for r in results}
@@ -105,7 +119,10 @@ def test_search_respects_project_filter(single_zenohd: Any) -> None:  # noqa: AR
     drop = _mk_obs('project drop', project='beta')
     store.put_observation(keep)
     store.put_observation(drop)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: keep.observation_id in {r.observation_id for r in store.search_observations(project='alpha')},
+        f'{keep.observation_id} to appear in search',
+    )
 
     results = store.search_observations(project='alpha')
     ids = {r.observation_id for r in results}
@@ -124,7 +141,11 @@ def test_search_respects_session_id_filter(single_zenohd: Any) -> None:  # noqa:
     drop = _mk_obs('session drop', session_id='session-beta')
     store.put_observation(keep)
     store.put_observation(drop)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: keep.observation_id
+        in {r.observation_id for r in store.search_observations(session_id='session-alpha')},
+        f'{keep.observation_id} to appear in search',
+    )
 
     results = store.search_observations(session_id='session-alpha')
     ids = {r.observation_id for r in results}
@@ -143,7 +164,13 @@ def test_search_respects_since_iso_filter(single_zenohd: Any) -> None:  # noqa: 
     )
     store.put_observation(old)
     store.put_observation(recent)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: recent.observation_id
+        in {
+            r.observation_id for r in store.search_observations(project='since-test', since_iso='2024-01-01T00:00:00Z')
+        },
+        f'{recent.observation_id} to appear in search',
+    )
 
     results = store.search_observations(project='since-test', since_iso='2024-01-01T00:00:00Z')
     ids = {r.observation_id for r in results}
@@ -183,7 +210,10 @@ def test_search_falls_back_to_zenoh_when_index_disabled(
 
     obs = _mk_obs('zenoh-fallback row', project='fallback')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='fallback')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     results = store.search_observations(project='fallback')
     ids = {r.observation_id for r in results}
@@ -209,7 +239,10 @@ def test_find_by_id_uses_sqlite_index_then_falls_back(single_zenohd: Any) -> Non
     # it so the delete / gc paths still work for pre-Phase-2 observations.
     zenoh_only = _mk_obs('zenoh-only', project='find-routing')
     store.put_observation(zenoh_only)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(zenoh_only.observation_id) is not None,
+        f'{zenoh_only.observation_id} to be readable from the router',
+    )
     store.get_index().physical_delete(zenoh_only.observation_id)
 
     hit2 = store.find_observation_by_id(zenoh_only.observation_id)
