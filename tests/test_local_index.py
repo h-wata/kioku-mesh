@@ -1359,7 +1359,6 @@ def test_fts_bm25_ranking_and_tiebreak(tmp_path: Path) -> None:
         # High-relevance: query term is the entire content.
         obs_high = _mk_obs('kioku kioku kioku', project='rank')
         idx.upsert(obs_low)
-        time.sleep(0.01)  # ensure distinct created_at
         idx.upsert(obs_high)
 
         results = idx.search(query='kioku', project='rank', include_superseded=True)

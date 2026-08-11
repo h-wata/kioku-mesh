@@ -114,10 +114,17 @@ ADR-0030.
   condition exists, documented inline); 1 in `test_local_index.py` was removed
   as a no-op (`test_local_index_query_by_project_returns_recent` sets each
   observation's `created_at` explicitly before `upsert`, so the sleep between
-  inserts created no clock gap — confirmed by 5/5 passing runs without it);
-  and 2 in `test_local_index.py` sleep only to force a `created_at` clock gap
-  for observations whose timestamp is not explicitly set, unrelated to Zenoh
-  declaration exchange, so they stay fixed sleeps. No flakiness was observed
+  inserts created no clock gap — confirmed by 5/5 passing runs without it); a
+  second `test_local_index.py` no-op sleep (`test_fts_bm25_ranking_and_tiebreak`,
+  between the bm25-relevance pair) was found and removed the same way — both
+  observations are constructed via `_mk_obs()`, fixing `created_at` at
+  construction time, before the sleep ever runs, so the sleep never affected
+  either timestamp (confirmed by 5/5 passing runs without it); and 1 remaining
+  `test_local_index.py` sleep (same test, between the tie-break pair) still
+  forces a real `created_at` clock gap — it runs *before* the second
+  observation is constructed — for an observation whose timestamp is not
+  explicitly set, unrelated to Zenoh declaration exchange, so it stays a fixed
+  sleep. No flakiness was observed
   in either version over 30 consecutive runs of the 7 changed files (0
   failures before and after); the waits also cut the run time, 36.6s → 18.2s
   per run.
