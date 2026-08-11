@@ -610,5 +610,6 @@ Tests:
 - Hard authorization: ADR-0019 is soft isolation. Team/user confidentiality requires future Zenoh ACL tied to mTLS cert subject, not just key prefix.
 - Mesh-scope presence default: this memo recommends off by default, but product UX may later want a visible "mesh roster".
 - Sender ack timeout policy: MVP does not auto-resend solely because ack is missing. If users expect delivery receipts, add explicit delivery state and timeout semantics.
+  - Phase 1.5 の設計提案は Issue #201 / `docs/design/0201-messaging-ack-timeout-policy.md` を参照。
 - Multi-session agent delivery: agent-level inbox may be read by multiple active sessions. MVP records ack per recipient session; later work may need "ack by any active session" aggregation.
 - Message body size limit: this memo recommends 64 KiB for MCP poll and 8 KiB for tmux injection, but exact limits should be validated against Zenoh and client UX.
