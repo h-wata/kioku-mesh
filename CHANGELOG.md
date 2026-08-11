@@ -179,6 +179,13 @@ ADR-0030.
   would manufacture pressure to bulk-clear the quarantine. A fleet is done when
   every node exits 0 with the same reported writer version; the command reads
   one database and does not infer anything about the others.
+- `search_memory`: the #285 AND->OR fallback marker (`(no AND match; fell
+  back to OR)`) was appended directly into the result list, so the #277
+  byte-cap counted it as a result and `showing N of M` was off by one
+  whenever a fallback search also hit the cap. The marker is now passed to
+  `_cap_search_output` via `prefix=` instead: its bytes still count toward
+  the cap and it always survives truncation, but it is excluded from the
+  `N`/`M` entry count.
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

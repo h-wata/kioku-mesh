@@ -703,8 +703,6 @@ def search_memory(
     if not results:
         return 'No matching memories.'
     lines = []
-    if fell_back_to_or:
-        lines.append('(no AND match; fell back to OR)')
     for obs in results:
         body = obs.summary if obs.summary else obs.content[:80]
         subject_part = f' {obs.subject}' if obs.subject else ''
@@ -720,7 +718,7 @@ def search_memory(
     # Any banner that is not itself a result (e.g. PR #285's AND->OR fallback
     # marker) belongs in ``prefix``, never in ``lines`` — otherwise it is
     # counted as a result in the truncation notice.
-    prefix = ''
+    prefix = '(no AND match; fell back to OR)' if fell_back_to_or else ''
     return _cap_search_output(lines, SEARCH_OUTPUT_MAX_BYTES, prefix=prefix)
 
 

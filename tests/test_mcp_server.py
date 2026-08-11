@@ -19,6 +19,7 @@ import asyncio
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -1575,6 +1576,59 @@ def test_search_memory_output_truncated_end_to_end(monkeypatch: pytest.MonkeyPat
     assert len(text.encode('utf-8')) <= 4_000
     assert 'truncated: showing' in text
     assert 'result(s); output capped at 4000 bytes' in text
+
+
+def test_search_memory_fallback_marker_not_counted_in_capped_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration bug (B): the #285 AND->OR fallback marker vs. #277 byte cap.
+
+    The marker must not inflate the byte-cap's ``showing N of M`` total, and
+    must survive truncation (never dropped, never overflow the cap) since it
+    is passed as ``prefix=`` rather than appended into the result entries.
+    """
+    from kioku_mesh import backend as backend_module
+
+    big_obs = [
+        Observation(
+            content='x' * 5_000,
+            summary='y' * 5_000,
+            agent_family='claude',
+            client_id='claude-code',
+            pc_id='mcp-pc',
+            session_id='mcp-sess',
+            project='mcp-fallback-bytecap',
+        )
+        for _ in range(5)
+    ]
+
+    class _FallbackBigResultsBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            # AND misses (empty); OR retry finds the oversized result set,
+            # triggering the #276 fallback marker together with the #277 cap.
+            return [] if kwargs.get('search_mode') == 'and' else big_obs
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _FallbackBigResultsBackend())
+    monkeypatch.setattr(mcp_server_module, 'SEARCH_OUTPUT_MAX_BYTES', 4_000)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-fallback-bytecap'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+
+    # (a) final output never exceeds the byte cap, marker bytes included.
+    assert len(text.encode('utf-8')) <= 4_000
+    # (b) the marker itself survives truncation intact.
+    assert '(no AND match; fell back to OR)' in text
+    # (c) showing N of M counts only real result entries, never the marker.
+    match = re.search(r'showing (\d+) of (\d+) result', text)
+    assert match is not None, text
+    shown, total = int(match.group(1)), int(match.group(2))
+    assert total == len(big_obs), f'expected total={len(big_obs)} (entries only), got {total}'
+    assert 0 < shown <= total
 
 
 def test_search_memory_output_under_cap_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
