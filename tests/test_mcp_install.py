@@ -8,12 +8,14 @@ or Codex CLI install.
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import os
 from pathlib import Path
 import stat
 import subprocess
 import tomllib
+from typing import Callable, NoReturn
 
 import pytest
 
@@ -1228,6 +1230,220 @@ def test_repair_claude_code_fsyncs_the_directory_so_the_new_name_survives(
     repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
     assert any(fsynced_a_directory)
+
+
+def _raise_oserror(code: int, message: str) -> Callable[..., NoReturn]:
+    """Build a stand-in that always fails with ``code``, whatever it is called with."""
+
+    def fail(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError(code, message)
+
+    return fail
+
+
+def _os_with_failing_replace() -> object:
+    """Build a view of ``os`` whose ``replace`` fails, to drive the nothing-landed path."""
+
+    class _FailingReplace:
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+        def replace(self, *_args: object, **_kwargs: object) -> NoReturn:
+            raise OSError(errno.EIO, 'simulated replace failure')
+
+    return _FailingReplace()
+
+
+def _require_user_xattrs(path: Path) -> None:
+    """Skip when the filesystem under test has no user xattrs (tmpfs mounts, some CI images)."""
+    try:
+        os.setxattr(path, 'user.kioku_probe', b'1')
+    except (AttributeError, OSError) as e:
+        pytest.skip(f'filesystem does not support user extended attributes: {e}')
+    os.removexattr(path, 'user.kioku_probe')
+
+
+def _sample_posix_acl(tmp_path: Path) -> bytes:
+    """Put a named-user ACL on ``.claude.json`` and return its raw xattr bytes.
+
+    Built by copying a donor file's ACL rather than shelling out to ``setfacl``,
+    which is not installed everywhere.
+    """
+    donor = tmp_path / 'acl-donor'
+    donor.write_text('x', encoding='utf-8')
+    config = tmp_path / '.claude.json'
+    # A minimal POSIX.1e ACL: version 2 header then (tag, perm, id) triples for
+    # user_obj rw-, named user 0 r--, group_obj r--, mask rw-, other r--.
+    acl = (
+        b'\x02\x00\x00\x00'
+        b'\x01\x00\x06\x00\xff\xff\xff\xff'
+        b'\x02\x00\x04\x00\x00\x00\x00\x00'
+        b'\x04\x00\x04\x00\xff\xff\xff\xff'
+        b'\x10\x00\x06\x00\xff\xff\xff\xff'
+        b'\x20\x00\x04\x00\xff\xff\xff\xff'
+    )
+    try:
+        os.setxattr(config, 'system.posix_acl_access', acl)
+    except OSError as e:
+        pytest.skip(f'filesystem does not support POSIX ACLs: {e}')
+    return os.getxattr(config, 'system.posix_acl_access')
+
+
+def test_repair_claude_code_keeps_the_backup_when_the_directory_fsync_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A post-replace failure must not delete the only pre-repair copy (Codex review on #287).
+
+    The broad handler used to unlink the backup even after ``os.replace`` had
+    succeeded, so a directory-fsync error left the repaired config live with
+    nothing to roll back to.
+    """
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+
+    def boom(directory: Path) -> None:
+        raise OSError(errno.EIO, 'simulated directory fsync failure')
+
+    monkeypatch.setattr(mcp_install, '_fsync_directory', boom)
+
+    with pytest.raises(RuntimeError, match='not durably confirmed'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    # The replace itself succeeded, so what is live is the repaired document...
+    after = config.read_text()
+    assert 'KIOKU_MESH_AGENT_FAMILY' in after
+    assert 'MESH_MEM_AGENT_FAMILY' not in after
+    # ...and the pre-repair bytes are still recoverable.
+    (backup,) = tmp_path.glob('.claude.json.bak-*')
+    assert 'MESH_MEM_AGENT_FAMILY' in backup.read_text()
+    assert not list(tmp_path.glob('.claude.json.*.tmp'))
+
+
+def test_repair_claude_code_names_the_kept_backup_when_durability_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The error has to say the config is live and where the old one is, or the backup is useless."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    monkeypatch.setattr(
+        mcp_install, '_fsync_directory', _raise_oserror(errno.EIO, 'simulated directory fsync failure')
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    (backup,) = tmp_path.glob('.claude.json.bak-*')
+    message = str(excinfo.value)
+    assert str(backup) in message
+    assert 'now holds the repaired content' in message
+
+
+def test_repair_claude_code_still_cleans_up_the_backup_when_nothing_landed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other side of the same rule: a pre-replace failure leaves no litter behind."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
+    monkeypatch.setattr(mcp_install, 'os', _os_with_failing_replace())
+
+    with pytest.raises(OSError):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+    assert not list(tmp_path.glob('.claude.json.bak-*'))
+    assert not list(tmp_path.glob('.claude.json.*.tmp'))
+
+
+def test_repair_claude_code_preserves_extended_attributes(tmp_path: Path) -> None:
+    """``os.replace`` hands the destination the staged file's xattrs, so they must be copied first."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    _require_user_xattrs(config)
+    os.setxattr(config, 'user.kioku_review', b'must-survive')
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert os.getxattr(config, 'user.kioku_review') == b'must-survive'
+    assert 'KIOKU_MESH_AGENT_FAMILY' in config.read_text()
+
+
+def test_repair_claude_code_preserves_a_posix_acl(tmp_path: Path) -> None:
+    """An ACL is an xattr; losing it silently changes who may read a config holding identity env.
+
+    Byte-compared rather than parsed: the named-user entry, the mask and the
+    ordering all have to come through, and the raw value is what carries them.
+    """
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    _require_user_xattrs(config)
+    acl = _sample_posix_acl(tmp_path)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert os.getxattr(config, 'system.posix_acl_access') == acl
+
+
+def test_repair_claude_code_fails_closed_when_an_xattr_cannot_be_carried_over(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unable to preserve is not permission to drop: nothing may be written."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    _require_user_xattrs(config)
+    os.setxattr(config, 'user.kioku_review', b'must-survive')
+    before = config.read_text()
+    monkeypatch.setattr(mcp_install.os, 'setxattr', _raise_oserror(errno.EPERM, 'simulated setxattr denial'))
+
+    with pytest.raises(RuntimeError, match='cannot be carried'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+    assert os.getxattr(config, 'user.kioku_review') == b'must-survive'
+    assert not list(tmp_path.glob('.claude.json.bak-*'))
+    assert not list(tmp_path.glob('.claude.json.*.tmp'))
+
+
+def test_repair_claude_code_accepts_an_unsettable_xattr_the_staged_file_already_matches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The SELinux case: a kernel-assigned label is unsettable but identical, so nothing is lost.
+
+    Without this escape hatch --repair would fail closed on every SELinux host,
+    where ``security.selinux`` is on each file and unprivileged ``setxattr``
+    of it is denied.
+    """
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    _require_user_xattrs(config)
+    os.setxattr(config, 'user.kioku_review', b'inherited-by-the-kernel')
+    real_setxattr = mcp_install.os.setxattr
+
+    def deny_but_the_value_is_already_there(target: object, name: str, value: bytes) -> None:
+        real_setxattr(target, name, value)  # stand in for the kernel having set it
+        raise OSError(errno.EPERM, 'simulated privileged-namespace denial')
+
+    monkeypatch.setattr(mcp_install.os, 'setxattr', deny_but_the_value_is_already_there)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert os.getxattr(config, 'user.kioku_review') == b'inherited-by-the-kernel'
+    assert 'KIOKU_MESH_AGENT_FAMILY' in config.read_text()
+
+
+def test_repair_claude_code_survives_a_filesystem_without_xattrs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No xattr support means there is nothing to carry over, not a reason to refuse."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    monkeypatch.setattr(
+        mcp_install.os, 'listxattr', _raise_oserror(errno.ENOTSUP, 'simulated filesystem without xattrs')
+    )
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert 'KIOKU_MESH_AGENT_FAMILY' in config.read_text()
 
 
 def test_repair_claude_code_fails_closed_on_a_duplicate_json_key(tmp_path: Path) -> None:

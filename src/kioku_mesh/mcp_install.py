@@ -40,8 +40,11 @@ Design notes:
   in the raw text and every other byte is copied through, so unknown
   numbers, escapes and formatting survive. The write itself follows the
   referent of a symlinked config, fails closed when another process
-  changed the file in the meantime, keeps the original's mode/group,
-  validates the staged file before it lands, and fsyncs the directory.
+  changed the file in the meantime, keeps the original's mode/group and
+  extended attributes (ACLs included, or fails closed when they cannot be
+  carried over), validates the staged file before it lands, and fsyncs the
+  directory — keeping the backup if anything goes wrong once the
+  replacement is already live.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from enum import Enum
+import errno
 import json
 import os
 from pathlib import Path
@@ -998,6 +1002,69 @@ def _fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
+# ENOTSUP and EOPNOTSUPP are the same number on Linux but not everywhere; ENOSYS
+# is what a kernel without the syscall answers. All three mean "this filesystem
+# or platform has no extended attributes", which is not a loss — there is
+# nothing on the original to carry over.
+_XATTR_UNSUPPORTED = frozenset({errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS})
+
+
+def _copy_xattrs(source: Path, target_fd: int, *, destination: Path) -> None:
+    """Carry ``source``'s extended attributes onto the staged replacement.
+
+    :func:`os.replace` gives the destination the *staged* file's metadata, so
+    anything carried as an xattr — POSIX ACLs (``system.posix_acl_access``),
+    SELinux labels (``security.selinux``), user annotations — is dropped unless
+    it is copied across first (Codex review B4 on #287).
+
+    Call this *after* the mode is set: ``fchmod`` rewrites the ACL mask to the
+    mode's group bits, so a chmod that lands on top of a freshly copied ACL
+    narrows (or widens) every named entry it just restored.
+
+    Fail closed rather than warn-and-continue when an attribute cannot be
+    carried: an ACL that quietly disappears changes who may read a config
+    holding identity env, and nothing in the output would say so. The one case
+    that is *not* a loss is an attribute the kernel already put on the staged
+    file with the same value — a ``security.selinux`` label inherited from the
+    directory's default type transition is unsettable by an unprivileged
+    process yet identical, so it is compared before giving up. Without that
+    comparison ``--repair`` would fail on every SELinux host.
+
+    Raises:
+        RuntimeError: when ``source`` has an attribute the staged file neither
+            has nor accepts. Raised before the replace, so nothing is written.
+    """
+    try:
+        names = os.listxattr(source)
+    except AttributeError:  # pragma: no cover - platform without xattr support
+        return
+    except OSError as e:
+        if e.errno in _XATTR_UNSUPPORTED:
+            return
+        raise
+    for name in names:
+        try:
+            value = os.getxattr(source, name)
+        except OSError as e:
+            if e.errno == errno.ENODATA:  # pragma: no cover - removed mid-repair
+                continue
+            raise
+        try:
+            os.setxattr(target_fd, name, value)
+        except OSError as e:
+            try:
+                staged = os.getxattr(target_fd, name)
+            except OSError:
+                staged = None
+            if staged == value:
+                continue
+            raise RuntimeError(
+                f'refusing to write {destination}: its extended attribute {name!r} cannot be carried '
+                f'onto the replacement ({e}), and replacing the file would drop it. Nothing was written '
+                '— copy the attribute by hand, or remove it if it is no longer wanted, then re-run --repair.'
+            ) from e
+
+
 def _validate_pending_write(tmp_path: Path, new_text: str, expected: dict[str, Any], *, destination: Path) -> None:
     """Check the staged file *before* it lands, so no unverified config is ever live.
 
@@ -1027,7 +1094,10 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
 
     ``path`` must already be the real file (see :func:`_resolve_config_target`).
     On any failure before the replace, the original file and the caller's
-    expectations are left untouched and the backup is cleaned up.
+    expectations are left untouched and the backup is cleaned up. Once the
+    replace has happened the backup is *kept* whatever goes wrong afterwards:
+    it is then the only copy of the pre-repair config, and the failure the
+    caller is about to see is the reason someone might want it back.
     """
     _assert_config_unchanged(path, original_text, stage='after --repair read it')
     st = os.stat(path)
@@ -1037,6 +1107,7 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
     _write_backup(backup, original_text, mode=original_mode & 0o600)
 
     tmp_path: Path | None = None
+    replaced = False
     try:
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.', suffix='.tmp')
         tmp_path = Path(tmp_name)
@@ -1049,15 +1120,31 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
             if os.fstat(handle.fileno()).st_gid != st.st_gid:
                 os.fchown(handle.fileno(), -1, st.st_gid)
             os.fchmod(handle.fileno(), original_mode)
+            # After the chmod rather than before, because fchmod rewrites the
+            # ACL mask. Defensive rather than load-bearing here: the mode being
+            # applied is the original's own, and the kernel already keeps that
+            # in sync with the original's mask.
+            _copy_xattrs(path, handle.fileno(), destination=path)
         _validate_pending_write(tmp_path, new_text, expected, destination=path)
         _assert_config_unchanged(path, original_text, stage='while --repair was staging the new file')
         os.replace(tmp_path, path)
         tmp_path = None
-        _fsync_directory(path.parent)
+        replaced = True
+        try:
+            _fsync_directory(path.parent)
+        except OSError as e:
+            raise RuntimeError(
+                f'{path} now holds the repaired content, but its directory entry could not be flushed '
+                f'to disk ({e}), so the replacement is live yet not durably confirmed — a crash or power '
+                f'cut could still bring the old name back. The pre-repair copy is kept at {backup}.'
+            ) from e
     except BaseException:
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
-        backup.unlink(missing_ok=True)
+        if not replaced:
+            # Nothing landed, so the backup is a copy of a file that is still
+            # there; keeping it would only litter the directory.
+            backup.unlink(missing_ok=True)
         raise
     return backup
 
@@ -1135,9 +1222,12 @@ def repair_claude_code(
     the original is copied to ``<file>.bak-<timestamp>`` created exclusively at
     no wider than 0600; the new text is validated as strict JSON matching the
     intended document *while still on the temp file*, then lands via
-    :func:`os.replace` (preserving the original's mode and group) followed by a
-    directory fsync; and it is finally re-read to confirm what is live is what
-    was written.
+    :func:`os.replace` (preserving the original's mode, group and extended
+    attributes — ACLs included — or failing closed when an attribute cannot be
+    carried over) followed by a directory fsync; and it is finally re-read to
+    confirm what is live is what was written. Once the replace has happened the
+    backup is kept whatever fails afterwards, so a durability error still
+    leaves the pre-repair copy on disk.
 
     Raises:
         RuntimeError: when ``name`` is registered in more than one scope

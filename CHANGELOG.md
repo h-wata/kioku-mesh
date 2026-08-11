@@ -115,11 +115,19 @@ ADR-0030.
     `0600` so a `0600` config's secrets are not copied into a umask-wide
     backup. The new text is validated as strict JSON equal to the intended
     document *while it is still the temp file*, so nothing unverified is ever
-    live, and the replacement keeps the original's mode and group. The rename
-    is followed by a directory `fsync`. The result is finally read back: a
-    mismatch restores the backup, unless the file changed again after the
-    replace, in which case that newer file is left alone and the backup path is
-    reported rather than overwriting another writer's update.
+    live, and the replacement keeps the original's mode, group and extended
+    attributes. Because `os.replace` hands the destination the *staged* file's
+    metadata, every xattr — POSIX ACLs and SELinux labels included — is copied
+    across before the rename; an attribute that can neither be set nor is
+    already present with the same value on the staged file fails the repair
+    closed rather than disappearing silently. The rename is followed by a
+    directory `fsync`. Once the replace has landed the backup is kept whatever
+    fails next: a directory-`fsync` error reports that the config is live but
+    not durably confirmed and names the retained pre-repair copy, instead of
+    deleting the only file that could undo the repair. The result is finally
+    read back: a mismatch restores the backup, unless the file changed again
+    after the replace, in which case that newer file is left alone and the
+    backup path is reported rather than overwriting another writer's update.
   - Claude Code: a name registered in more than one scope fails closed. The
     error lists every scope and file it was found in and how to resolve the
     ambiguity; nothing is written.
