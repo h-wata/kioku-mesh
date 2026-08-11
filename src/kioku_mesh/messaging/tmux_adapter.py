@@ -11,6 +11,9 @@ import subprocess
 import time
 from typing import TYPE_CHECKING
 
+from .limits import check_body_size
+from .limits import MessageBodyTooLarge
+
 if TYPE_CHECKING:
     from kioku_mesh.core.config import MessagingTmuxAdapterConfig
     from kioku_mesh.messaging.models import Message
@@ -52,7 +55,9 @@ def try_inject(message: Message, pane_id: str, config: MessagingTmuxAdapterConfi
       2. ``pane_id`` is in ``config.pane_allowlist``
       3. ``message.sender_id`` is in ``config.sender_allowlist``
       4. ``message.scope`` is in ``config.scope_allowlist``
-      5. body byte length <= ``config.max_body_bytes``
+      5. body UTF-8 byte length <= ``config.max_body_bytes`` (default 8 KiB —
+         see :mod:`kioku_mesh.messaging.limits`); over-limit bodies are dropped,
+         never truncated
 
     On injection failure: retries once after 0.5 s, then drops with
     ``logging.error``.
@@ -85,14 +90,12 @@ def try_inject(message: Message, pane_id: str, config: MessagingTmuxAdapterConfi
         return False
 
     body = message.body if isinstance(message.body, str) else str(message.body)
-    body_bytes = len(body.encode())
-    if body_bytes > config.max_body_bytes:
-        _LOG.warning(
-            'tmux_adapter: drop message mid=%s body_bytes=%d > limit=%d',
-            message.msg_id,
-            body_bytes,
-            config.max_body_bytes,
-        )
+    try:
+        check_body_size(body, limit=config.max_body_bytes, channel='tmux', msg_id=message.msg_id)
+    except MessageBodyTooLarge as exc:
+        # Delivery adapters are best-effort: drop rather than raise, but log
+        # the actionable message so the operator can see what to change.
+        _LOG.warning('tmux_adapter: drop message — %s', exc)
         return False
 
     if _inject_to_pane(pane_id, body):

@@ -6,8 +6,11 @@ Connects the in-process :class:`MessageSpool` to the Zenoh transport layer:
   - ``setup_subscriber``: declare Zenoh subscribers that feed incoming
     messages into the spool (push-delivery path, Phase 3 activation)
 
-Body size limit: 64 KiB.  ``put_message`` raises ``ValueError`` if the
-serialized payload exceeds ``BODY_SIZE_LIMIT``.
+Body size limit: 64 KiB of body (plus a 192 KiB cap on the serialized
+envelope).  ``put_message`` raises :class:`~.limits.MessageBodyTooLarge`
+(a ``ValueError``) instead of truncating or splitting — see
+:mod:`kioku_mesh.messaging.limits` for the rationale and the measurements
+behind the numbers.
 
 messaging モジュールは memory モジュールを直接 import しない (ADR-0023).
 """
@@ -23,6 +26,11 @@ from ..core.identity import get_session_id
 from .keyspace import ack_key
 from .keyspace import agent_inbox_key
 from .keyspace import session_inbox_key
+from .limits import check_body_size
+from .limits import check_envelope_size
+from .limits import MAX_BODY_BYTES
+from .limits import MAX_ENVELOPE_BYTES
+from .limits import MessageBodyTooLarge
 from .models import Message
 from .spool import MessageSpool
 
@@ -31,7 +39,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-BODY_SIZE_LIMIT = 65536  # 64 KiB — hard cap per design memo
+# Backwards-compatible alias — the canonical constants live in .limits.
+BODY_SIZE_LIMIT = MAX_BODY_BYTES  # 64 KiB body cap
+ENVELOPE_SIZE_LIMIT = MAX_ENVELOPE_BYTES  # 192 KiB serialized-message cap
 
 
 class ZenohBridge:
@@ -59,14 +69,14 @@ class ZenohBridge:
 
         Raises:
         ------
-        ValueError
-            When the serialized payload exceeds ``BODY_SIZE_LIMIT`` bytes.
+        MessageBodyTooLarge
+            When ``msg.body`` exceeds ``BODY_SIZE_LIMIT`` bytes, or the whole
+            serialized message exceeds ``ENVELOPE_SIZE_LIMIT`` bytes. Both are
+            ``ValueError`` subclasses and carry an actionable message.
         """
+        check_body_size(msg.body, limit=BODY_SIZE_LIMIT, channel='mcp', msg_id=msg.msg_id)
         payload_bytes = msg.to_json().encode('utf-8')
-        if len(payload_bytes) > BODY_SIZE_LIMIT:
-            raise ValueError(
-                f'message body exceeds {BODY_SIZE_LIMIT}-byte limit (msg_id={msg.msg_id!r}, size={len(payload_bytes)})'
-            )
+        check_envelope_size(payload_bytes, limit=ENVELOPE_SIZE_LIMIT, msg_id=msg.msg_id)
 
         recipient: dict[str, Any] = msg.recipient if isinstance(msg.recipient, dict) else {}
         kind = recipient.get('kind', 'session')
@@ -123,12 +133,35 @@ class ZenohBridge:
 
         def _on_sample(sample: Any) -> None:
             try:
-                json_str = sample.payload.to_bytes().decode('utf-8')
+                raw_bytes = sample.payload.to_bytes()
+                json_str = raw_bytes.decode('utf-8')
                 msg = Message.from_json(json_str)
+            except Exception as e:  # noqa: BLE001
+                log.warning('subscriber failed to parse incoming message: %s', e)
+                return
+            # Re-validate after deserialization: put_message only binds senders
+            # running this version, so an older peer or an external publisher
+            # can place an over-limit message on the inbox key directly.
+            # Dropping (rather than withholding, as check_messages does) is the
+            # right call here because this is the best-effort push path — the
+            # message stays in Zenoh storage and check_messages will surface it
+            # with an explicit "withheld" notice, so nothing goes unreported.
+            try:
+                check_body_size(
+                    msg.body if msg.body else msg.payload,
+                    limit=BODY_SIZE_LIMIT,
+                    channel='mcp',
+                    msg_id=msg.msg_id,
+                )
+                check_envelope_size(raw_bytes, limit=ENVELOPE_SIZE_LIMIT, msg_id=msg.msg_id)
+            except MessageBodyTooLarge as e:
+                log.warning('subscriber dropped over-limit incoming message: %s', e)
+                return
+            try:
                 spool.put(msg)
                 log.debug('subscriber received msg_id=%r', msg.msg_id)
             except Exception as e:  # noqa: BLE001
-                log.warning('subscriber failed to parse incoming message: %s', e)
+                log.warning('subscriber failed to spool incoming message: %s', e)
 
         selectors = [
             f'msg/{scope}/inbox/session/{session_id}/**',

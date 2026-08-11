@@ -35,6 +35,37 @@ ADR-0030.
   (候補の描画中に例外が出ても save が成功し candidates が落ちるだけであること)
   を追加した。(#236)
 
+### Changed
+
+- messaging: message body size limits are now measured, enforced, and documented
+  (#202). The 64 KiB limit applies to `body` itself (it was previously applied to
+  the whole serialized message, so a 64 KiB body was rejected by the ~434-byte
+  JSON envelope); a separate 192 KiB envelope cap stops `payload` / metadata from
+  smuggling content past it, and tmux injection keeps its 8 KiB body cap. Sizes
+  are counted in UTF-8 bytes, at-limit is accepted, and over-limit is rejected —
+  never truncated or split — with an error naming the actual size, the limit, and
+  the alternative (shorten the body, or `save_observation` plus a short pointer).
+  Zenoh itself was measured carrying 64 MiB payloads intact, so these are
+  recipient-context limits, not transport limits; the measurements are recorded in
+  `docs/design/0185-messaging-mvp-design.md`. The limits are enforced on both
+  ends: `check_messages` and the push subscriber re-validate `body` (including
+  the legacy `payload` fallback) and the serialized envelope after
+  deserialization, so a message written straight into Zenoh by an older peer or
+  an external publisher cannot bypass the cap. `check_messages` replaces an
+  over-limit body with an explicit `[kioku-mesh: message body withheld — …]`
+  notice plus a new `body_rejected` field rather than dropping the message
+  silently or truncating it; the push subscriber drops it with a WARNING, since
+  `check_messages` still surfaces the same message with its notice. Withholding
+  the body alone was not enough: an over-limit envelope could still return its
+  bulk through `delivery_adapters`, `subject`, `scope`, `msg_id`, or a
+  sender/recipient id, so ~197 KiB reached the recipient with
+  `body_rejected: true`. Every field of a `check_messages` item is now bounded —
+  1 KiB per identity-shaped field, 4 KiB per `subject`, 16 `delivery_adapters`
+  entries — an over-limit envelope is rebuilt from the minimal identity + notice
+  set, and the encoded item is then re-measured against a 72 KiB per-message
+  budget as a backstop. A new `withheld_fields` list plus the notice text name
+  what was dropped, so nothing goes missing silently.
+
 ### Fixed
 
 - Messaging: acknowledgement rows with no matching message are no longer read

@@ -6,6 +6,7 @@ messaging モジュールは memory モジュールを直接 import しない (A
 
 from __future__ import annotations
 
+from .limits import check_body_size
 from .models import is_expired
 from .models import Message
 
@@ -63,8 +64,17 @@ class MessageSpool:
 def send_message(spool: MessageSpool, msg: Message) -> str:
     """Put msg into spool and return its msg_id.
 
+    Fails fast on an over-limit body (Issue #202) so a sender learns at send
+    time rather than at Zenoh put time.
+
+    Raises:
+    ------
+    MessageBodyTooLarge
+        When ``msg.body`` exceeds the 64 KiB MCP body limit.
+
     # TODO(Phase 2): Zenoh publish/subscribe integration
     """
+    check_body_size(msg.body, channel='mcp', msg_id=msg.msg_id)
     spool.put(msg)
     return msg.msg_id
 

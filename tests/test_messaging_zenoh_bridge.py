@@ -98,28 +98,25 @@ class TestPutMessage:
     def test_body_exceeding_limit_raises_value_error(self) -> None:
         mock_session = MagicMock()
         bridge = ZenohBridge(mock_session, MessageSpool())
-        # Build a message whose serialized JSON will exceed 64 KiB
-        oversized_body = 'x' * BODY_SIZE_LIMIT
+        # One byte over the 64 KiB body limit (Issue #202)
+        oversized_body = 'x' * (BODY_SIZE_LIMIT + 1)
         msg = _make_msg(body=oversized_body)
         with pytest.raises(ValueError, match='65536'):
             bridge.put_message(msg, 'mesh')
         mock_session.put.assert_not_called()
 
-    def test_exactly_at_limit_is_rejected(self) -> None:
-        """A payload of exactly BODY_SIZE_LIMIT bytes still exceeds the limit."""
+    def test_exactly_at_limit_is_accepted(self) -> None:
+        """A body of exactly BODY_SIZE_LIMIT bytes is allowed (Issue #202).
+
+        The limit applies to the body, not to the serialized envelope, so the
+        ~434-byte JSON envelope no longer eats into the sender's budget.
+        Full boundary coverage lives in tests/test_messaging_limits.py.
+        """
         mock_session = MagicMock()
         bridge = ZenohBridge(mock_session, MessageSpool())
-        # Craft a message whose JSON is exactly BODY_SIZE_LIMIT bytes
-        msg = _make_msg()
-        json_size = len(msg.to_json().encode('utf-8'))
-        padding = BODY_SIZE_LIMIT - json_size
-        if padding > 0:
-            msg2 = _make_msg(body='x' * padding)
-            # May or may not hit limit depending on JSON overhead; just ensure >limit raises
-            raw = msg2.to_json().encode('utf-8')
-            if len(raw) > BODY_SIZE_LIMIT:
-                with pytest.raises(ValueError):
-                    bridge.put_message(msg2, 'mesh')
+        msg = _make_msg(body='x' * BODY_SIZE_LIMIT)
+        bridge.put_message(msg, 'mesh')
+        mock_session.put.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
