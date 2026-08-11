@@ -1576,12 +1576,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
             return 2
         zenohd_binary = shutil.which('zenohd')
         if zenohd_binary is None:
-            print(
-                f'warning: zenohd not on PATH; baking fallback ExecStart={_SYSTEMD_ZENOHD_FALLBACK} '
-                'into the unit. Install zenohd or edit the unit before enabling.',
-                file=sys.stderr,
-            )
-            zenohd_binary = _SYSTEMD_ZENOHD_FALLBACK
+            bin_dir_zenohd = zenohd_install_module.default_bin_dir() / 'zenohd'
+            if bin_dir_zenohd.exists():
+                zenohd_binary = str(bin_dir_zenohd)
+                print(
+                    f'notice: zenohd not on PATH; using {bin_dir_zenohd} from default install dir for ExecStart.',
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f'warning: zenohd not on PATH; baking fallback ExecStart={_SYSTEMD_ZENOHD_FALLBACK} '
+                    'into the unit. Install zenohd or edit the unit before enabling.',
+                    file=sys.stderr,
+                )
+                zenohd_binary = _SYSTEMD_ZENOHD_FALLBACK
         unit_body = _render_systemd_unit(config_path, zenohd_binary, f'%h/.local/share/{rocksdb_leaf}')
 
     if args.to_stdout:

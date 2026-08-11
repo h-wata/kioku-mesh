@@ -658,8 +658,12 @@ def test_init_install_systemd_falls_back_when_zenohd_missing(
     xdg_config: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """Missing zenohd binary should warn and use the documented fallback path, not abort."""
+    """Missing zenohd binary should warn and use the hardcoded fallback path.
+
+    Covers both PATH and default install dir being unavailable, not just abort.
+    """
     monkeypatch.setattr('sys.platform', 'linux')
 
     def fake_which(name: str) -> str | None:
@@ -671,11 +675,49 @@ def test_init_install_systemd_falls_back_when_zenohd_missing(
         'kioku_mesh.__main__._default_systemctl_probe',
         lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
     )
+    # Default install dir exists but has no zenohd binary in it either (#223).
+    monkeypatch.setattr('kioku_mesh.__main__.zenohd_install_module.default_bin_dir', lambda: tmp_path / 'bin-dir')
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 0
     assert 'ExecStart="/usr/bin/zenohd"' in systemd_unit_under.read_text()
     err = capsys.readouterr().err
     assert 'zenohd not on PATH' in err
+    assert 'notice:' not in err
+
+
+def test_init_install_systemd_uses_bin_dir_fallback_when_zenohd_missing(
+    systemd_unit_under: Path,
+    xdg_config: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Zenohd missing from PATH but present in the default install dir (#223)."""
+    monkeypatch.setattr('sys.platform', 'linux')
+
+    def fake_which(name: str) -> str | None:
+        return '/usr/bin/systemctl' if name == 'systemctl' else None
+
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', fake_which)
+    monkeypatch.setattr(
+        'kioku_mesh.__main__._default_systemctl_probe',
+        lambda _argv: subprocess.CompletedProcess([], 0, stdout='', stderr=''),
+    )
+    bin_dir = tmp_path / 'bin-dir'
+    bin_dir.mkdir()
+    bin_dir_zenohd = bin_dir / 'zenohd'
+    bin_dir_zenohd.write_text('#!/bin/sh\n')
+    monkeypatch.setattr('kioku_mesh.__main__.zenohd_install_module.default_bin_dir', lambda: bin_dir)
+
+    rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
+    assert rc == 0
+    body = systemd_unit_under.read_text()
+    assert f'ExecStart="{bin_dir_zenohd}"' in body
+    err = capsys.readouterr().err
+    assert 'zenohd not on PATH' in err
+    assert str(bin_dir_zenohd) in err
+    assert 'notice:' in err
+    assert 'warning: zenohd not on PATH' not in err
 
 
 def test_init_install_systemd_rejects_macos(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
