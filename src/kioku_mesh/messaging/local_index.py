@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
-from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 import sqlite3
@@ -26,12 +25,6 @@ def _iso(dt: datetime) -> str:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
-
-#: Minimum age of an acks row with no messages row before
-#: :meth:`LocalMessageIndex.purge_orphan_acks` will delete it. Sized to be far
-#: beyond any plausible ack-before-message delivery race (seconds), so the only
-#: rows it can reach are ones genuinely stranded by the pre-#299 purge.
-ORPHAN_ACK_GRACE_SEC = 86_400
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -163,9 +156,16 @@ class LocalMessageIndex:
         no messages row is *not* proof of staleness: distributed delivery is
         not end-to-end FIFO, so an ack can legitimately be indexed before the
         message it acks. Sweeping every orphan here would silently drop such
-        a row even on calls that expire nothing. Orphans left behind by code
-        that predates this fix are handled by the explicit, grace-period
-        guarded :meth:`purge_orphan_acks` instead.
+        a row even on calls that expire nothing.
+
+        Acks rows stranded by versions of this method that predate the fix are
+        deliberately left in place; there is no cleanup command for them. Such
+        a row can only suppress a message carrying the exact same ``msg_id``
+        (a fresh uuid4 per :class:`~kioku_mesh.messaging.models.Message`), and
+        that message was already expired and deleted from Zenoh storage before
+        the row was stranded. The residue is inert, so it does not justify a
+        permanent destructive command that cannot tell it apart from a live
+        ack-first row (Issue #299 review findings N1/N2).
         """
         effective_now = now if now is not None else datetime.now(timezone.utc)
         now_iso = _iso(effective_now)
@@ -190,45 +190,6 @@ class LocalMessageIndex:
                 'DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?',
                 (now_iso,),
             )
-            removed = cursor.rowcount
-            conn.commit()
-            return removed
-
-    def purge_orphan_acks(
-        self,
-        *,
-        grace_sec: int = ORPHAN_ACK_GRACE_SEC,
-        now: datetime | None = None,
-        dry_run: bool = False,
-    ) -> int:
-        """Delete acks rows that have no messages row and are older than ``grace_sec``.
-
-        Explicit maintenance path for acks rows stranded by :meth:`purge_expired`
-        before it started removing them (Issue #299). It is deliberately *not*
-        called from ``check_messages`` or :meth:`purge_expired`: it scans the
-        acks table, and the only thing separating a stranded orphan from an ack
-        that raced ahead of its own message is age — a race is reconciled in
-        seconds, so anything older than the grace period is stale by
-        construction.
-
-        ``acked_at <= now - grace_sec`` is deleted (inclusive boundary, matching
-        :meth:`purge_expired`). Returns the number of rows deleted, or, with
-        ``dry_run=True``, the number that would be deleted.
-        """
-        effective_now = now if now is not None else datetime.now(timezone.utc)
-        cutoff_iso = _iso(effective_now - timedelta(seconds=grace_sec))
-        where = (
-            ' FROM acks WHERE acked_at <= ? AND NOT EXISTS ('
-            '  SELECT 1 FROM messages'
-            '  WHERE messages.msg_id = acks.msg_id'
-            '    AND messages.recipient_session_id = acks.recipient_session_id'
-            ')'
-        )
-        with self._connect() as conn:
-            if dry_run:
-                row = conn.execute('SELECT COUNT(*)' + where, (cutoff_iso,)).fetchone()
-                return int(row[0])
-            cursor = conn.execute('DELETE' + where, (cutoff_iso,))
             removed = cursor.rowcount
             conn.commit()
             return removed

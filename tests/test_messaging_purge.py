@@ -489,72 +489,6 @@ class TestPurgeExpiredMessagesTool:
 
 
 # ---------------------------------------------------------------------------
-# LocalMessageIndex.purge_orphan_acks — explicit, operator-invoked cleanup
-# ---------------------------------------------------------------------------
-
-
-class TestPurgeOrphanAcks:
-    """Opt-in cleanup for acks rows left behind by pre-fix purge_expired calls.
-
-    Kept out of the check_messages hot path (and out of purge_expired) because
-    an orphan ack is not by itself proof of staleness — see
-    TestPurgeExpiredOrphanAcks.test_purge_keeps_ack_first_row_when_nothing_expires.
-    The grace period is what makes deletion safe: an ack that raced ahead of
-    its message is reconciled in seconds, not days.
-    """
-
-    def _make_index(self, tmp_path: Path) -> LocalMessageIndex:
-        return LocalMessageIndex(tmp_path / 'messaging' / 'inbox.db')
-
-    def test_deletes_orphan_ack_older_than_grace(self, tmp_path: Path) -> None:
-        index = self._make_index(tmp_path)
-        _insert_bare_ack(index, 'stale-orphan', 'sess-o1', acked_at=_past(2 * 86_400))
-
-        removed = index.purge_orphan_acks()
-
-        assert removed == 1
-        assert index.is_acked('stale-orphan', 'sess-o1') is False
-
-    def test_keeps_orphan_ack_inside_grace(self, tmp_path: Path) -> None:
-        """A recent orphan may still be an ack that arrived before its message."""
-        index = self._make_index(tmp_path)
-        _insert_bare_ack(index, 'fresh-orphan', 'sess-o2', acked_at=_past(60))
-
-        removed = index.purge_orphan_acks()
-
-        assert removed == 0
-        assert index.is_acked('fresh-orphan', 'sess-o2') is True
-
-    def test_grace_boundary_is_inclusive(self, tmp_path: Path) -> None:
-        """acked_at exactly grace_sec old is deleted (<= cutoff, matching purge_expired)."""
-        index = self._make_index(tmp_path)
-        now = _utc_now()
-        _insert_bare_ack(index, 'edge-orphan', 'sess-o3', acked_at=now - timedelta(seconds=3600))
-
-        assert index.purge_orphan_acks(grace_sec=3600, now=now) == 1
-        assert index.is_acked('edge-orphan', 'sess-o3') is False
-
-    def test_keeps_acks_that_still_have_a_message_row(self, tmp_path: Path) -> None:
-        """Positive control: a live, matched ack is never touched, however old."""
-        index = self._make_index(tmp_path)
-        msg = _make_msg(expires_at=_future(900), session_id='sess-o4')
-        index.register(msg, 'sess-o4')
-        index.record_ack(Ack(msg_id=msg.msg_id, recipient_session_id='sess-o4', acked_at=_past(30 * 86_400)))
-
-        assert index.purge_orphan_acks() == 0
-        assert index.is_acked(msg.msg_id, 'sess-o4') is True
-
-    def test_dry_run_reports_without_deleting(self, tmp_path: Path) -> None:
-        index = self._make_index(tmp_path)
-        _insert_bare_ack(index, 'stale-orphan', 'sess-o5', acked_at=_past(2 * 86_400))
-
-        assert index.purge_orphan_acks(dry_run=True) == 1
-        assert index.is_acked('stale-orphan', 'sess-o5') is True
-        assert index.purge_orphan_acks() == 1
-        assert index.is_acked('stale-orphan', 'sess-o5') is False
-
-
-# ---------------------------------------------------------------------------
 # check_messages — the actual receiver path after a purge (review finding T1)
 # ---------------------------------------------------------------------------
 
@@ -631,43 +565,71 @@ class TestCheckMessagesAfterPurge:
 
 
 # ---------------------------------------------------------------------------
-# CLI: kioku-mesh messaging purge-orphan-acks
+# No orphan-ack cleanup command exists (Issue #299 review findings N1 / N2)
 # ---------------------------------------------------------------------------
 
 
-class TestPurgeOrphanAcksCli:
-    """The operator-facing entry point for the cleanup purge_expired no longer does."""
+class TestNoOrphanAckCleanupCommand:
+    """The cleanup path was removed rather than made safe.
+
+    An acks row with no messages row cannot be classified from the data alone:
+    ``record_ack`` refuses to write one, so in production it is either residue
+    from a pre-#299 ``purge_expired`` or an ack indexed ahead of its message,
+    and only age separates them — which is not a safety property, since no
+    upper bound on delivery/replication delay is specified anywhere. Rather
+    than ship a permanent destructive command guarded by a guess, the residue
+    is left in place: it is inert (see
+    :meth:`test_stale_orphan_is_inert_for_new_traffic`).
+    """
 
     def _index(self, tmp_path: Path) -> LocalMessageIndex:
         return LocalMessageIndex(tmp_path / 'messaging' / 'inbox.db')
 
-    def test_cli_deletes_stale_orphans(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    def test_index_exposes_no_orphan_purge_api(self) -> None:
+        assert not hasattr(LocalMessageIndex, 'purge_orphan_acks')
+        import kioku_mesh.messaging.local_index as local_index_module
+
+        assert not hasattr(local_index_module, 'ORPHAN_ACK_GRACE_SEC')
+
+    @pytest.mark.parametrize(
+        'argv',
+        [
+            ['messaging', 'purge-orphan-acks'],
+            ['messaging', 'purge-orphan-acks', '--dry-run'],
+            ['messaging', 'purge-orphan-acks', '--grace-hours', '-1'],
+            ['messaging'],
+        ],
+    )
+    def test_cli_rejects_the_removed_subcommand(self, argv: list[str]) -> None:
+        """Including --grace-hours=-1, which used to delete acks created seconds ago."""
+        with pytest.raises(SystemExit) as exc:
+            cli_main(argv)
+
+        assert exc.value.code == 2
+
+    def test_stale_orphan_is_left_alone_by_every_remaining_path(self, tmp_path: Path) -> None:
+        """No routine path deletes an orphan ack, however old it is."""
         index = self._index(tmp_path)
-        _insert_bare_ack(index, 'cli-stale', 'cli-sess', acked_at=_past(2 * 86_400))
+        _insert_bare_ack(index, 'ancient-orphan', 'sess-keep', acked_at=_past(365 * 86_400))
+        expired = _make_msg(expires_at=_past(1), session_id='sess-keep')
+        index.register(expired, 'sess-keep')
 
-        assert cli_main(['messaging', 'purge-orphan-acks']) == 0
+        assert index.purge_expired() == 1
+        assert index.is_acked('ancient-orphan', 'sess-keep') is True
 
-        assert 'orphan acks deleted: 1' in capsys.readouterr().out
-        assert index.is_acked('cli-stale', 'cli-sess') is False
+    def test_stale_orphan_is_inert_for_new_traffic(self, tmp_path: Path) -> None:
+        """Why leaving the residue is safe: it only matches its own msg_id.
 
-    def test_cli_dry_run_keeps_rows(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+        Every Message gets a fresh uuid4 msg_id, so a stranded row cannot
+        suppress any message other than the one it acked — which had already
+        expired and been deleted from Zenoh storage before it was stranded.
+        """
         index = self._index(tmp_path)
-        _insert_bare_ack(index, 'cli-stale', 'cli-sess', acked_at=_past(2 * 86_400))
+        _insert_bare_ack(index, 'ancient-orphan', 'sess-keep', acked_at=_past(365 * 86_400))
 
-        assert cli_main(['messaging', 'purge-orphan-acks', '--dry-run']) == 0
+        fresh = _make_msg(expires_at=_future(900), session_id='sess-keep')
+        index.register(fresh, 'sess-keep')
 
-        assert 'dry run' in capsys.readouterr().out
-        assert index.is_acked('cli-stale', 'cli-sess') is True
-
-    def test_cli_grace_hours_protects_recent_orphans(self, tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-        """A short --grace-hours reaches further back; the default 24h does not."""
-        index = self._index(tmp_path)
-        _insert_bare_ack(index, 'cli-recent', 'cli-sess', acked_at=_past(3600))
-
-        assert cli_main(['messaging', 'purge-orphan-acks']) == 0
-        assert 'orphan acks deleted: 0' in capsys.readouterr().out
-        assert index.is_acked('cli-recent', 'cli-sess') is True
-
-        assert cli_main(['messaging', 'purge-orphan-acks', '--grace-hours', '0.5']) == 0
-        assert 'orphan acks deleted: 1' in capsys.readouterr().out
-        assert index.is_acked('cli-recent', 'cli-sess') is False
+        assert fresh.msg_id != 'ancient-orphan'
+        assert index.is_acked(fresh.msg_id, 'sess-keep') is False
+        assert index.list_unacked('sess-keep') == [fresh.msg_id]

@@ -28,15 +28,21 @@ ADR-0030.
   incoming search filter; `save_observation` still persists the literal
   `project` value it was given. `recall_context` names the expansion in its
   `filters:` line (`project='kioku-mesh' (also matching 'mesh-mem')`) (#278).
-- `kioku-mesh messaging purge-orphan-acks`: explicit, operator-invoked cleanup
-  for `acks` rows stranded by `purge_expired` calls that predate the #299 fix.
-  Only rows with no `messages` row **and** an `acked_at` at least
-  `--grace-hours` old (default 24) are deleted, so an ack that merely outran
-  its own message is never swept. `--dry-run` reports the count without
-  deleting. (#299)
 
 ### Fixed
 
+- No cleanup command ships for `acks` rows stranded by `purge_expired` versions
+  predating the fix below; an earlier draft of this change added
+  `kioku-mesh messaging purge-orphan-acks` and it has been removed again. Such
+  a row cannot be classified from the data: `record_ack` refuses to write an
+  ack without its `messages` row, so an orphan is either pre-fix residue or an
+  ack indexed ahead of its message, and only age separates them — which is not
+  a safety property, as no upper bound on delivery/replication delay is
+  specified anywhere. The residue is instead left in place, because it is
+  inert: `msg_id` is a fresh uuid4 per message, so a stranded row can only
+  suppress the one message it acked, and that message had already expired and
+  been deleted from Zenoh storage. A permanent destructive command is not
+  worth that. (#299)
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with
@@ -75,7 +81,6 @@ ADR-0030.
   message it acks. Deletion is by primary key, so the cost tracks what
   actually expired instead of scanning the whole `acks` table on every
   `check_messages` poll. (#299)
-
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
