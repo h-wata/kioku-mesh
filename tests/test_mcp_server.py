@@ -357,6 +357,43 @@ def test_search_memory_canonical_project_merges_legacy_and_canonical_without_dup
     assert other.observation_id not in text
 
 
+def test_search_memory_or_fallback_still_resolves_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PR #285's AND->OR fallback must reuse the same alias-expanded project.
+
+    ``search_memory`` expands ``project`` to its alias set exactly once, near
+    the top of the function, and rebinds the parameter so every query issued
+    afterwards — including the AND->OR retry added by #285 — inherits the
+    expansion (PR #288 review B3). This pins that contract down for the
+    fallback call specifically: a row saved under the legacy ``mesh-mem``
+    project must still be reachable when searching the canonical
+    ``kioku-mesh`` name via the fallback path, not just the first AND search.
+
+    The query terms are chosen so the initial AND search misses (the content
+    lacks 'FTS5') and only the OR retry finds it, so a green result here
+    proves the *fallback* call carried the expansion, not just the first one.
+    """
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('alias fallback regression content', project='mesh-mem')
+    backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                # 'FTS5' never appears in the content, so AND (all terms
+                # required) misses and only the OR retry can find it.
+                {'query': 'alias fallback FTS5', 'project': 'kioku-mesh', 'limit': 20},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert '(no AND match; fell back to OR)' in text
+    assert obs.observation_id in text
+
+
 def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('soon to be tombstoned via mcp', project='mcp-delete')
     store.put_observation(obs)
