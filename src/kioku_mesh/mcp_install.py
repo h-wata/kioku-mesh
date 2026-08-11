@@ -339,6 +339,177 @@ def install(
     raise ValueError(f'unsupported client: {client!r}')  # pragma: no cover
 
 
+# -- --repair: overwrite retired MESH_MEM_* identity env in an existing entry ---
+
+# Mirrors doctor.py's check_identity constants (kept as a small local copy
+# rather than a cross-module import: doctor.py already imports from this
+# module for _default_codex_config_path, and a second import direction back
+# into doctor would be one more coupling than four constants are worth).
+_LEGACY_ENV_PREFIX = 'MESH_MEM_'
+_CURRENT_ENV_PREFIX = 'KIOKU_MESH_'
+_IDENTITY_ENV_SUFFIXES = ('AGENT_FAMILY', 'CLIENT_ID')
+
+
+def _repair_identity_env(env: dict[str, str]) -> dict[str, str]:
+    """Rename retired ``MESH_MEM_*`` identity keys to their ``KIOKU_MESH_*`` twin.
+
+    Only the identity suffixes in :data:`_IDENTITY_ENV_SUFFIXES` are touched,
+    and only when the current-prefix key is *absent* from ``env`` — the exact
+    condition doctor.py's ``check_identity`` FAILs on. A config that already
+    carries both names, or unrelated user env vars, comes back unchanged so
+    ``--repair`` never rewrites anything the user didn't ask it to fix.
+    """
+    repaired = dict(env)
+    for suffix in _IDENTITY_ENV_SUFFIXES:
+        legacy_key = _LEGACY_ENV_PREFIX + suffix
+        current_key = _CURRENT_ENV_PREFIX + suffix
+        if legacy_key in env and current_key not in env:
+            repaired[current_key] = repaired.pop(legacy_key)
+    return repaired
+
+
+def repair_codex_cli(
+    name: str = DEFAULT_REGISTRY_NAME,
+    *,
+    config_path: Path | None = None,
+) -> str:
+    """Overwrite retired identity env on an existing ``mcp_servers.<name>`` entry.
+
+    Reads the entry straight out of the TOML (same file ``install_codex_cli``
+    writes), applies :func:`_repair_identity_env` to its ``env`` table only,
+    and rewrites just that block via ``_replace_codex_block`` — command and
+    any non-identity env stay byte-for-byte what they were.
+    """
+    target = config_path or _default_codex_config_path()
+    if not target.is_file():
+        return (
+            f'error: {target} does not exist. Nothing to repair — '
+            'run `kioku-mesh mcp install --client codex-cli` first.'
+        )
+
+    existing_text = target.read_text(encoding='utf-8')
+    try:
+        data = tomllib.loads(existing_text)
+    except tomllib.TOMLDecodeError as e:
+        raise RuntimeError(f'cannot parse {target} as TOML: {e}') from e
+
+    entry = data.get('mcp_servers', {}).get(name)
+    if entry is None:
+        return (
+            f'error: mcp_servers.{name} not found in {target}. Run `kioku-mesh mcp install --client codex-cli` first.'
+        )
+
+    env = entry.get('env', {}) or {}
+    repaired_env = _repair_identity_env(env)
+    if repaired_env == env:
+        return f'mcp_servers.{name} in {target} already uses the current KIOKU_MESH_* prefix; nothing to repair.'
+
+    plan = InstallPlan(client=MCPClient.CODEX_CLI, name=name, command=entry.get('command', ''), env=repaired_env)
+    new_text = _replace_codex_block(existing_text, name, _render_codex_toml_block(plan))
+    target.write_text(new_text, encoding='utf-8')
+    return f'repaired identity env for mcp_servers.{name} in {target}'
+
+
+def _parse_claude_mcp_get(output: str) -> tuple[str, dict[str, str]] | None:
+    """Parse ``claude mcp get <name>`` text output into ``(command, env)``.
+
+    The format is indented ``Key: value`` lines with an ``Environment:``
+    section whose children are bare ``KEY=VALUE`` lines (see ``claude mcp get
+    --help``; there is no ``--json`` output for this subcommand). Returns
+    ``None`` when no ``Command:`` line is found — an unrecognized shape we
+    should not guess about rather than silently repair against.
+    """
+    command: str | None = None
+    env: dict[str, str] = {}
+    in_env = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('Command:'):
+            command = stripped[len('Command:') :].strip()
+            in_env = False
+        elif stripped == 'Environment:':
+            in_env = True
+        elif stripped.endswith(':') or not stripped:
+            in_env = False
+        elif in_env and '=' in stripped:
+            key, _, value = stripped.partition('=')
+            env[key] = value
+    if command is None:
+        return None
+    return command, env
+
+
+def repair_claude_code(
+    name: str = DEFAULT_REGISTRY_NAME,
+    *,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> str:
+    """Overwrite retired identity env on an existing Claude Code registration.
+
+    Claude Code only exposes its MCP config through the ``claude mcp`` CLI
+    (direct edits to ``~/.claude.json`` are not a supported path — see the
+    module docstring), so repair reads the current entry via ``claude mcp
+    get``, applies :func:`_repair_identity_env` to its env only, and
+    re-registers with the merged env via remove+add — the same primitives
+    ``install_claude_code``'s ``--force`` path already uses. Unlike
+    ``--force``, the env sent to ``add`` is the *previous* env with only the
+    identity keys renamed, so unrelated ``-e`` values the user set survive.
+    """
+    resolver = which or shutil.which
+    claude = resolver('claude')
+    if not claude:
+        raise FileNotFoundError(
+            'claude binary not on PATH. Install Claude Code first (https://docs.claude.com/en/docs/claude-code).'
+        )
+    runner = run or _default_subprocess_run
+
+    get_result = runner([claude, 'mcp', 'get', name])
+    if get_result.returncode != 0:
+        stderr = (get_result.stderr or '').strip() or '(no stderr)'
+        return (
+            f'error: {name!r} is not registered with Claude Code ({stderr}). '
+            'Run `kioku-mesh mcp install --client claude-code` first.'
+        )
+
+    parsed = _parse_claude_mcp_get(get_result.stdout)
+    if parsed is None:
+        raise RuntimeError(f'could not parse `claude mcp get {name}` output; unrecognized format for --repair.')
+    command, env = parsed
+
+    repaired_env = _repair_identity_env(env)
+    if repaired_env == env:
+        return f'{name!r} already uses the current KIOKU_MESH_* prefix; nothing to repair.'
+
+    plan = InstallPlan(client=MCPClient.CLAUDE_CODE, name=name, command=command, env=repaired_env)
+    remove_result = runner([claude, 'mcp', 'remove', name])
+    if remove_result.returncode != 0:
+        stderr = (remove_result.stderr or '').strip() or '(no stderr)'
+        raise RuntimeError(f'claude mcp remove {name} failed (rc={remove_result.returncode}): {stderr}')
+
+    add_result = runner(_build_claude_add_command(claude, plan))
+    if add_result.returncode != 0:
+        stderr = (add_result.stderr or '').strip()
+        raise RuntimeError(f'claude mcp add failed (rc={add_result.returncode}): {stderr}')
+    return f'repaired identity env for {name!r} in Claude Code'
+
+
+def repair(
+    client: MCPClient,
+    *,
+    name: str = DEFAULT_REGISTRY_NAME,
+    config_path: Path | None = None,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+    which: Callable[[str], str | None] | None = None,
+) -> str:
+    """Drive a client-specific identity-env repair with consistent error semantics."""
+    if client is MCPClient.CLAUDE_CODE:
+        return repair_claude_code(name, run=run, which=which)
+    if client is MCPClient.CODEX_CLI:
+        return repair_codex_cli(name, config_path=config_path)
+    raise ValueError(f'unsupported client: {client!r}')  # pragma: no cover
+
+
 def parse_env_pairs(pairs: list[str]) -> dict[str, str]:
     """Parse ``KEY=VALUE`` pairs from --env flags; raise on malformed input."""
     out: dict[str, str] = {}

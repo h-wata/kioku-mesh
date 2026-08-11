@@ -16,6 +16,7 @@ from kioku_mesh import mcp_install
 from kioku_mesh.__main__ import main as cli_main
 from kioku_mesh.mcp_install import _build_claude_add_command
 from kioku_mesh.mcp_install import _render_codex_toml_block
+from kioku_mesh.mcp_install import _repair_identity_env
 from kioku_mesh.mcp_install import _replace_codex_block
 from kioku_mesh.mcp_install import build_install_plan
 from kioku_mesh.mcp_install import DEFAULT_REGISTRY_NAME
@@ -24,6 +25,9 @@ from kioku_mesh.mcp_install import install_codex_cli
 from kioku_mesh.mcp_install import InstallPlan
 from kioku_mesh.mcp_install import MCPClient
 from kioku_mesh.mcp_install import parse_env_pairs
+from kioku_mesh.mcp_install import repair
+from kioku_mesh.mcp_install import repair_claude_code
+from kioku_mesh.mcp_install import repair_codex_cli
 
 # -- parse_env_pairs ------------------------------------------------------------
 
@@ -351,6 +355,181 @@ def test_replace_codex_block_only_replaces_matching_name() -> None:
     assert 'A = "1"' not in new  # nested table swept
 
 
+# -- _repair_identity_env --------------------------------------------------------
+
+
+def test_repair_identity_env_renames_legacy_key_without_current_twin() -> None:
+    env = {'ZENOH_CONNECT': 'tcp/127.0.0.1:7447', 'MESH_MEM_AGENT_FAMILY': 'claude'}
+    repaired = _repair_identity_env(env)
+    assert repaired == {'ZENOH_CONNECT': 'tcp/127.0.0.1:7447', 'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+
+
+def test_repair_identity_env_renames_both_identity_keys() -> None:
+    env = {'MESH_MEM_AGENT_FAMILY': 'codex', 'MESH_MEM_CLIENT_ID': 'codex-cli'}
+    repaired = _repair_identity_env(env)
+    assert repaired == {'KIOKU_MESH_AGENT_FAMILY': 'codex', 'KIOKU_MESH_CLIENT_ID': 'codex-cli'}
+
+
+def test_repair_identity_env_leaves_unrelated_user_env_untouched() -> None:
+    env = {'MY_CUSTOM_FLAG': 'on', 'ANOTHER_SETTING': '42'}
+    assert _repair_identity_env(env) == env
+
+
+def test_repair_identity_env_no_op_when_current_prefix_already_present() -> None:
+    """A config already carrying both names is correct; repair keeps the inert legacy key."""
+    env = {'MESH_MEM_AGENT_FAMILY': 'claude', 'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+    assert _repair_identity_env(env) == env
+
+
+def test_repair_identity_env_no_op_when_nothing_legacy() -> None:
+    env = {'KIOKU_MESH_AGENT_FAMILY': 'claude', 'KIOKU_MESH_CLIENT_ID': 'claude-code'}
+    assert _repair_identity_env(env) == env
+
+
+# -- repair_codex_cli -------------------------------------------------------------
+
+
+def test_repair_codex_cli_renames_legacy_prefix_preserves_command_and_extra_env(tmp_path: Path) -> None:
+    target = tmp_path / 'config.toml'
+    target.write_text(
+        'model = "gpt-5"\n\n'
+        '[mcp_servers.kioku_mesh]\n'
+        'command = "/home/user/.local/bin/kioku-mesh-mcp"\n\n'
+        '[mcp_servers.kioku_mesh.env]\n'
+        'ZENOH_CONNECT = "tcp/127.0.0.1:7447"\n'
+        'MESH_MEM_AGENT_FAMILY = "codex"\n'
+        'MESH_MEM_CLIENT_ID = "codex-cli"\n'
+        'MY_CUSTOM_TIMEOUT = "30"\n\n'
+        '[mcp_servers.other]\n'
+        'command = "/other"\n'
+    )
+    msg = repair_codex_cli(config_path=target)
+    assert 'repaired' in msg
+    body = target.read_text()
+    assert 'MESH_MEM_AGENT_FAMILY' not in body
+    assert 'MESH_MEM_CLIENT_ID' not in body
+    assert 'KIOKU_MESH_AGENT_FAMILY = "codex"' in body
+    assert 'KIOKU_MESH_CLIENT_ID = "codex-cli"' in body
+    # Unrelated user env / command / other blocks untouched.
+    assert 'MY_CUSTOM_TIMEOUT = "30"' in body
+    assert 'command = "/home/user/.local/bin/kioku-mesh-mcp"' in body
+    assert 'model = "gpt-5"' in body
+    assert '[mcp_servers.other]' in body
+
+
+def test_repair_codex_cli_no_op_when_already_current_prefix(tmp_path: Path) -> None:
+    target = tmp_path / 'config.toml'
+    original = (
+        '[mcp_servers.kioku_mesh]\ncommand = "/x"\n\n[mcp_servers.kioku_mesh.env]\nKIOKU_MESH_AGENT_FAMILY = "codex"\n'
+    )
+    target.write_text(original)
+    msg = repair_codex_cli(config_path=target)
+    assert 'nothing to repair' in msg
+    assert target.read_text() == original  # untouched
+
+
+def test_repair_codex_cli_errors_when_entry_missing(tmp_path: Path) -> None:
+    target = tmp_path / 'config.toml'
+    target.write_text('model = "gpt-5"\n')
+    msg = repair_codex_cli(config_path=target)
+    assert msg.startswith('error:')
+    assert 'kioku_mesh' in msg
+
+
+def test_repair_codex_cli_errors_when_file_missing(tmp_path: Path) -> None:
+    target = tmp_path / 'missing.toml'
+    msg = repair_codex_cli(config_path=target)
+    assert msg.startswith('error:')
+
+
+# -- repair_claude_code ------------------------------------------------------------
+
+_CLAUDE_MCP_GET_OUTPUT = (
+    'kioku_mesh:\n'
+    '  Scope: User config (available in all your projects)\n'
+    '  Status: ✔ Connected\n'
+    '  Type: stdio\n'
+    '  Command: /home/user/.local/bin/kioku-mesh-mcp\n'
+    '  Args:\n'
+    '  Environment:\n'
+    '    ZENOH_CONNECT=tcp/127.0.0.1:7447\n'
+    '    MESH_MEM_AGENT_FAMILY=claude\n'
+    '    MESH_MEM_CLIENT_ID=claude-code\n'
+    '\n'
+    'To remove this server, run: claude mcp remove kioku_mesh -s user\n'
+)
+
+
+def test_repair_claude_code_renames_legacy_prefix_preserves_extra_env() -> None:
+    invocations: list[list[str]] = []
+
+    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        invocations.append(argv[1:])
+        if argv[1:3] == ['mcp', 'get']:
+            return subprocess.CompletedProcess(argv, 0, stdout=_CLAUDE_MCP_GET_OUTPUT, stderr='')
+        return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+
+    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    assert 'repaired' in msg
+    # get -> remove -> add, in that order.
+    assert invocations[0][:2] == ['mcp', 'get']
+    assert invocations[1][:3] == ['mcp', 'remove', 'kioku_mesh']
+    add_call = invocations[2]
+    assert add_call[:3] == ['mcp', 'add', 'kioku_mesh']
+    assert '-e' in add_call
+    joined = ' '.join(add_call)
+    assert 'KIOKU_MESH_AGENT_FAMILY=claude' in joined
+    assert 'KIOKU_MESH_CLIENT_ID=claude-code' in joined
+    assert 'MESH_MEM_AGENT_FAMILY' not in joined
+    assert 'ZENOH_CONNECT=tcp/127.0.0.1:7447' in joined  # unrelated env preserved
+    assert add_call[-2:] == ['--', '/home/user/.local/bin/kioku-mesh-mcp']  # command preserved
+
+
+def test_repair_claude_code_no_op_when_already_current_prefix() -> None:
+    output = 'kioku_mesh:\n  Command: /x\n  Environment:\n    KIOKU_MESH_AGENT_FAMILY=claude\n'
+
+    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
+
+    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    assert 'nothing to repair' in msg
+
+
+def test_repair_claude_code_errors_when_not_registered() -> None:
+    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout='', stderr='No MCP server found with name: kioku_mesh')
+
+    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    assert msg.startswith('error:')
+
+
+def test_repair_claude_code_missing_claude_binary() -> None:
+    with pytest.raises(FileNotFoundError, match='claude binary'):
+        repair_claude_code(which=lambda _n: None)
+
+
+# -- repair dispatch ----------------------------------------------------------------
+
+
+def test_repair_dispatches_to_codex(tmp_path: Path) -> None:
+    target = tmp_path / 'config.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\ncommand = "/x"\n\n[mcp_servers.kioku_mesh.env]\nMESH_MEM_AGENT_FAMILY = "codex"\n'
+    )
+    msg = repair(MCPClient.CODEX_CLI, config_path=target)
+    assert 'repaired' in msg
+
+
+def test_repair_dispatches_to_claude_code() -> None:
+    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        if argv[1:3] == ['mcp', 'get']:
+            return subprocess.CompletedProcess(argv, 0, stdout=_CLAUDE_MCP_GET_OUTPUT, stderr='')
+        return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+
+    msg = repair(MCPClient.CLAUDE_CODE, run=fake_run, which=lambda _n: '/usr/bin/claude')
+    assert 'repaired' in msg
+
+
 # -- CLI wiring -----------------------------------------------------------------
 
 
@@ -412,3 +591,43 @@ def test_cli_mcp_install_rejects_malformed_env(
     rc = cli_main(['mcp', 'install', '--client', 'codex-cli', '-e', 'malformed'])
     assert rc == 2
     assert 'KEY=VALUE' in capsys.readouterr().err
+
+
+def test_cli_mcp_install_repair_codex_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / 'codex.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\ncommand = "/x"\n\n[mcp_servers.kioku_mesh.env]\nMESH_MEM_AGENT_FAMILY = "codex"\n'
+    )
+    monkeypatch.setattr(mcp_install, '_default_codex_config_path', lambda: target)
+    rc = cli_main(['mcp', 'install', '--client', 'codex-cli', '--repair'])
+    assert rc == 0
+    assert 'KIOKU_MESH_AGENT_FAMILY = "codex"' in target.read_text()
+    assert 'repaired' in capsys.readouterr().out
+
+
+def test_cli_mcp_install_repair_codex_missing_entry_exits_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / 'codex.toml'
+    target.write_text('model = "gpt-5"\n')
+    monkeypatch.setattr(mcp_install, '_default_codex_config_path', lambda: target)
+    rc = cli_main(['mcp', 'install', '--client', 'codex-cli', '--repair'])
+    assert rc == 1
+    assert 'kioku_mesh' in capsys.readouterr().err
+
+
+def test_cli_mcp_install_repair_does_not_require_kioku_mesh_mcp_on_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """--repair edits an existing registration; it must not need `which('kioku-mesh-mcp')` to succeed."""
+    monkeypatch.setattr(mcp_install.shutil, 'which', lambda _name: None)
+    target = tmp_path / 'codex.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\ncommand = "/x"\n\n[mcp_servers.kioku_mesh.env]\nMESH_MEM_CLIENT_ID = "codex-cli"\n'
+    )
+    monkeypatch.setattr(mcp_install, '_default_codex_config_path', lambda: target)
+    rc = cli_main(['mcp', 'install', '--client', 'codex-cli', '--repair'])
+    assert rc == 0
+    assert 'KIOKU_MESH_CLIENT_ID = "codex-cli"' in target.read_text()

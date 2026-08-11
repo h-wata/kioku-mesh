@@ -76,6 +76,14 @@ ADR-0030.
   boundary, so `get_memory` / `delete_memory` stay callable on a partially
   displayed result. The `showing N of M` counts observations only; a prefix
   banner (e.g. an AND->OR fallback marker) is never counted as a result.
+- `kioku-mesh mcp install --client <client> --repair`: overwrites only the
+  retired `MESH_MEM_*` identity env vars (`MESH_MEM_AGENT_FAMILY` /
+  `MESH_MEM_CLIENT_ID`) on an already-registered Claude Code or Codex CLI
+  entry to the current `KIOKU_MESH_*` prefix. Command path and every other
+  env var / config value on the entry are left untouched — `--repair` reads
+  the existing registration (`claude mcp get` for Claude Code, direct TOML
+  parse for Codex CLI) before writing back, rather than resetting the whole
+  entry the way `--force` does. (#279)
 
 ### Fixed
 
