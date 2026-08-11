@@ -171,9 +171,22 @@ _INVENTORY_COMMAND = 'kioku-mesh messaging orphan-acks list --format json'
 class IngressResult:
     """What the index decided about one arriving message.
 
-    ``suppressed`` is the single answer to "should this stay out of the normal
-    message list", so callers never have to re-derive suppression from ack
-    state — re-deriving it is what let the old code drop messages silently.
+    The verdict carries the two facts a caller must not work out for itself:
+    ``acked``, decided inside the transaction that classified the arrival, and
+    ``code``, from which :attr:`is_diagnostic` follows. Re-deriving "already
+    read" from ack state after the fact is what let the old code drop messages
+    silently, so the delivery filter reads ``acked`` from here rather than
+    asking the index a second time.
+
+    There is deliberately no single "suppressed" flag. Whether an arrival ends
+    up in the normal message list is a function of this verdict *and* of the
+    caller's ``include_acked`` / ``include_expired`` request, which the index
+    never sees — a message that is withheld from one caller is mail to
+    another. Collapsing both halves into one boolean here would have to guess
+    the caller's half: an acked duplicate would come back flagged as withheld
+    even from a caller that asked for acked mail, and because that code is not
+    diagnostic it would be withheld with nothing said — the failure this unit
+    exists to prevent.
     """
 
     code: str
@@ -181,7 +194,6 @@ class IngressResult:
     recipient_session_id: str
     registered: bool
     acked: bool
-    suppressed: bool
     detail: dict[str, Any] = field(default_factory=dict)
     remedy: str | None = None
 
@@ -204,7 +216,6 @@ class IngressResult:
             recipient_session_id=recipient_session_id,
             registered=False,
             acked=False,
-            suppressed=True,
             detail={'error': f'{type(error).__name__}: {error}'},
             remedy=(
                 'The local inbox index could not classify this arrival, so it was neither registered nor '
@@ -226,7 +237,6 @@ class IngressResult:
             recipient_session_id=recipient_session_id,
             registered=False,
             acked=False,
-            suppressed=True,
             detail={'expires_at': expires_at},
             remedy=(
                 'This message expired before it was ever read, so it is not delivered and its msg_id is '
@@ -405,7 +415,6 @@ class LocalMessageIndex:
                 recipient_session_id=recipient_session_id,
                 registered=live is None,
                 acked=False,
-                suppressed=True,
                 detail={
                     'acked_at': legacy['acked_at'],
                     'migrated_at': legacy['migrated_at'],
@@ -429,7 +438,6 @@ class LocalMessageIndex:
                 recipient_session_id=recipient_session_id,
                 registered=False,
                 acked=acked,
-                suppressed=acked,
             )
 
         tomb = conn.execute(
@@ -458,7 +466,6 @@ class LocalMessageIndex:
                 recipient_session_id=recipient_session_id,
                 registered=True,
                 acked=True,
-                suppressed=True,
                 detail={'acked_at': pending['acked_at'], 'source_key': pending['source_key']},
                 remedy=(
                     'An acknowledgement for this pair was observed before the message arrived, so the '
@@ -488,7 +495,6 @@ class LocalMessageIndex:
             recipient_session_id=recipient_session_id,
             registered=True,
             acked=False,
-            suppressed=False,
         )
 
     @staticmethod
@@ -569,7 +575,6 @@ class LocalMessageIndex:
                 recipient_session_id=recipient_session_id,
                 registered=False,
                 acked=False,
-                suppressed=True,
                 detail=detail,
                 remedy=(
                     f'msg_id {msg.msg_id} was retired when its message expired and cannot carry a new '
@@ -582,7 +587,6 @@ class LocalMessageIndex:
             recipient_session_id=recipient_session_id,
             registered=False,
             acked=False,
-            suppressed=True,
             detail=detail,
             remedy=(
                 f'msg_id {msg.msg_id} already expired and was purged, so this re-delivery is not shown '
@@ -633,16 +637,28 @@ class LocalMessageIndex:
         """Record an ack and mark the per-session row as acked.
 
         Raises ValueError if (msg_id, recipient_session_id) is not registered.
+
+        The check and the write share one ``BEGIN IMMEDIATE`` transaction for
+        the same reason every other writer here does: between them the pair can
+        be retired by :meth:`purge_expired`, and an ack written against a
+        message that is no longer there is precisely the bare ack this unit
+        exists to stop manufacturing. Reading in autocommit and writing
+        afterwards left that window open.
         """
         with self._connect() as conn:
-            row = conn.execute(
-                'SELECT 1 FROM messages WHERE msg_id = ? AND recipient_session_id = ?',
-                (ack.msg_id, ack.recipient_session_id),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f'unknown msg_id: {ack.msg_id!r}')
-            self._write_ack_locked(conn, ack)
-            conn.commit()
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute(
+                    'SELECT 1 FROM messages WHERE msg_id = ? AND recipient_session_id = ?',
+                    (ack.msg_id, ack.recipient_session_id),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f'unknown msg_id: {ack.msg_id!r}')
+                self._write_ack_locked(conn, ack)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     @staticmethod
     def _write_ack_locked(conn: sqlite3.Connection, ack: Ack) -> None:

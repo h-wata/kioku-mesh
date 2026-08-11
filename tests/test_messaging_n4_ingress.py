@@ -174,7 +174,7 @@ def test_a_reput_after_purge_is_never_silently_dropped(db_path: Path) -> None:
 
     assert result.code == local_index_module.INGRESS_PROTOCOL_VIOLATION
     assert result.registered is False
-    assert result.suppressed is True
+    assert result.is_diagnostic is True
     assert result.detail['tombstoned_at']
     assert result.remedy
 
@@ -195,7 +195,7 @@ def test_an_identical_reput_after_purge_is_a_retired_duplicate(db_path: Path) ->
 
     assert result.code == local_index_module.INGRESS_DUPLICATE_RETIRED
     assert result.registered is False
-    assert result.suppressed is True
+    assert result.is_diagnostic is True
 
 
 def test_a_new_msg_id_after_purge_is_delivered_normally(db_path: Path) -> None:
@@ -208,7 +208,8 @@ def test_a_new_msg_id_after_purge_is_delivered_normally(db_path: Path) -> None:
 
     assert result.code == local_index_module.INGRESS_REGISTERED
     assert result.registered is True
-    assert result.suppressed is False
+    assert result.is_diagnostic is False
+    assert result.acked is False
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +225,7 @@ def test_a_quarantined_pair_reports_a_conflict_and_keeps_the_payload(db_path: Pa
     result = index.register_or_classify(_msg('collide'), 'sess-a')
 
     assert result.code == local_index_module.INGRESS_LEGACY_ACK_CONFLICT
-    assert result.suppressed is True
+    assert result.is_diagnostic is True
     # The message row is created so an operator can promote the ack onto it,
     # and so the payload is not lost while the conflict is unresolved.
     assert result.registered is True
@@ -262,7 +263,7 @@ def test_releasing_a_quarantined_pair_lets_the_message_through(db_path: Path, tm
     result = index.register_or_classify(_msg('collide'), 'sess-a')
 
     assert result.code == local_index_module.INGRESS_DUPLICATE_LIVE
-    assert result.suppressed is False
+    assert result.is_diagnostic is False
     assert result.acked is False
 
 
@@ -285,7 +286,10 @@ def test_promoting_a_quarantined_pair_marks_the_message_acknowledged(db_path: Pa
 
     assert result.code == local_index_module.INGRESS_DUPLICATE_LIVE
     assert result.acked is True
-    assert result.suppressed is True
+    # Withheld from a default poll by the caller's acked filter, not by a
+    # diagnostic: this is the one verdict whose delivery depends on what the
+    # caller asked for, which is why the index does not decide it alone.
+    assert result.is_diagnostic is False
     assert index.is_acked('collide', 'sess-a') is True
 
 
@@ -315,7 +319,7 @@ def test_a_pending_ack_is_promoted_when_its_message_arrives(db_path: Path) -> No
     assert result.code == local_index_module.INGRESS_ACK_FIRST_PROMOTED
     assert result.registered is True
     assert result.acked is True
-    assert result.suppressed is True
+    assert result.is_diagnostic is True
     assert _pairs(db_path, 'pending_acks') == set()
     assert _pairs(db_path, 'acks') == {('early', 'sess-a')}
     # The original ack time travels with the promotion rather than being restamped.
@@ -383,7 +387,8 @@ def test_a_transport_duplicate_of_a_live_message_registers_once(db_path: Path) -
     assert first.code == local_index_module.INGRESS_REGISTERED
     assert second.code == local_index_module.INGRESS_DUPLICATE_LIVE
     assert second.registered is False
-    assert second.suppressed is False, 'an unacked duplicate is still deliverable, not withheld'
+    assert second.is_diagnostic is False, 'an unacked duplicate is still deliverable, not withheld'
+    assert second.acked is False
     assert len(_rows(db_path, 'messages')) == 1
 
 
@@ -485,10 +490,27 @@ def _reply(msg: Message, key: str) -> MagicMock:
     return reply
 
 
-def _check_messages(tmp_path: Path, msg: Message, session_id: str, **kwargs: object) -> dict:
-    mcp_module._messaging_index = None
+def _mock_zenoh_session(msg: Message, session_id: str) -> MagicMock:
     mock_session = MagicMock()
     mock_session.get.return_value = [_reply(msg, f'msg/mesh/inbox/session/{session_id}/{msg.msg_id}')]
+    return mock_session
+
+
+def _check_messages(
+    tmp_path: Path,
+    msg: Message,
+    session_id: str,
+    *,
+    zenoh_session: MagicMock | None = None,
+    **kwargs: object,
+) -> dict:
+    """Run the real tool against a mocked Zenoh session.
+
+    Pass ``zenoh_session`` to keep a reference to the mock and assert on what
+    the tool did to storage (the expired-arrival delete, for instance).
+    """
+    mcp_module._messaging_index = None
+    mock_session = zenoh_session if zenoh_session is not None else _mock_zenoh_session(msg, session_id)
 
     async def _go() -> dict:
         async with Client(mcp) as client:
@@ -648,7 +670,7 @@ def test_a_bare_ack_written_after_the_migration_is_quarantined_on_arrival(db_pat
     result = index.register_or_classify(_msg('late-ack'), 'sess-a')
 
     assert result.code == local_index_module.INGRESS_LEGACY_ACK_CONFLICT
-    assert result.suppressed is True
+    assert result.is_diagnostic is True
     assert result.acked is False
     assert index.is_acked('late-ack', 'sess-a') is False
     assert _pairs(db_path, 'acks') == set(), 'the bare ack must not stay authoritative'
@@ -704,7 +726,7 @@ def test_a_bare_ack_on_a_tombstoned_pair_is_quarantined_too(db_path: Path) -> No
 
     result = index.register_or_classify(_msg('retired', expires_at=_now() + timedelta(hours=1)), 'sess-a')
 
-    assert result.suppressed is True
+    assert result.is_diagnostic is True
     assert _pairs(db_path, 'acks') == set()
 
 
@@ -1072,3 +1094,108 @@ def test_an_error_reply_with_an_unreadable_payload_is_still_reported(tmp_path: P
         result = asyncio.run(_go())
 
     assert {d['code'] for d in result['diagnostics']} == {'reply_error'}
+
+
+# ---------------------------------------------------------------------------
+# Cross-review follow-ups (TASK-336-review F1/F2/F3)
+# ---------------------------------------------------------------------------
+
+
+def test_an_acked_duplicate_is_delivered_when_the_caller_asks_for_acked_mail(tmp_path: Path) -> None:
+    """Withholding is the verdict *and* the caller's request, never the verdict alone.
+
+    An acked duplicate stays out of a default poll and belongs in one that
+    passes ``include_acked=True``. A single "suppressed" boolean decided inside
+    the index could not tell those two polls apart — it never sees the request —
+    and since ``duplicate_live`` carries no diagnostic, believing it would
+    withhold this message with nothing said, which is the failure this unit
+    exists to prevent.
+    """
+    index = LocalMessageIndex(tmp_path / 'messaging' / 'inbox.db')
+    msg = _msg('read-already', session='n4-sess', body='old news')
+    index.register_or_classify(msg, 'n4-sess')
+    index.record_ack(Ack(msg_id='read-already', recipient_session_id='n4-sess'))
+
+    default_poll = _check_messages(tmp_path, msg, 'n4-sess')
+    asked_for_it = _check_messages(tmp_path, msg, 'n4-sess', include_acked=True)
+
+    assert default_poll['count'] == 0
+    assert asked_for_it['count'] == 1, 'include_acked=True asks for exactly this message'
+    assert asked_for_it['messages'][0]['body'] == 'old news'
+    assert asked_for_it['messages'][0]['acked'] is True
+
+
+def test_an_unclassifiable_expired_arrival_is_left_in_storage_for_the_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: the copy in storage is the only thing that can bring the arrival back.
+
+    An expired arrival is deleted from Zenoh once the classifier has retired
+    it, but the classification can fail. Deleting first threw away the last
+    copy while no tombstone had been written, so the id quietly became reusable
+    again and the "it is retried on the next poll" remedy was untrue — nothing
+    would ever arrive again.
+    """
+
+    def _boom(self, msg: Message, recipient_session_id: str):  # noqa: ANN001, ANN202
+        raise sqlite3.OperationalError('database is locked')
+
+    monkeypatch.setattr(LocalMessageIndex, 'register_or_classify', _boom)
+    msg = _msg('too-late', session='exp-sess', expires_at=_now() - timedelta(seconds=1))
+    zenoh_session = _mock_zenoh_session(msg, 'exp-sess')
+
+    result = _check_messages(tmp_path, msg, 'exp-sess', zenoh_session=zenoh_session)
+
+    (diag,) = result['diagnostics']
+    assert diag['code'] == 'classification_failed'
+    assert zenoh_session.delete.call_count == 0, 'storage must hold the arrival until its id has been retired'
+    assert _tombstones(tmp_path) == set()
+
+
+def test_a_retired_expired_arrival_is_still_deleted_from_storage(tmp_path: Path) -> None:
+    """Positive control for the ordering above: a classified arrival is cleaned up."""
+    msg = _msg('too-late', session='exp-sess', expires_at=_now() - timedelta(seconds=1))
+    zenoh_session = _mock_zenoh_session(msg, 'exp-sess')
+
+    _check_messages(tmp_path, msg, 'exp-sess', zenoh_session=zenoh_session)
+
+    assert _tombstones(tmp_path) == {('too-late', 'exp-sess')}
+    assert zenoh_session.delete.call_count == 1
+
+
+def test_record_ack_holds_the_write_lock_across_its_check_and_write(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F2: the pair can be retired between "is it registered" and "write the ack".
+
+    ``purge_expired`` removes the message and takes its ack with it, so an ack
+    written after that check lands on a pair that no longer exists — a bare
+    ack, the shape this unit exists to stop manufacturing. Holding one write
+    transaction across both statements is what closes the window, so the test
+    pins the lock instead of trying to hit the race.
+    """
+    index = LocalMessageIndex(db_path)
+    index.register_or_classify(_msg('acking', expires_at=_now() + timedelta(hours=1)), 'sess-a')
+    rival_verdicts: list[str] = []
+    original = LocalMessageIndex._write_ack_locked  # noqa: SLF001
+
+    def _probe_then_write(conn: sqlite3.Connection, ack: Ack) -> None:
+        rival = sqlite3.connect(db_path, timeout=0)
+        try:
+            rival.execute('BEGIN IMMEDIATE')
+        except sqlite3.OperationalError as e:
+            rival_verdicts.append(str(e))
+        else:
+            rival.rollback()
+        finally:
+            rival.close()
+        original(conn, ack)
+
+    monkeypatch.setattr(LocalMessageIndex, '_write_ack_locked', staticmethod(_probe_then_write))
+
+    index.record_ack(Ack(msg_id='acking', recipient_session_id='sess-a'))
+
+    assert rival_verdicts, 'another writer could open a transaction mid-record_ack: the window is still open'
+    assert index.is_acked('acking', 'sess-a') is True

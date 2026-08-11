@@ -1159,15 +1159,6 @@ def check_messages(
                     if msg.msg_id in seen_ids:
                         continue
                     seen_ids.add(msg.msg_id)
-                    # Storage-level TTL purge (Issue #215): delete expired entries
-                    # from Zenoh so they do not accumulate indefinitely.
-                    # include_expired=True is read-only — skip delete so debug
-                    # inspection does not destroy storage.
-                    if is_expired(msg) and not include_expired:
-                        try:
-                            session.delete(msg_key)
-                        except Exception:  # noqa: BLE001 — best-effort; non-fatal
-                            pass
                     # Override scope from key context if not set on message
                     if not msg.scope:
                         msg.scope = scope
@@ -1177,7 +1168,7 @@ def check_messages(
                     # purge below had nothing to retire and no tombstone existed
                     # to reject a second, different message on the same id.
                     try:
-                        classifications[msg.msg_id] = index.register_or_classify(msg, session_id)
+                        verdict = index.register_or_classify(msg, session_id)
                     except Exception as e:  # noqa: BLE001
                         # Whatever went wrong — a locked index, a disk error —
                         # the one outcome that is not acceptable is an empty
@@ -1185,6 +1176,25 @@ def check_messages(
                         # so the next poll tries it again.
                         log.warning('check_messages: classification failed for %s: %s', msg.msg_id, e)
                         classifications[msg.msg_id] = IngressResult.classification_failed(msg.msg_id, session_id, e)
+                    else:
+                        classifications[msg.msg_id] = verdict
+                        # Storage-level TTL purge (Issue #215): delete expired
+                        # entries from Zenoh so they do not accumulate
+                        # indefinitely. Deliberately after the classification
+                        # has committed — the mirror of retiring an expired
+                        # arrival inside the classifier transaction rather than
+                        # leaving it to a later purge. Deleting first meant a
+                        # classification that then failed took the only copy of
+                        # the arrival with it: no tombstone was written, so the
+                        # id stayed reusable, and the "it is retried on the next
+                        # poll" remedy was untrue because nothing would arrive
+                        # again. include_expired=True is read-only, so debug
+                        # inspection never destroys storage.
+                        if is_expired(msg) and not include_expired:
+                            try:
+                                session.delete(msg_key)
+                            except Exception:  # noqa: BLE001 — best-effort; non-fatal
+                                pass
                     messages.append(msg)
             except Exception as e:  # noqa: BLE001
                 # A failed selector means this listing is incomplete, which is a

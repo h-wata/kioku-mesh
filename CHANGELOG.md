@@ -105,6 +105,25 @@ ADR-0030.
   quarantined acks record a `provenance` (`migration` or
   `post_migration_ack`), added in place on existing databases and shown by
   `orphan-acks list`.
+- Messaging: three narrower gaps from the second cross-review of the above. An
+  expired arrival was deleted from Zenoh storage *before* it was classified, so
+  a classification that then failed took the last copy of the message with it —
+  no tombstone was written, the id quietly became reusable, and the
+  "it is retried on the next poll" remedy was untrue because nothing would
+  arrive again; the delete now happens only after the classifying transaction
+  has committed. `record_ack` checked that the message was registered outside a
+  transaction and wrote the acknowledgement in a second one, leaving a window in
+  which `purge_expired` could retire the pair in between and turn the write into
+  exactly the unmatched ack this release exists to stop creating; the check and
+  the write now share one `BEGIN IMMEDIATE`, as every other writer here already
+  did. And `IngressResult` no longer carries a `suppressed` flag: whether an
+  arrival reaches the message list depends on the caller's `include_acked` /
+  `include_expired` request as well as on the verdict, which the index never
+  sees, so a single boolean decided inside the index could not answer it — an
+  acked duplicate would have come back flagged as withheld even from a caller
+  that asked for acked mail, and with no diagnostic attached. Callers read
+  `acked` (decided inside the classifying transaction) and the code's
+  `is_diagnostic` instead.
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with
