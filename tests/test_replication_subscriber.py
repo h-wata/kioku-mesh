@@ -30,6 +30,11 @@ _T = TypeVar('_T')
 _WAIT_TIMEOUT = 10.0
 _POLL_INTERVAL = 0.01
 
+# Repeat count for the one-shot CLI test below: the shape it exercises is a
+# race, so a single pass would only sample it once. Ten open -> put -> close
+# cycles cost well under a second in total on a live path.
+_ONE_SHOT_CYCLES = 10
+
 
 def _wait_until(predicate: Callable[[], _T], description: str, *, timeout: float = _WAIT_TIMEOUT) -> _T:
     """Poll ``predicate`` until it returns a truthy value, or fail with ``description``."""
@@ -110,10 +115,14 @@ def _handshake(sess: zenoh.Session, *, via: str) -> None:
 
     ``zenoh.open`` returns before the new session's declarations have been
     exchanged with the router, and a sample published in that window is
-    routed against a routing table that does not know the destination yet —
-    it is dropped outright, not queued. Measured on this suite: the local
-    index still had not seen such a sample 10s later, so no amount of extra
-    waiting recovers it.
+    routed against a routing table that does not know every destination yet.
+    The sample itself is not lost — the router's storage still holds it, and a
+    query or a later index rebuild reads it back. What is lost is the *live
+    delivery to subscribers*: the notification is never re-sent, so a
+    subscriber that was not routed to at publish time never sees that sample.
+    Measured on this suite: the local index still had not seen such a sample
+    10s later while the same key answered a storage query, so no amount of
+    extra waiting recovers it.
 
     Re-publishing the canary until it is observed is what makes the tests
     deterministic: nothing under test is published until the session ->
@@ -161,6 +170,75 @@ def _remote_session(endpoint: str, *, handshake_via: str = 'index') -> zenoh.Ses
     sess = zenoh.open(cfg)
     _handshake(sess, via=handshake_via)
     return sess
+
+
+def _warm_peer_subscriber(endpoint: str) -> tuple[zenoh.Session, Any, set[str]]:
+    """Declare an independent ``mem/**`` subscriber and prove it is live.
+
+    Stands in for another peer's replication subscriber: it lives on its own
+    session, so it survives the store-session resets the one-shot CLI test
+    performs. Returns the session, the subscriber handle and the mutable set
+    of key expressions it has observed so far.
+    """
+    cfg = zenoh.Config()
+    cfg.insert_json5('mode', '"client"')
+    cfg.insert_json5('connect/endpoints', f'["{endpoint}"]')
+    cfg.insert_json5('scouting/multicast/enabled', 'false')
+    peer = zenoh.open(cfg)
+    seen: set[str] = set()
+    sub = peer.declare_subscriber('mem/**', lambda sample: seen.add(str(sample.key_expr)))
+
+    # The peer's own declaration has to reach the router before it can be
+    # routed to, so publish a canary from an already-established session until
+    # the peer observes it — same reasoning as _handshake, one hop further.
+    warm = _remote_session(endpoint, handshake_via='storage')
+    try:
+        canary = _mk_obs('peer canary', project='_peer-canary')
+        deadline = time.monotonic() + _WAIT_TIMEOUT
+        while canary.key_expr not in seen:
+            warm.put(canary.key_expr, canary.to_json())
+            attempt_end = min(time.monotonic() + 0.1, deadline)
+            while canary.key_expr not in seen and time.monotonic() < attempt_end:
+                time.sleep(_POLL_INTERVAL)
+            if canary.key_expr not in seen and time.monotonic() >= deadline:
+                raise AssertionError(f'timed out after {_WAIT_TIMEOUT:.1f}s establishing the peer subscriber')
+    finally:
+        warm.close()
+    return peer, sub, seen
+
+
+def test_one_shot_cli_put_reaches_peer_subscriber_and_storage(single_zenohd: Any) -> None:
+    """The one-shot CLI shape (lazy-open -> put -> close) still reaches a peer.
+
+    ``kioku-mesh save`` is a one-shot process: ``store.put_observation`` opens
+    the Zenoh session on demand and ``main``'s ``finally`` closes it right
+    after, so production does publish from a just-opened session — the same
+    shape the tests in this file used to hit. This pins what that path
+    guarantees for an *already established* peer: the sample reaches both the
+    peer's live subscriber and the router's storage. It is the production
+    counterpart of ``_handshake``'s reasoning, which is about a peer whose own
+    declaration has not propagated yet.
+    """
+    peer, sub, seen = _warm_peer_subscriber(single_zenohd.endpoint)
+    try:
+        for i in range(_ONE_SHOT_CYCLES):
+            obs = _mk_obs(f'one-shot cli put {i}', project='sub-oneshot')
+            # A fresh process: no cached session, no cached index.
+            store._reset_index()
+            store._reset_session()
+            store.put_observation(obs)
+            # What __main__.main does in its finally clause.
+            store._reset_index()
+            store._reset_session()
+
+            _wait_until(lambda: obs.key_expr in seen, f'peer subscriber to receive one-shot put {i}')
+            _wait_until(
+                lambda: any(r.ok for r in peer.get(obs.key_expr, timeout=2.0)),
+                f'router storage to hold one-shot put {i}',
+            )
+    finally:
+        sub.undeclare()
+        peer.close()
 
 
 def test_subscriber_picks_up_remote_put_into_index(single_zenohd: Any) -> None:

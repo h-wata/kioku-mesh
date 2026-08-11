@@ -60,13 +60,19 @@ ADR-0030.
 - tests: `tests/test_replication_subscriber.py` is no longer flaky. The suite
   published from a just-opened Zenoh session and then waited a fixed 0.4s for
   asynchronous delivery. A sample published before that session's declarations
-  have propagated to the router is dropped rather than queued, so the wait
+  have propagated to the router is not delivered to the subscribers the router
+  did not yet route to, and that notification is never re-sent, so the wait
   could never succeed — measured: the local index still had not seen such a
-  sample 10s later. Every fixed sleep in the file is now a wait on the
-  condition the test actually cares about (row indexed / row gone / storage
-  holds the key / both callbacks logged), and opening a remote session now
-  re-publishes a canary until it is observed, so nothing under test is
-  published before the path is known to deliver.
+  sample 10s later, while a storage query on the same key answered. The sample
+  is durable (it reaches the router's storage); what is lost is the live
+  delivery to subscribers, i.e. the index update. Every fixed sleep in the file
+  is now a wait on the condition the test actually cares about (row indexed /
+  row gone / storage holds the key / both callbacks logged), and opening a
+  remote session now re-publishes a canary until it is observed, so nothing
+  under test is published before the path is known to deliver. A new test pins
+  what the production one-shot CLI shape (lazy-open -> put -> close, as in
+  `kioku-mesh save`) delivers to an already-established peer: both its live
+  subscriber and the router's storage receive the sample.
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
