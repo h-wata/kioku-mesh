@@ -46,9 +46,15 @@ ADR-0030.
   `kioku-mesh messaging orphan-acks list` reports them read-only (paginated,
   no writes, no mtime change) and `orphan-acks recover` resolves one exact
   pair at a time behind a required fresh backup and an explicit `--execute`,
-  recording a before image in `recovery_audit`. There is deliberately no bulk
-  delete and no age-based cleanup. This is the first of three units; the
-  `check_messages` suppression path itself changes in the next one (N4).
+  recording a before image in `recovery_audit`. `recover --action promote`
+  re-checks the matching message under the write lock, not only in preflight,
+  so a message deleted in between can no longer leave an acknowledgement with
+  nothing behind it; a promotion that would replace a *different* existing
+  acknowledgement is refused rather than silently rolling it back, and the
+  audited before image covers the quarantined row, the authoritative ack and
+  the message together. There is deliberately no bulk delete and no age-based
+  cleanup. This is the first of three units; the `check_messages` suppression
+  path itself changes in the next one (N4).
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

@@ -119,9 +119,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
     interrupted upgrade leaves the original ``acks`` table exactly as it was.
 
     Idempotent twice over — the version check skips the pass on reopen, and
-    :func:`~.orphan_acks.classify_unmatched_acks` converges if it is run again
-    anyway (which a rolling upgrade can cause, because an old writer that is
-    still running can create new unmatched rows after the upgrade).
+    :func:`~.orphan_acks.classify_unmatched_acks` converges if it is called
+    again anyway.
+
+    Reopening is not a re-classification, though: once the version is stamped
+    the pass is skipped, so an unmatched ack written by an old binary *after*
+    the upgrade stays in ``acks`` until that function is called explicitly. The
+    rollout quiesces old writers before upgrading for exactly this reason, and
+    unit 2 is what stops such a row from being read as an acknowledgement.
     """
     from . import orphan_acks  # noqa: PLC0415 - avoids an import cycle at module load
 

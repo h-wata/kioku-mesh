@@ -63,8 +63,15 @@ def classify_unmatched_acks(conn: sqlite3.Connection) -> int:
     Acks that do have a message stay exactly where they are and keep answering
     :meth:`~.local_index.LocalMessageIndex.is_acked`; only the unmatched ones
     move. The move is lossless — ``acked_at`` travels with the row — and
-    idempotent: re-running finds nothing left to move, and a row that somehow
-    already exists in the destination is left alone rather than restamped.
+    converges when called again: a pair that is already quarantined keeps the
+    time it was quarantined with, and a differing time on the incoming row is
+    appended to ``resolution_note`` rather than being dropped or overwritten.
+
+    Note this is not called again on its own. Once the schema version is
+    stamped, reopening the database skips the pass entirely, so an ack written
+    by an old binary *after* the upgrade stays in ``acks`` until something calls
+    this function explicitly. The rollout procedure handles that by quiescing
+    old writers before upgrading.
 
     Runs inside the caller's transaction so the whole upgrade commits or rolls
     back as one unit. Returns the number of rows moved.
@@ -78,6 +85,7 @@ def classify_unmatched_acks(conn: sqlite3.Connection) -> int:
     if not orphans:
         return 0
     migrated_at = _now_iso()
+    _record_conflicting_ack_times(conn, orphans, observed_at=migrated_at)
     conn.executemany(
         'INSERT OR IGNORE INTO legacy_unknown_acks'
         ' (msg_id, recipient_session_id, acked_at, migrated_at, state)'
@@ -89,6 +97,37 @@ def classify_unmatched_acks(conn: sqlite3.Connection) -> int:
         [(r[0], r[1]) for r in orphans],
     )
     return len(orphans)
+
+
+def _record_conflicting_ack_times(
+    conn: sqlite3.Connection,
+    orphans: list[sqlite3.Row],
+    *,
+    observed_at: str,
+) -> None:
+    """Keep an ``acked_at`` that a second classification pass would discard.
+
+    The source row is deleted after the move, and ``INSERT OR IGNORE`` keeps the
+    already-quarantined time, so a pair that gets a *different* time on a later
+    pass would otherwise lose it silently. Which of the two times is real cannot
+    be decided here, so both are kept and the operator sees the second one in
+    the inventory.
+    """
+    for row in orphans:
+        existing = conn.execute(
+            'SELECT acked_at, resolution_note FROM legacy_unknown_acks WHERE msg_id = ? AND recipient_session_id = ?',
+            (row[0], row[1]),
+        ).fetchone()
+        # Indexed access, not by name: the caller's connection may or may not
+        # have a Row factory set.
+        if existing is None or existing[0] == row[2]:
+            continue
+        note = f'also observed acked_at={row[2]} at {observed_at}'
+        merged = f'{existing[1]} | {note}' if existing[1] else note
+        conn.execute(
+            'UPDATE legacy_unknown_acks SET resolution_note = ? WHERE msg_id = ? AND recipient_session_id = ?',
+            (merged, row[0], row[1]),
+        )
 
 
 def verify_classification(conn: sqlite3.Connection, moved: int) -> None:
@@ -323,6 +362,60 @@ def _require_exact(value: str, label: str) -> None:
         )
 
 
+def _authoritative_ack(
+    conn: sqlite3.Connection,
+    msg_id: str,
+    recipient_session_id: str,
+) -> dict[str, object] | None:
+    row = conn.execute(
+        'SELECT msg_id, recipient_session_id, acked_at FROM acks WHERE msg_id = ? AND recipient_session_id = ?',
+        (msg_id, recipient_session_id),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _require_promotable(
+    msg_id: str,
+    recipient_session_id: str,
+    has_message: bool,
+    legacy_row: dict[str, object],
+    existing_ack: dict[str, object] | None,
+) -> None:
+    """Refuse a promotion that would destroy evidence instead of recovering it.
+
+    Two things can make a promotion wrong, and both are refused rather than
+    resolved automatically:
+
+    * No matching message. The promotion would create exactly the state this
+      unit exists to remove — an authoritative ack with nothing behind it.
+      ``release`` is the action for a message that is gone.
+    * A different authoritative ack already exists. That ack has a message
+      behind it, so it is stronger evidence than a quarantined row of unknown
+      origin; replacing it would silently roll an acknowledgement back to an
+      older time with nothing left to restore it from. Which of the two is
+      correct is a judgement about what actually happened, so it belongs to the
+      operator: ``release`` keeps the existing ack, and if the quarantined time
+      is genuinely the right one it can be applied from the audit trail.
+
+    An existing ack with the *same* ``acked_at`` is not a conflict — it is this
+    same promotion having already happened — so it is allowed through and
+    handled as a no-op on the ack table.
+    """
+    if not has_message:
+        raise ValueError(
+            f'refusing to promote ({msg_id}, {recipient_session_id}): there is no matching message, so '
+            'there is nothing for the acknowledgement to belong to. Use release if the message is gone.'
+        )
+    if existing_ack is not None and existing_ack['acked_at'] != legacy_row['acked_at']:
+        raise ValueError(
+            f'refusing to promote ({msg_id}, {recipient_session_id}): the message already has an '
+            f'acknowledgement recorded at {existing_ack["acked_at"]}, and promoting would replace it with '
+            f'the quarantined {legacy_row["acked_at"]}. The existing acknowledgement has a message behind '
+            'it and would not be recoverable afterwards. Use release to keep it, or resolve the conflict '
+            'deliberately after inspecting both times.'
+        )
+
+
 def recover(
     db_path: str | Path,
     *,
@@ -339,7 +432,8 @@ def recover(
     may be presented again. ``promote`` records the opposite — that it really
     was an acknowledgement observed early — and moves it into the authoritative
     ``acks`` table; that only makes sense once the message exists, so it is
-    refused otherwise.
+    refused otherwise, and it is refused again under the write lock in case the
+    message went away in between (see :func:`_require_promotable`).
 
     Nothing is written unless every gate is satisfied: an exact pair, a backup
     path that does not already exist, a successful backup, and ``execute``.
@@ -364,12 +458,12 @@ def recover(
         ).fetchone()
         before = dict(row) if row is not None else None
         has_message = _pair_exists(conn, 'messages', msg_id, recipient_session_id) if row is not None else False
+        existing_ack = _authoritative_ack(conn, msg_id, recipient_session_id) if row is not None else None
 
-    if row is not None and action == 'promote' and not has_message:
-        raise ValueError(
-            f'refusing to promote ({msg_id}, {recipient_session_id}): there is no matching message, so '
-            'there is nothing for the acknowledgement to belong to. Use release if the message is gone.'
-        )
+    if row is not None and action == 'promote':
+        # Checked here as well as under the write lock so an operator learns
+        # about the problem before taking a backup, not after.
+        _require_promotable(msg_id, recipient_session_id, has_message, before, existing_ack)
 
     if not execute:
         return RecoveryResult(
@@ -425,11 +519,33 @@ def recover(
                 'read. Re-run the dry run and check the new state before executing.'
             )
         now = _now_iso()
+        # The preflight above ran against a different snapshot. Whatever the
+        # promotion depends on has to be true *here*, under the lock that holds
+        # until commit — otherwise an expiry purge or a second operator between
+        # the two reads decides what this write does.
+        current_message = conn.execute(
+            'SELECT msg_id, recipient_session_id, scope, created_at, expires_at, is_acked FROM messages'
+            ' WHERE msg_id = ? AND recipient_session_id = ?',
+            (msg_id, recipient_session_id),
+        ).fetchone()
+        current_ack = _authoritative_ack(conn, msg_id, recipient_session_id)
         if action == 'promote':
-            conn.execute(
-                'INSERT OR REPLACE INTO acks (msg_id, recipient_session_id, acked_at) VALUES (?, ?, ?)',
-                (msg_id, recipient_session_id, before['acked_at']),
+            _require_promotable(
+                msg_id,
+                recipient_session_id,
+                current_message is not None,
+                before,
+                current_ack,
             )
+            if current_ack is None:
+                conn.execute(
+                    'INSERT INTO acks (msg_id, recipient_session_id, acked_at) VALUES (?, ?, ?)',
+                    (msg_id, recipient_session_id, before['acked_at']),
+                )
+            # else: the same acknowledgement is already authoritative (a rerun,
+            # or a crash between the two writes), so there is nothing to write
+            # and nothing to overwrite. Resolving the quarantined row below is
+            # the only work left.
             conn.execute(
                 'UPDATE messages SET is_acked = 1 WHERE msg_id = ? AND recipient_session_id = ?',
                 (msg_id, recipient_session_id),
@@ -453,7 +569,17 @@ def recover(
                 msg_id,
                 recipient_session_id,
                 action,
-                json.dumps(before, ensure_ascii=False),
+                # The whole state the decision was made against, not just the
+                # quarantined row: "what did this overwrite" is the question an
+                # audit log has to be able to answer.
+                json.dumps(
+                    {
+                        'legacy_unknown_ack': before,
+                        'authoritative_ack': current_ack,
+                        'matching_message': dict(current_message) if current_message is not None else None,
+                    },
+                    ensure_ascii=False,
+                ),
                 operator,
                 now,
                 str(backup_path),

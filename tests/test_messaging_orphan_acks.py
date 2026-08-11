@@ -32,6 +32,7 @@ from kioku_mesh.__main__ import main as cli_main
 from kioku_mesh.messaging import orphan_acks
 from kioku_mesh.messaging.local_index import LocalMessageIndex
 from kioku_mesh.messaging.local_index import MESSAGING_SCHEMA_VERSION
+from kioku_mesh.messaging.models import Ack
 from kioku_mesh.messaging.models import Message
 
 # ---------------------------------------------------------------------------
@@ -205,8 +206,9 @@ def test_migration_is_idempotent_across_reopens(db_path: Path) -> None:
 def test_running_the_classification_again_directly_is_also_idempotent(db_path: Path) -> None:
     """Not just version-guarded: the classification itself must be safe to repeat.
 
-    The version check makes a reopen cheap, but a rolling upgrade can leave new
-    unmatched rows behind, so the pass has to converge rather than duplicate.
+    Reopening the database skips the pass once the version is stamped, so this
+    function is the only re-classification entry point there is; calling it has
+    to converge rather than duplicate.
     """
     _write_v1_db(db_path, orphans=[('orphan-1', 'sess-a', _now())])
     LocalMessageIndex(db_path)
@@ -765,3 +767,191 @@ def test_cli_recover_executes_with_a_backup(quarantined_db: Path, tmp_path: Path
     assert backup.exists()
     assert _rows(quarantined_db, 'legacy_unknown_acks')[0]['state'] == 'released'
     assert _count(quarantined_db, 'recovery_audit') == 1
+
+
+# ---------------------------------------------------------------------------
+# Promote — the write transaction has to re-check what it is promoting onto
+# (cross-review PR304-B1)
+# ---------------------------------------------------------------------------
+
+
+def _register_live_message(db_path: Path, msg_id: str, session: str) -> LocalMessageIndex:
+    index = LocalMessageIndex(db_path)
+    index.register(Message(sender_id='s', scope='mesh', payload={'t': 'x'}, msg_id=msg_id), session)
+    return index
+
+
+def test_promote_refuses_when_the_message_disappears_before_the_write(
+    db_path: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins: the message is re-checked under the write lock, not only in preflight.
+
+    The preflight read and the write are two different points in time. Anything
+    that can delete the message in between — expiry purge, another operator —
+    would otherwise leave an authoritative ack with nothing behind it, which is
+    precisely the state this whole unit exists to prevent.
+    """
+    _write_v1_db(db_path, orphans=[('collide', 'sess-a', _now() - timedelta(days=2))])
+    _register_live_message(db_path, 'collide', 'sess-a')
+    real_backup = orphan_acks.create_backup
+
+    def _backup_then_delete_the_message(source: Path, destination: Path) -> None:
+        real_backup(source, destination)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DELETE FROM messages WHERE msg_id = 'collide'")
+            conn.commit()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(orphan_acks, 'create_backup', _backup_then_delete_the_message)
+
+    with pytest.raises(ValueError, match='no matching message'):
+        orphan_acks.recover(
+            db_path,
+            msg_id='collide',
+            recipient_session_id='sess-a',
+            action='promote',
+            backup_path=tmp_path / 'backup.db',
+            execute=True,
+        )
+
+    assert _pairs(db_path, 'acks') == set(), 'an ack was created for a message that no longer exists'
+    assert _rows(db_path, 'legacy_unknown_acks')[0]['state'] == 'unresolved'
+    assert _count(db_path, 'recovery_audit') == 0
+
+
+def test_promote_refuses_to_overwrite_a_different_authoritative_ack(db_path: Path, tmp_path: Path) -> None:
+    """Pins: a newer acknowledgement is never rolled back to the quarantined one.
+
+    An authoritative ack has a message behind it, so it is better evidence than
+    the quarantined row. Overwriting it would discard a real acknowledgement,
+    and doing so through a REPLACE leaves nothing to restore it from.
+    """
+    legacy_acked_at = _now() - timedelta(days=365)
+    fresh_acked_at = _now() - timedelta(minutes=5)
+    _write_v1_db(db_path, orphans=[('collide', 'sess-a', legacy_acked_at)])
+    index = _register_live_message(db_path, 'collide', 'sess-a')
+    index.record_ack(Ack(msg_id='collide', recipient_session_id='sess-a', acked_at=fresh_acked_at))
+
+    with pytest.raises(ValueError, match='already has an acknowledgement'):
+        orphan_acks.recover(
+            db_path,
+            msg_id='collide',
+            recipient_session_id='sess-a',
+            action='promote',
+            backup_path=tmp_path / 'backup.db',
+            execute=True,
+        )
+
+    assert _rows(db_path, 'acks')[0]['acked_at'] == _iso(fresh_acked_at), 'the newer ack was rolled back'
+    assert _rows(db_path, 'legacy_unknown_acks')[0]['state'] == 'unresolved'
+    assert _count(db_path, 'recovery_audit') == 0
+
+
+def test_promote_dry_run_also_reports_the_conflicting_ack(db_path: Path, tmp_path: Path) -> None:
+    """Pins: the conflict is reported before an operator takes a backup, not after."""
+    _write_v1_db(db_path, orphans=[('collide', 'sess-a', _now() - timedelta(days=365))])
+    index = _register_live_message(db_path, 'collide', 'sess-a')
+    index.record_ack(Ack(msg_id='collide', recipient_session_id='sess-a'))
+
+    with pytest.raises(ValueError, match='already has an acknowledgement'):
+        orphan_acks.recover(
+            db_path,
+            msg_id='collide',
+            recipient_session_id='sess-a',
+            action='promote',
+            backup_path=tmp_path / 'backup.db',
+            execute=False,
+        )
+
+
+def test_promote_of_an_already_authoritative_ack_only_resolves_the_quarantine(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Pins: re-promoting the same acknowledgement converges instead of failing.
+
+    Same pair, same ``acked_at`` — the promotion has already happened (a rerun,
+    or a crash between the two writes). Nothing is overwritten, so the only work
+    left is marking the quarantined row resolved.
+    """
+    acked_at = _now() - timedelta(days=2)
+    _write_v1_db(db_path, orphans=[('collide', 'sess-a', acked_at)])
+    index = _register_live_message(db_path, 'collide', 'sess-a')
+    index.record_ack(Ack(msg_id='collide', recipient_session_id='sess-a', acked_at=acked_at))
+
+    result = orphan_acks.recover(
+        db_path,
+        msg_id='collide',
+        recipient_session_id='sess-a',
+        action='promote',
+        backup_path=tmp_path / 'backup.db',
+        execute=True,
+    )
+
+    assert result.affected == 1
+    assert _rows(db_path, 'acks')[0]['acked_at'] == _iso(acked_at)
+    assert _rows(db_path, 'legacy_unknown_acks')[0]['state'] == 'promoted'
+
+
+def test_the_audit_before_image_records_the_ack_state_the_decision_was_made_on(
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    """Pins: the audit shows what was there, including the authoritative side.
+
+    A before image of the quarantined row alone cannot answer "what did this
+    overwrite" — the question an audit log exists to answer.
+    """
+    acked_at = _now() - timedelta(days=2)
+    _write_v1_db(db_path, orphans=[('collide', 'sess-a', acked_at)])
+    index = _register_live_message(db_path, 'collide', 'sess-a')
+    index.record_ack(Ack(msg_id='collide', recipient_session_id='sess-a', acked_at=acked_at))
+
+    orphan_acks.recover(
+        db_path,
+        msg_id='collide',
+        recipient_session_id='sess-a',
+        action='promote',
+        backup_path=tmp_path / 'backup.db',
+        execute=True,
+        operator='tester',
+    )
+
+    (audit,) = _rows(db_path, 'recovery_audit')
+    before = json.loads(audit['before_json'])
+    assert before['legacy_unknown_ack']['state'] == 'unresolved'
+    assert before['authoritative_ack']['acked_at'] == _iso(acked_at)
+    assert before['matching_message'] is not None
+
+
+def test_a_second_classification_keeps_a_conflicting_acked_at_visible(db_path: Path) -> None:
+    """Pins: a differing ack time on a re-run is recorded, not silently dropped.
+
+    ``INSERT OR IGNORE`` keeps the quarantined time and the source row is then
+    deleted, so without this the second time would vanish. Which one is real
+    cannot be decided from the database, so both are kept for the operator.
+    """
+    first_time = _now() - timedelta(days=365)
+    second_time = _now() - timedelta(days=1)
+    _write_v1_db(db_path, orphans=[('orphan-1', 'sess-a', first_time)])
+    LocalMessageIndex(db_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            'INSERT INTO acks (msg_id, recipient_session_id, acked_at) VALUES (?, ?, ?)',
+            ('orphan-1', 'sess-a', _iso(second_time)),
+        )
+        orphan_acks.classify_unmatched_acks(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    (row,) = _rows(db_path, 'legacy_unknown_acks')
+    assert row['acked_at'] == _iso(first_time), 'the quarantined time must not be restamped'
+    assert _iso(second_time) in row['resolution_note']
+    assert _pairs(db_path, 'acks') == set()
