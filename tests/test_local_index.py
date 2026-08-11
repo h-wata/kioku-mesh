@@ -299,7 +299,6 @@ def test_local_index_query_by_project_returns_recent(tmp_path: Path) -> None:
             obs = _mk_obs(f'row-{i}', project='proj-A')
             obs.created_at = f'2026-04-27T21:0{i}:00.000000Z'
             idx.upsert(obs)
-            time.sleep(0.001)  # cheap insurance against same-ts collisions on slow CI
 
         # Insert into a different project to ensure the WHERE filter works.
         other = _mk_obs('other', project='proj-B')

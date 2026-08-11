@@ -111,11 +111,16 @@ ADR-0030.
   fixed sleeps — converted after the initial pass, retiring the
   `_INGEST_SETTLE` constant); 4 in `test_mesh_embedded_router.py` keep a fixed
   sleep (1 already inside an existing poll, 3 because no observable substitute
-  condition exists, documented inline); and 3 in `test_local_index.py` sleep
-  only to force a `created_at` clock gap unrelated to Zenoh declaration
-  exchange, so they stay fixed sleeps too. No flakiness was observed in either
-  version over 30 consecutive runs of the 7 changed files (0 failures before
-  and after); the waits also cut the run time, 36.6s → 18.2s per run.
+  condition exists, documented inline); 1 in `test_local_index.py` was removed
+  as a no-op (`test_local_index_query_by_project_returns_recent` sets each
+  observation's `created_at` explicitly before `upsert`, so the sleep between
+  inserts created no clock gap — confirmed by 5/5 passing runs without it);
+  and 2 in `test_local_index.py` sleep only to force a `created_at` clock gap
+  for observations whose timestamp is not explicitly set, unrelated to Zenoh
+  declaration exchange, so they stay fixed sleeps. No flakiness was observed
+  in either version over 30 consecutive runs of the 7 changed files (0
+  failures before and after); the waits also cut the run time, 36.6s → 18.2s
+  per run.
 
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
