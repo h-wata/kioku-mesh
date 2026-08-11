@@ -19,7 +19,6 @@ import asyncio
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -39,10 +38,6 @@ import kioku_mesh.mcp_server as mcp_server_module  # noqa: E402
 from kioku_mesh.models import Observation  # noqa: E402
 
 from .wait_helpers import wait_until  # noqa: E402
-
-# Still used by the handful of tests below that this batch did not convert
-# to wait_until (added to main after this branch was written).
-_INGEST_SETTLE = 0.25
 
 
 def _saved_id(text: str) -> str:
@@ -268,9 +263,10 @@ def test_save_observation_with_legacy_project_is_not_rewritten(single_zenohd: An
 
     msg = _run(_go())
     obs_id = _saved_id(msg)
-    time.sleep(_INGEST_SETTLE)
-    stored = store.find_observation_by_id(obs_id)
-    assert stored is not None
+    stored = wait_until(
+        lambda: store.find_observation_by_id(obs_id),
+        f'{obs_id} to be readable from the router',
+    )
     assert stored.project == 'mesh-mem'
 
     async def _search() -> str:
@@ -539,7 +535,10 @@ def test_get_memory_status_reports_last_7d_family_counts(single_zenohd: Any) -> 
     )
     for obs in (recent, just_inside_boundary, too_old):
         store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: len(store.search_observations(project='mcp-status-7d')) >= 3,
+        'all mcp-status-7d observations to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -566,7 +565,10 @@ def test_get_memory_status_last_7d_section_present_when_empty(single_zenohd: Any
         created_at=_iso_days_ago(30),
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id),
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -588,7 +590,10 @@ def test_get_memory_status_last_7d_excludes_tombstoned(single_zenohd: Any) -> No
         created_at=_iso_days_ago(1),
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id),
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _delete() -> None:
         async with Client(mcp) as client:
@@ -599,7 +604,11 @@ def test_get_memory_status_last_7d_excludes_tombstoned(single_zenohd: Any) -> No
             assert not result.is_error
 
     _run(_delete())
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        not in {r.observation_id for r in store.search_observations(project='mcp-status-7d-tomb')},
+        f'{obs.observation_id} to drop out of search after tombstone',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1269,7 +1278,11 @@ def test_search_memory_default_and_falls_back_to_or_when_empty(single_zenohd: An
     """Issue #276: default 'and' search that misses falls back to 'or' and says so."""
     obs = _mk_obs('deduplicate search results content', project='mcp-and-or-fallback')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        in {r.observation_id for r in store.search_observations(project='mcp-and-or-fallback')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1291,7 +1304,11 @@ def test_search_memory_and_hit_has_no_fallback_marker(single_zenohd: Any) -> Non
     """When AND already hits, no fallback marker is added (no false-positive fallback)."""
     obs = _mk_obs('deduplicate search results FTS5 content', project='mcp-and-no-fallback')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        in {r.observation_id for r in store.search_observations(project='mcp-and-no-fallback')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
