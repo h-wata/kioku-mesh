@@ -229,6 +229,11 @@ ADR-0030.
   failures before and after); the waits also cut the run time, 36.6s → 18.2s
   per run.
 
+- `init --install-systemd`: when `zenohd` is not on `PATH`, the generated unit's
+  `ExecStart` now checks `zenohd_install.default_bin_dir() / 'zenohd'`
+  (`~/.local/share/kioku-mesh/bin/zenohd`) before falling back to the hardcoded
+  `/usr/bin/zenohd` constant, and prints a notice indicating which binary was
+  baked in (#223).
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
