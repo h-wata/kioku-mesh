@@ -122,3 +122,10 @@ testpaths = ["tests"]
 # src/ layout: editable install なしでも `pytest` から import できるようにする。
 pythonpath = ["src"]
 timeout = 60
+# ROS2 (colcon/ament) が shell に source されていると PYTHONPATH 経由で
+# launch_testing / launch_ros の pytest11 プラグインが自動ロードされ、
+# pytest 標準の caplog ハンドラ登録と衝突して WARNING ログが記録されなくなる
+# (tests/test_metadata_required.py の agent_family 系アサーションが偽陽性で fail する)。
+# この2プラグインは kioku-mesh の純 Python テストスイートには無関係なので明示的に無効化する。
+# 未インストール環境では no-op。
+addopts = "-p no:launch_testing -p no:launch_ros"
