@@ -24,6 +24,18 @@ Design notes:
   ``enabled``, ``startup_timeout_sec``, comments and value quoting also
   survive. The result is re-parsed and compared against the intended
   document before anything is written.
+- ``--repair`` for Claude Code reads and writes Claude Code's MCP config
+  JSON directly (``${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`` for the
+  ``user`` / ``local`` scopes, ``<cwd>/.mcp.json`` for ``project``).
+  That file is authoritative: an external edit shows up in ``claude mcp
+  get`` immediately, and the CLI itself rewrites it (taking its own
+  ``backups/``) rather than owning a separate registry. Going through
+  ``claude mcp get`` + ``remove`` + ``add`` instead is *lossy* and cannot
+  be made lossless: ``Args:`` is printed space-joined so an argument
+  containing a space cannot be recovered, and a multi-line env value's
+  continuation lines print at column 0 byte-identically to unknown
+  fields. Editing the JSON also removes the window where the entry is
+  deleted but not yet re-added. See #279 / PR #287.
 """
 
 from __future__ import annotations
@@ -31,15 +43,19 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from dataclasses import field
-from dataclasses import replace
+from datetime import datetime
+from datetime import timezone
 from enum import Enum
+import json
+import os
 from pathlib import Path
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import tomllib
-from typing import Callable
+from typing import Any, Callable
 
 
 class MCPClient(str, Enum):
@@ -77,9 +93,9 @@ class InstallPlan:
     fully-resolved env block (defaults already merged with user overrides).
 
     ``args``, ``scope`` and ``transport`` only matter to the Claude Code
-    path. They carry the defaults a fresh install uses; ``--repair`` fills
-    them from the entry it read back so a re-registration reproduces the
-    original registration instead of flattening it (Codex review B1 on #287).
+    path, where they become ``claude mcp add`` flags. ``--repair`` does not
+    build a plan at all — it edits the config JSON in place — so these carry
+    the fresh-install defaults only.
     """
 
     client: MCPClient
@@ -589,249 +605,313 @@ def repair_codex_cli(
 
 
 @dataclass(frozen=True)
-class ClaudeEntry:
-    """Everything ``claude mcp get`` tells us about one registration.
+class ClaudeEntryLocation:
+    """Where one Claude Code MCP registration physically lives.
 
-    Fields are ``None`` when the output didn't carry them at all, which is
-    what :func:`_claude_entry_restore_blockers` turns into a refusal — a
-    field we didn't read is a field we can't put back.
+    ``container`` is the key path of the ``mcpServers`` mapping that holds
+    the entry inside ``path``'s JSON document, so a repair can walk back to
+    the exact dict it read the entry from.
     """
 
-    command: str
-    scope: str | None
-    transport: str | None
-    args: tuple[str, ...] | None
-    env: dict[str, str]
-    problems: tuple[str, ...] = ()
+    scope: str
+    path: Path
+    container: tuple[str, ...]
+    document: dict[str, Any]
+    raw_text: str
+
+    def describe(self) -> str:
+        """One-line, copy-pasteable description used in user-facing errors."""
+        where = '.'.join(self.container)
+        return f'{self.scope} scope ({self.path}, {where})'
 
 
-# Claude Code prints ``Scope: User config (available in all your projects)``;
-# the CLI flag wants the bare word. Anything else is unmapped on purpose.
-_CLAUDE_SCOPE_WORDS = {'local': 'local', 'user': 'user', 'project': 'project'}
+def _claude_config_path() -> Path:
+    """Return Claude Code's config JSON path.
 
-# Env entries are printed indented as ``KEY=VALUE``. A value containing
-# newlines is printed verbatim, so its continuation lines land unindented at
-# column 0 (both verified against Claude Code 2.1.227). Those two shapes are
-# the only ones we know how to read back; see :func:`_classify_claude_env_line`.
-_CLAUDE_ENV_KEY_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
-
-_CLAUDE_GET_TRAILER = 'To remove this server, run:'
-
-
-def _classify_claude_env_line(line: str, *, last_key: str | None) -> tuple[str, re.Match[str] | None]:
-    """Decide what one line inside the ``Environment:`` section is.
-
-    Returns ``('key', match)`` for an entry, ``('continuation', None)`` for a
-    line that belongs to the previous value, or ``('unknown', None)`` for a
-    shape we have never observed. Only the two shapes Claude Code actually
-    prints are accepted; everything else is ``unknown`` and makes the caller
-    stop *before* the destructive remove (Codex review B1-R1 on #287).
-
-    Guessing the other way — "not a ``KEY=`` line, so it must be a
-    continuation" — is what let a newly added indented field be appended to
-    the preceding env value and written back by the repair's add.
+    ``CLAUDE_CONFIG_DIR`` moves the whole file, not just a sibling of it
+    (verified against Claude Code 2.1.227), so the fallback is ``$HOME``.
     """
-    match = _CLAUDE_ENV_KEY_RE.match(line)
-    indented = line[:1].isspace()
-    if match and indented:
-        return 'key', match
-    if match:
-        # Column 0 is where continuation lines live, so a ``KEY=`` there is
-        # only unambiguous while no value is open.
-        return ('key', match) if last_key is None else ('unknown', None)
-    if last_key is not None and not indented:
-        return 'continuation', None
-    return 'unknown', None
+    override = os.environ.get('CLAUDE_CONFIG_DIR')
+    root = Path(override) if override else Path.home()
+    return root / '.claude.json'
 
 
-def _parse_claude_mcp_get(output: str) -> ClaudeEntry | None:
-    """Parse ``claude mcp get <name>`` text output into a :class:`ClaudeEntry`.
+def _project_mcp_json_path(project_dir: Path) -> Path:
+    """Return the ``project``-scope config path for ``project_dir``."""
+    return project_dir / '.mcp.json'
 
-    The format is indented ``Key: value`` lines (``Scope``, ``Type``,
-    ``Command``, ``Args``) followed by an ``Environment:`` section whose
-    children are bare ``KEY=VALUE`` lines; there is no ``--json`` output for
-    this subcommand. Returns ``None`` when no ``Command:`` line is found — an
-    unrecognized shape we should not guess about rather than silently repair
-    against.
 
-    The env section runs to the first blank line (or the ``To remove this
-    server`` trailer). Inside it only the two shapes Claude Code is known to
-    print are accepted — an indented ``KEY=VALUE`` entry and an unindented
-    continuation of the previous value — which keeps values ending in ``:``
-    and multi-line values intact (Codex review B1 on #287) without treating
-    an unfamiliar line as value text (B1-R1). Anything else becomes a
-    ``problem`` so the repair refuses before removing the registration.
+def _load_json_document(path: Path) -> tuple[dict[str, Any], str] | None:
+    """Read ``path`` as a JSON object. ``None`` when it doesn't exist.
+
+    Raises:
+        RuntimeError: when the file exists but isn't a JSON object. Repair
+            never guesses at a shape it doesn't recognize.
     """
-    command: str | None = None
-    scope_raw: str | None = None
-    transport: str | None = None
-    args_raw: str | None = None
-    env: dict[str, str] = {}
-    problems: list[str] = []
-
-    lines = output.splitlines()
-    i = 0
-    while i < len(lines):
-        raw = lines[i]
-        stripped = raw.strip()
-        if stripped == 'Environment:':
-            i += 1
-            last_key: str | None = None
-            while i < len(lines):
-                cur = lines[i]
-                if not cur.strip() or cur.lstrip().startswith(_CLAUDE_GET_TRAILER):
-                    break
-                kind, match = _classify_claude_env_line(cur, last_key=last_key)
-                if kind == 'key' and match is not None:
-                    last_key = match.group(1)
-                    env[last_key] = match.group(2)
-                elif kind == 'continuation' and last_key is not None:
-                    env[last_key] += '\n' + cur
-                else:
-                    problems.append(f'unrecognized Environment line: {cur!r}')
-                i += 1
-            continue
-        if stripped.startswith('Command:'):
-            command = stripped[len('Command:') :].strip()
-        elif stripped.startswith('Scope:'):
-            scope_raw = stripped[len('Scope:') :].strip()
-        elif stripped.startswith('Type:'):
-            transport = stripped[len('Type:') :].strip()
-        elif stripped.startswith('Args:'):
-            args_raw = stripped[len('Args:') :].strip()
-        i += 1
-
-    if command is None:
+    if not path.is_file():
         return None
-
-    scope: str | None = None
-    if scope_raw is not None:
-        first_word = scope_raw.split()[0].lower() if scope_raw.split() else ''
-        scope = _CLAUDE_SCOPE_WORDS.get(first_word)
-        if scope is None:
-            problems.append(f'unrecognized Scope: {scope_raw!r}')
-    args = None if args_raw is None else tuple(args_raw.split())
-    return ClaudeEntry(
-        command=command,
-        scope=scope,
-        transport=transport,
-        args=args,
-        env=env,
-        problems=tuple(problems),
-    )
+    raw_text = path.read_text(encoding='utf-8')
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f'cannot parse {path} as JSON: {e}') from e
+    if not isinstance(data, dict):
+        raise RuntimeError(f'cannot repair {path}: expected a JSON object at the top level.')
+    return data, raw_text
 
 
-def _claude_entry_restore_blockers(entry: ClaudeEntry) -> list[str]:
-    """Return reasons ``entry`` could not be re-registered exactly as it stands.
+def _dig(document: dict[str, Any], container: tuple[str, ...]) -> dict[str, Any] | None:
+    """Follow ``container`` through ``document``; ``None`` if any hop is missing."""
+    node: Any = document
+    for key in container:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+        if node is None:
+            return None
+    return node if isinstance(node, dict) else None
 
-    ``--repair`` has to delete the registration before it can re-create it,
-    so anything we cannot reproduce has to stop the operation *before* the
-    remove rather than surface as a silently downgraded entry.
+
+def _require_dig(document: dict[str, Any], container: tuple[str, ...]) -> dict[str, Any]:
+    """:func:`_dig` for a path a caller already knows exists.
+
+    Raises ``RuntimeError`` rather than asserting so the guarantee holds under
+    ``python -O`` too.
     """
-    blockers = list(entry.problems)
-    if not entry.command:
-        blockers.append('Command is empty')
-    if entry.scope is None:
-        blockers.append('Scope is missing or unrecognized')
-    if entry.transport is None:
-        blockers.append('Type (transport) is missing')
-    elif entry.transport != 'stdio':
-        blockers.append(f'transport {entry.transport!r} is not stdio; re-registering it is not supported')
-    if entry.args is None:
-        blockers.append('Args line is missing')
-    return blockers
+    node = _dig(document, container)
+    if node is None:
+        raise RuntimeError(f'internal error: {".".join(container)} disappeared from the config document.')
+    return node
+
+
+def _find_claude_entries(
+    name: str,
+    *,
+    config_path: Path,
+    project_dir: Path,
+) -> list[ClaudeEntryLocation]:
+    """Locate every scope that registers ``name``, newest-to-oldest precedence.
+
+    Scope layout (measured against Claude Code 2.1.227):
+
+    - ``local``   -> ``<config>.projects["<cwd>"].mcpServers``
+    - ``project`` -> ``<cwd>/.mcp.json`` ``.mcpServers``
+    - ``user``    -> ``<config>.mcpServers``
+
+    All three are searched even after a hit: a name registered in more than
+    one scope is exactly the case the caller must refuse rather than guess
+    at.
+    """
+    found: list[ClaudeEntryLocation] = []
+    main = _load_json_document(config_path)
+    if main is not None:
+        document, raw_text = main
+        for scope, container in (
+            ('local', ('projects', str(project_dir), 'mcpServers')),
+            ('user', ('mcpServers',)),
+        ):
+            servers = _dig(document, container)
+            if servers is not None and name in servers:
+                found.append(
+                    ClaudeEntryLocation(
+                        scope=scope,
+                        path=config_path,
+                        container=container,
+                        document=document,
+                        raw_text=raw_text,
+                    )
+                )
+
+    project_path = _project_mcp_json_path(project_dir)
+    project_doc = _load_json_document(project_path)
+    if project_doc is not None:
+        document, raw_text = project_doc
+        servers = _dig(document, ('mcpServers',))
+        if servers is not None and name in servers:
+            found.append(
+                ClaudeEntryLocation(
+                    scope='project',
+                    path=project_path,
+                    container=('mcpServers',),
+                    document=document,
+                    raw_text=raw_text,
+                )
+            )
+    return found
+
+
+def _sniff_json_indent(sample: str) -> str | None:
+    """Guess ``sample``'s indentation so a rewrite keeps the file's own style.
+
+    Returns the leading whitespace of the first indented line, ``None`` for a
+    single-line (minified) document. Falls back to two spaces, which is what
+    Claude Code writes.
+    """
+    lines = sample.split('\n')
+    if len([line for line in lines if line.strip()]) <= 1:
+        return None
+    for line in lines[1:]:
+        if line.strip() and line[:1].isspace():
+            return line[: len(line) - len(line.lstrip())]
+    return '  '
+
+
+def _render_json_document(data: dict[str, Any], *, sample: str) -> str:
+    """Serialize ``data`` matching ``sample``'s indentation and trailing newline."""
+    text = json.dumps(data, indent=_sniff_json_indent(sample), ensure_ascii=False)
+    if sample.endswith('\n'):
+        text += '\n'
+    return text
+
+
+def _new_backup_path(path: Path) -> Path:
+    """Return an unused ``<file>.bak-<UTC timestamp>`` sibling of ``path``.
+
+    Timestamped rather than a plain ``<file>.bak``: a hand-made
+    ``~/.claude.json.bak`` is a common thing to find in a real home directory,
+    and a backup that overwrites the user's own backup is worse than none.
+    The suffix counter only matters for two repairs inside one second.
+    """
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    candidate = path.with_name(f'{path.name}.bak-{stamp}')
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f'{path.name}.bak-{stamp}-{counter}')
+        counter += 1
+    return candidate
+
+
+def _write_json_atomically(path: Path, data: dict[str, Any], *, sample: str) -> Path:
+    """Back up ``path``, then replace it with ``data`` atomically.
+
+    The new content goes to a temporary file in the same directory and lands
+    via :func:`os.replace`, so a crash mid-write leaves the original file
+    intact rather than a truncated config. Returns the backup path.
+    """
+    backup = _new_backup_path(path)
+    backup.write_text(sample, encoding='utf-8')
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.', suffix='.tmp')
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(_render_json_document(data, sample=sample))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return backup
+
+
+def _verify_written_document(path: Path, expected: dict[str, Any], *, backup: Path) -> None:
+    """Re-read ``path`` and confirm it is exactly ``expected``, or restore and raise.
+
+    Declaring "nothing else changed" in a docstring is not a guarantee; reading
+    the file back is. On any mismatch the backup is put back so the user's
+    config is never left in a state this code cannot vouch for.
+    """
+    try:
+        written = json.loads(path.read_text(encoding='utf-8'))
+        matches = written == expected
+    except (OSError, json.JSONDecodeError) as e:
+        os.replace(backup, path)
+        raise RuntimeError(
+            f'refusing to keep the repaired {path}: it could not be read back ({e}); restored the original.'
+        ) from e
+    if not matches:
+        os.replace(backup, path)
+        raise RuntimeError(
+            f'refusing to keep the repaired {path}: the written document does not match the '
+            'intended one; restored the original.'
+        )
 
 
 def repair_claude_code(
     name: str = DEFAULT_REGISTRY_NAME,
     *,
-    run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
-    which: Callable[[str], str | None] | None = None,
+    config_path: Path | None = None,
+    project_dir: Path | None = None,
 ) -> str:
     """Overwrite retired identity env on an existing Claude Code registration.
 
-    Claude Code only exposes its MCP config through the ``claude mcp`` CLI
-    (direct edits to ``~/.claude.json`` are not a supported path — see the
-    module docstring), so repair reads the current entry via ``claude mcp
-    get``, applies :func:`_repair_identity_env` to its env only, and
-    re-registers with the merged env via remove+add — the same primitives
-    ``install_claude_code``'s ``--force`` path already uses. Unlike
-    ``--force``, the env sent to ``add`` is the *previous* env with only the
-    identity keys renamed, so unrelated ``-e`` values the user set survive,
-    and so do the entry's scope and args.
+    Reads the entry out of Claude Code's own config JSON, renames only the
+    keys :func:`_identity_env_renames` selects, and writes the document back.
+    ``command``, ``args``, every other env var, unknown fields and key order
+    all survive because nothing is re-derived — the loaded ``dict`` is
+    handed back with two keys renamed inside one ``env`` mapping.
 
-    There is no delete-free update route in the Claude CLI (``claude mcp``
-    offers add / add-json / remove and no update), so the remove+add window
-    is unavoidable. It is made survivable instead: the full pre-remove entry
-    is kept and a failed ``add`` triggers a rollback ``add`` of the original
-    (Codex review B2 on #287).
+    The JSON is the authoritative store (an external edit is visible to
+    ``claude mcp get`` immediately) and it is the *only* lossless source:
+    ``claude mcp get``'s text output space-joins ``args`` and prints
+    multi-line env continuations indistinguishably from unknown fields, so
+    the previous ``get`` + ``remove`` + ``add`` route silently rewrote
+    registrations whose args contained spaces. Editing in place also drops
+    the window where the entry was removed but not yet re-added.
+
+    Safety: the original is copied to ``<file>.bak-<timestamp>``, the new document lands
+    via a temp file + :func:`os.replace`, and the result is re-read and
+    compared against the intended document (restoring the backup on any
+    mismatch).
+
+    Raises:
+        RuntimeError: when ``name`` is registered in more than one scope
+            (fail closed — the right one is not guessable), when a config
+            file is unparseable, or when the written document does not match
+            the intended one.
     """
-    resolver = which or shutil.which
-    claude = resolver('claude')
-    if not claude:
-        raise FileNotFoundError(
-            'claude binary not on PATH. Install Claude Code first (https://docs.claude.com/en/docs/claude-code).'
-        )
-    runner = run or _default_subprocess_run
+    target = config_path or _claude_config_path()
+    cwd = project_dir or Path.cwd()
 
-    get_result = runner([claude, 'mcp', 'get', name])
-    if get_result.returncode != 0:
-        stderr = (get_result.stderr or '').strip() or '(no stderr)'
+    locations = _find_claude_entries(name, config_path=target, project_dir=cwd)
+    if not locations:
         return (
-            f'error: {name!r} is not registered with Claude Code ({stderr}). '
+            f'error: {name!r} is not registered in {target} (user or local scope) '
+            f'or {_project_mcp_json_path(cwd)} (project scope). '
             'Run `kioku-mesh mcp install --client claude-code` first.'
         )
-
-    entry = _parse_claude_mcp_get(get_result.stdout)
-    if entry is None:
-        raise RuntimeError(f'could not parse `claude mcp get {name}` output; unrecognized format for --repair.')
-
-    if not _identity_env_renames(entry.env):
-        return f'{name!r} already uses the current KIOKU_MESH_* prefix; nothing to repair.'
-
-    blockers = _claude_entry_restore_blockers(entry)
-    if blockers:
+    if len(locations) > 1:
+        listed = '\n'.join(f'  - {loc.describe()}' for loc in locations)
         raise RuntimeError(
-            f'refusing to repair {name!r}: `claude mcp get {name}` output cannot be reproduced '
-            f'losslessly ({"; ".join(blockers)}). Nothing was removed — rename the '
-            'MESH_MEM_* identity env by hand, or re-run `kioku-mesh mcp install '
-            '--client claude-code --force`.'
+            f'refusing to repair {name!r}: it is registered in {len(locations)} scopes and '
+            f'--repair will not guess which one you meant:\n{listed}\n'
+            'Nothing was changed. Remove the registrations you do not want '
+            f'(`claude mcp remove {name} -s <scope>`) so exactly one is left, then re-run '
+            '--repair; or rename the MESH_MEM_* identity keys by hand in the file(s) above.'
         )
 
-    original_plan = InstallPlan(
-        client=MCPClient.CLAUDE_CODE,
-        name=name,
-        command=entry.command,
-        env=dict(entry.env),
-        args=entry.args or (),
-        scope=entry.scope or 'user',
-        transport=entry.transport or 'stdio',
+    location = locations[0]
+    servers = _require_dig(location.document, location.container)
+    entry = servers[name]
+    if not isinstance(entry, dict):
+        raise RuntimeError(
+            f'refusing to repair {name!r} in {location.path}: expected a JSON object for the entry, '
+            f'got {type(entry).__name__}.'
+        )
+    env = entry.get('env')
+    if env is None:
+        env = {}
+    if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        raise RuntimeError(f'refusing to repair {name!r} in {location.path}: its "env" is not a mapping of strings.')
+
+    renames = _identity_env_renames(env)
+    if not renames:
+        return (
+            f'{name!r} in {location.path} ({location.scope} scope) already uses the current '
+            'KIOKU_MESH_* prefix; nothing to repair.'
+        )
+
+    expected = copy.deepcopy(location.document)
+    expected_servers = _require_dig(expected, location.container)
+    expected_servers[name] = dict(entry)
+    expected_servers[name]['env'] = _repair_identity_env(env)
+
+    backup = _write_json_atomically(location.path, expected, sample=location.raw_text)
+    _verify_written_document(location.path, expected, backup=backup)
+    return (
+        f'repaired identity env for {name!r} in {location.path} ({location.scope} scope); '
+        f'previous file kept at {backup}'
     )
-    repaired_plan = replace(original_plan, env=_repair_identity_env(entry.env))
-
-    remove_result = runner([claude, 'mcp', 'remove', name, '-s', original_plan.scope])
-    if remove_result.returncode != 0:
-        stderr = (remove_result.stderr or '').strip() or '(no stderr)'
-        raise RuntimeError(f'claude mcp remove {name} failed (rc={remove_result.returncode}): {stderr}')
-
-    add_result = runner(_build_claude_add_command(claude, repaired_plan))
-    if add_result.returncode != 0:
-        stderr = (add_result.stderr or '').strip() or '(no stderr)'
-        rollback_argv = _build_claude_add_command(claude, original_plan)
-        rollback_result = runner(rollback_argv)
-        if rollback_result.returncode == 0:
-            raise RuntimeError(
-                f'claude mcp add failed (rc={add_result.returncode}): {stderr}. '
-                f'The previous {name!r} entry was restored unchanged; nothing was lost.'
-            )
-        rollback_stderr = (rollback_result.stderr or '').strip() or '(no stderr)'
-        restore_cmd = ' '.join(shlex.quote(part) for part in rollback_argv)
-        raise RuntimeError(
-            f'claude mcp add failed (rc={add_result.returncode}): {stderr}. '
-            f'Rollback of the previous entry ALSO failed (rc={rollback_result.returncode}): '
-            f'{rollback_stderr}. {name!r} is currently unregistered — restore it with: {restore_cmd}'
-        )
-    return f'repaired identity env for {name!r} in Claude Code'
 
 
 def repair(
@@ -839,12 +919,17 @@ def repair(
     *,
     name: str = DEFAULT_REGISTRY_NAME,
     config_path: Path | None = None,
-    run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
-    which: Callable[[str], str | None] | None = None,
+    project_dir: Path | None = None,
 ) -> str:
-    """Drive a client-specific identity-env repair with consistent error semantics."""
+    """Drive a client-specific identity-env repair with consistent error semantics.
+
+    ``config_path`` is that client's config file (Claude Code's ``.claude.json``
+    or Codex CLI's ``config.toml``); ``project_dir`` only matters to Claude
+    Code, whose ``local`` / ``project`` scopes are keyed by the working
+    directory.
+    """
     if client is MCPClient.CLAUDE_CODE:
-        return repair_claude_code(name, run=run, which=which)
+        return repair_claude_code(name, config_path=config_path, project_dir=project_dir)
     if client is MCPClient.CODEX_CLI:
         return repair_codex_cli(name, config_path=config_path)
     raise ValueError(f'unsupported client: {client!r}')  # pragma: no cover

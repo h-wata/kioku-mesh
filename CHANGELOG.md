@@ -79,30 +79,34 @@ ADR-0030.
 - `kioku-mesh mcp install --client <client> --repair`: overwrites only the
   retired `MESH_MEM_*` identity env vars (`MESH_MEM_AGENT_FAMILY` /
   `MESH_MEM_CLIENT_ID`) on an already-registered Claude Code or Codex CLI
-  entry to the current `KIOKU_MESH_*` prefix. Command path and every other
-  env var / config value on the entry are left untouched — `--repair` reads
-  the existing registration (`claude mcp get` for Claude Code, direct TOML
-  parse for Codex CLI) before writing back, rather than resetting the whole
-  entry the way `--force` does. (#279)
+  entry to the current `KIOKU_MESH_*` prefix. Command, args, every other env
+  var and any field this version knows nothing about are left untouched —
+  unlike `--force`, which resets the whole entry. Each client is edited
+  through its own config file rather than through its CLI. (#279)
 
   "Everything else untouched" is enforced rather than assumed:
 
-  - Claude Code: the entry's scope (`local` / `user` / `project`), args and
-    full env — including values that end in `:` and values spanning several
-    lines — are read back out of `claude mcp get` and re-registered as they
-    were. Output this parser cannot reproduce (empty `Command`, missing or
-    unknown `Scope`, a non-stdio transport, a missing `Args` line) aborts the
-    repair *before* the entry is removed.
-  - Claude Code: inside the `Environment:` section only the two shapes the CLI
-    is known to print are accepted — an indented `KEY=VALUE` entry and an
-    unindented continuation of the previous value. A line of any other shape
-    (for example a field a future version adds after the first env entry) is
-    reported and aborts the repair before the remove, instead of being appended
-    to the preceding value and written back by the `add`.
-  - Claude Code: the CLI has no delete-free update route, so the pre-remove
-    entry is kept and a failed `add` triggers a rollback `add` of the original.
-    If that rollback also fails, the error says the entry is unregistered and
-    prints the exact argv that restores it.
+  - Claude Code: the registration is read from, and written back to, the file
+    Claude Code itself stores it in — `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`
+    for the `user` and `local` scopes, `<cwd>/.mcp.json` for `project`. The
+    loaded JSON object is handed back with two keys renamed inside one `env`
+    mapping, so args (including arguments containing spaces), unknown fields
+    and key order survive by construction.
+  - Claude Code: this deliberately replaces the earlier `claude mcp get` +
+    `remove` + `add` route. That route was lossy and could not be made
+    lossless: `Args:` is printed space-joined, so `["--flag", "two words"]`
+    came back as three arguments, and a multi-line env value's continuation
+    lines print at column 0 byte-identically to an unknown field. Editing the
+    JSON also removes the window in which the entry was deleted but not yet
+    re-added, so no rollback path is needed.
+  - Claude Code: the previous file is copied to `<file>.bak-<UTC timestamp>`
+    (timestamped so a hand-made `.bak` is never clobbered), the new document
+    lands atomically (temp file + `os.replace`), and it is read back and
+    compared against the intended document before the repair reports success —
+    on any mismatch the backup is restored and the command fails.
+  - Claude Code: a name registered in more than one scope fails closed. The
+    error lists every scope and file it was found in and how to resolve the
+    ambiguity; nothing is written.
   - Codex CLI: only the identity key tokens inside the target entry's env are
     rewritten, so that entry's own `args` / `enabled` / `startup_timeout_sec`,
     its comments and its value quoting survive verbatim. The rewritten file is

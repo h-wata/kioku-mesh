@@ -7,17 +7,17 @@ or Codex CLI install.
 
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
 import subprocess
 import tomllib
-from typing import Callable
 
 import pytest
 
 from kioku_mesh import mcp_install
 from kioku_mesh.__main__ import main as cli_main
 from kioku_mesh.mcp_install import _build_claude_add_command
-from kioku_mesh.mcp_install import _parse_claude_mcp_get
 from kioku_mesh.mcp_install import _render_codex_toml_block
 from kioku_mesh.mcp_install import _repair_identity_env
 from kioku_mesh.mcp_install import _replace_codex_block
@@ -578,268 +578,400 @@ def test_repair_codex_cli_fails_closed_on_layout_it_cannot_edit(tmp_path: Path) 
     assert target.read_text() == original
 
 
-# -- repair_claude_code ------------------------------------------------------------
-
-_CLAUDE_MCP_GET_OUTPUT = (
-    'kioku_mesh:\n'
-    '  Scope: User config (available in all your projects)\n'
-    '  Status: ✔ Connected\n'
-    '  Type: stdio\n'
-    '  Command: /home/user/.local/bin/kioku-mesh-mcp\n'
-    '  Args:\n'
-    '  Environment:\n'
-    '    ZENOH_CONNECT=tcp/127.0.0.1:7447\n'
-    '    MESH_MEM_AGENT_FAMILY=claude\n'
-    '    MESH_MEM_CLIENT_ID=claude-code\n'
-    '\n'
-    'To remove this server, run: claude mcp remove kioku_mesh -s user\n'
-)
+# -- repair_claude_code (direct edit of Claude Code's MCP config JSON) --------------
+#
+# The previous implementation shelled out to `claude mcp get` and parsed its
+# human-readable output. That route is lossy by construction (see the module
+# docstring), so these tests drive the JSON store the CLI itself writes.
 
 
-def test_repair_claude_code_renames_legacy_prefix_preserves_extra_env() -> None:
-    invocations: list[list[str]] = []
+def _claude_entry(
+    *,
+    command: str = '/home/user/.local/bin/kioku-mesh-mcp',
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    **extra: object,
+) -> dict[str, object]:
+    """Build one ``mcpServers`` entry as Claude Code stores it."""
+    entry: dict[str, object] = {
+        'type': 'stdio',
+        'command': command,
+        'args': args if args is not None else [],
+        'env': env if env is not None else {'MESH_MEM_AGENT_FAMILY': 'claude'},
+    }
+    entry.update(extra)
+    return entry
 
-    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        invocations.append(argv[1:])
-        if argv[1:3] == ['mcp', 'get']:
-            return subprocess.CompletedProcess(argv, 0, stdout=_CLAUDE_MCP_GET_OUTPUT, stderr='')
-        return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
 
-    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+def _write_claude_config(path: Path, document: dict[str, object], *, indent: int | None = 2) -> None:
+    path.write_text(json.dumps(document, indent=indent) + '\n', encoding='utf-8')
+
+
+def _user_scope_config(path: Path, entry: dict[str, object] | None = None, **top_level: object) -> None:
+    document: dict[str, object] = {'mcpServers': {DEFAULT_REGISTRY_NAME: entry or _claude_entry()}}
+    document.update(top_level)
+    _write_claude_config(path, document)
+
+
+def test_repair_claude_code_renames_identity_env_in_user_scope(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(
+        config,
+        _claude_entry(
+            env={
+                'ZENOH_CONNECT': 'tcp/127.0.0.1:7447',
+                'MESH_MEM_AGENT_FAMILY': 'claude',
+                'MESH_MEM_CLIENT_ID': 'claude-code',
+            }
+        ),
+    )
+
+    msg = repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
     assert 'repaired' in msg
-    # get -> remove -> add, in that order.
-    assert invocations[0][:2] == ['mcp', 'get']
-    assert invocations[1][:3] == ['mcp', 'remove', 'kioku_mesh']
-    add_call = invocations[2]
-    assert add_call[:3] == ['mcp', 'add', 'kioku_mesh']
-    assert '-e' in add_call
-    joined = ' '.join(add_call)
-    assert 'KIOKU_MESH_AGENT_FAMILY=claude' in joined
-    assert 'KIOKU_MESH_CLIENT_ID=claude-code' in joined
-    assert 'MESH_MEM_AGENT_FAMILY' not in joined
-    assert 'ZENOH_CONNECT=tcp/127.0.0.1:7447' in joined  # unrelated env preserved
-    assert add_call[-2:] == ['--', '/home/user/.local/bin/kioku-mesh-mcp']  # command preserved
+    entry = json.loads(config.read_text())['mcpServers'][DEFAULT_REGISTRY_NAME]
+    assert entry['env'] == {
+        'ZENOH_CONNECT': 'tcp/127.0.0.1:7447',
+        'KIOKU_MESH_AGENT_FAMILY': 'claude',
+        'KIOKU_MESH_CLIENT_ID': 'claude-code',
+    }
+    # Key order is positional, not just set-equal: the renamed keys stay put.
+    assert list(entry['env']) == ['ZENOH_CONNECT', 'KIOKU_MESH_AGENT_FAMILY', 'KIOKU_MESH_CLIENT_ID']
 
 
-def test_repair_claude_code_no_op_when_already_current_prefix() -> None:
-    output = 'kioku_mesh:\n  Command: /x\n  Environment:\n    KIOKU_MESH_AGENT_FAMILY=claude\n'
+def test_repair_claude_code_preserves_args_containing_spaces(tmp_path: Path) -> None:
+    """The text-parse route space-joined ``Args:`` and silently split them back apart.
 
-    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
+    ``claude mcp get`` prints ``Args: --flag two words`` for
+    ``["--flag", "two words"]``, so any repair that re-registers from that
+    output rewrites the user's registration. Reading the JSON keeps the list.
+    """
+    config = tmp_path / '.claude.json'
+    args = ['--flag', 'two words', '', '--json={"a": 1}']
+    _user_scope_config(config, _claude_entry(args=args))
 
-    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    entry = json.loads(config.read_text())['mcpServers'][DEFAULT_REGISTRY_NAME]
+    assert entry['args'] == args
+    assert entry['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+
+
+def test_repair_claude_code_preserves_env_values_the_text_route_mangled(tmp_path: Path) -> None:
+    """Multi-line values, trailing whitespace and trailing colons survive verbatim."""
+    config = tmp_path / '.claude.json'
+    hostile = {
+        'MULTI': 'line one\n- bullet shaped\nMetadata: x',
+        'SPACED': '  leading and trailing  ',
+        'KEEP': 'ends-with-colon:',
+        'MESH_MEM_CLIENT_ID': 'claude-code',
+    }
+    _user_scope_config(config, _claude_entry(env=dict(hostile)))
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    env = json.loads(config.read_text())['mcpServers'][DEFAULT_REGISTRY_NAME]['env']
+    assert env['MULTI'] == hostile['MULTI']
+    assert env['SPACED'] == hostile['SPACED']
+    assert env['KEEP'] == hostile['KEEP']
+    assert env['KIOKU_MESH_CLIENT_ID'] == 'claude-code'
+    assert 'MESH_MEM_CLIENT_ID' not in env
+
+
+def test_repair_claude_code_leaves_everything_outside_the_identity_env_untouched(tmp_path: Path) -> None:
+    """Only the two identity keys move; every other byte of meaning is preserved."""
+    config = tmp_path / '.claude.json'
+    original = {
+        'numStartups': 42,
+        'mcpServers': {
+            'other-server': _claude_entry(command='/usr/bin/other', env={'MESH_MEM_AGENT_FAMILY': 'nope'}),
+            DEFAULT_REGISTRY_NAME: _claude_entry(
+                args=['--verbose'],
+                env={'MESH_MEM_AGENT_FAMILY': 'claude', 'UNRELATED': 'keep me'},
+                # A field this version of kioku-mesh knows nothing about.
+                futureField={'nested': [1, 2, {'deep': True}]},
+            ),
+        },
+        'projects': {'/somewhere/else': {'allowedTools': ['Bash']}},
+    }
+    _write_claude_config(config, original)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    written = json.loads(config.read_text())
+    expected = copy.deepcopy(original)
+    expected['mcpServers'][DEFAULT_REGISTRY_NAME]['env'] = {
+        'KIOKU_MESH_AGENT_FAMILY': 'claude',
+        'UNRELATED': 'keep me',
+    }
+    assert written == expected
+    # A different server's legacy env is *not* ours to fix.
+    assert written['mcpServers']['other-server']['env'] == {'MESH_MEM_AGENT_FAMILY': 'nope'}
+    assert list(written) == list(original)  # top-level key order preserved
+
+
+def test_repair_claude_code_repairs_local_scope_entry(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    project = tmp_path / 'proj'
+    _write_claude_config(
+        config, {'projects': {str(project): {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}}}}
+    )
+
+    msg = repair_claude_code(config_path=config, project_dir=project)
+
+    assert 'local scope' in msg
+    servers = json.loads(config.read_text())['projects'][str(project)]['mcpServers']
+    assert servers[DEFAULT_REGISTRY_NAME]['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+
+
+def test_repair_claude_code_repairs_project_scope_entry(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    config.write_text('{}\n')
+    project = tmp_path / 'proj'
+    project.mkdir()
+    mcp_json = project / '.mcp.json'
+    _write_claude_config(mcp_json, {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}})
+
+    msg = repair_claude_code(config_path=config, project_dir=project)
+
+    assert 'project scope' in msg
+    assert str(mcp_json) in msg
+    servers = json.loads(mcp_json.read_text())['mcpServers']
+    assert servers[DEFAULT_REGISTRY_NAME]['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+
+
+def test_repair_claude_code_fails_closed_when_registered_in_several_scopes(tmp_path: Path) -> None:
+    """Two scopes, no way to know which one the user meant: refuse and change nothing."""
+    config = tmp_path / '.claude.json'
+    project = tmp_path / 'proj'
+    project.mkdir()
+    _write_claude_config(
+        config,
+        {
+            'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry(command='/user/scope')},
+            'projects': {str(project): {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry(command='/local/scope')}}},
+        },
+    )
+    mcp_json = project / '.mcp.json'
+    _write_claude_config(mcp_json, {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry(command='/project/scope')}})
+    before = (config.read_text(), mcp_json.read_text())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        repair_claude_code(config_path=config, project_dir=project)
+
+    message = str(excinfo.value)
+    assert 'registered in 3 scopes' in message
+    for scope in ('local scope', 'user scope', 'project scope'):
+        assert scope in message  # every candidate is named...
+    assert str(config) in message and str(mcp_json) in message  # ...with the file holding it
+    assert f'claude mcp remove {DEFAULT_REGISTRY_NAME} -s <scope>' in message  # actionable next step
+    assert (config.read_text(), mcp_json.read_text()) == before  # nothing written
+    assert not list(tmp_path.glob('**/*.bak-*'))  # not even a backup
+
+
+def test_repair_claude_code_fails_closed_on_two_scopes_even_when_only_one_needs_repair(tmp_path: Path) -> None:
+    """The ambiguity is which registration is *the* one, not which one is broken."""
+    config = tmp_path / '.claude.json'
+    project = tmp_path / 'proj'
+    _write_claude_config(
+        config,
+        {
+            'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry(env={'KIOKU_MESH_AGENT_FAMILY': 'claude'})},
+            'projects': {str(project): {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}}},
+        },
+    )
+    before = config.read_text()
+
+    with pytest.raises(RuntimeError, match='registered in 2 scopes'):
+        repair_claude_code(config_path=config, project_dir=project)
+    assert config.read_text() == before
+
+
+def test_repair_claude_code_no_op_when_already_current_prefix(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config, _claude_entry(env={'KIOKU_MESH_AGENT_FAMILY': 'claude'}))
+    before = config.read_text()
+
+    msg = repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
     assert 'nothing to repair' in msg
+    assert config.read_text() == before
+    assert not list(tmp_path.glob('*.bak-*'))  # a no-op writes nothing at all
 
 
-def test_repair_claude_code_errors_when_not_registered() -> None:
-    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 1, stdout='', stderr='No MCP server found with name: kioku_mesh')
+def test_repair_claude_code_errors_when_not_registered(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _write_claude_config(config, {'mcpServers': {'someone-else': _claude_entry()}})
 
-    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    msg = repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert msg.startswith('error:')
+    assert str(config) in msg
+    assert 'mcp install --client claude-code' in msg
+
+
+def test_repair_claude_code_errors_when_config_missing(tmp_path: Path) -> None:
+    msg = repair_claude_code(config_path=tmp_path / 'absent.json', project_dir=tmp_path / 'proj')
     assert msg.startswith('error:')
 
 
-def test_repair_claude_code_missing_claude_binary() -> None:
-    with pytest.raises(FileNotFoundError, match='claude binary'):
-        repair_claude_code(which=lambda _n: None)
+def test_repair_claude_code_rejects_unparseable_config(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    config.write_text('{"mcpServers": ')
+
+    with pytest.raises(RuntimeError, match='cannot parse'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
 
-def _claude_get_output(
-    *,
-    scope: str = 'User config (available in all your projects)',
-    transport: str | None = 'stdio',
-    command: str | None = '/home/user/.local/bin/kioku-mesh-mcp',
-    args: str | None = '',
-    env_lines: str = '    MESH_MEM_AGENT_FAMILY=claude\n',
-) -> str:
-    """Build a `claude mcp get` fixture; ``None`` drops the line entirely."""
-    out = 'kioku_mesh:\n'
-    if scope is not None:
-        out += f'  Scope: {scope}\n'
-    out += '  Status: ✔ Connected\n'
-    if transport is not None:
-        out += f'  Type: {transport}\n'
-    if command is not None:
-        out += f'  Command: {command}\n'
-    if args is not None:
-        out += f'  Args: {args}\n' if args else '  Args:\n'
-    out += '  Environment:\n' + env_lines
-    return out + '\nTo remove this server, run: claude mcp remove kioku_mesh -s user\n'
+def test_repair_claude_code_rejects_env_that_is_not_a_string_mapping(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config, _claude_entry(env=None) | {'env': ['MESH_MEM_AGENT_FAMILY=claude']})
+    before = config.read_text()
+
+    with pytest.raises(RuntimeError, match='not a mapping of strings'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+    assert config.read_text() == before
 
 
-def _recording_runner(
-    output: str,
-    *,
-    add_rc: int = 0,
-    rollback_rc: int = 0,
-) -> tuple[list[list[str]], Callable[[list[str]], subprocess.CompletedProcess[str]]]:
-    """Fake ``claude`` runner recording argv; ``add_rc`` fails the first add only."""
-    invocations: list[list[str]] = []
+def test_repair_claude_code_keeps_a_backup_of_the_previous_file(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
 
-    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        invocations.append(argv[1:])
-        if argv[1:3] == ['mcp', 'get']:
-            return subprocess.CompletedProcess(argv, 0, stdout=output, stderr='')
-        if argv[1:3] == ['mcp', 'add']:
-            adds = [c for c in invocations if c[:2] == ['mcp', 'add']]
-            if len(adds) == 1:
-                return subprocess.CompletedProcess(argv, add_rc, stdout='', stderr='add boom')
-            return subprocess.CompletedProcess(argv, rollback_rc, stdout='', stderr='rollback boom')
-        return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+    msg = repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
-    return invocations, fake_run
+    backups = list(tmp_path.glob('.claude.json.bak-*'))
+    assert len(backups) == 1
+    assert backups[0].read_text() == before  # byte-for-byte, before any edit
+    assert str(backups[0]) in msg
+    assert not list(tmp_path.glob('*.tmp'))  # the atomic-write temp file is gone
 
 
-@pytest.mark.parametrize(
-    ('scope_line', 'expected_scope'),
-    [
-        ('Local config (private to you in this project)', 'local'),
-        ('Project config (shared via .mcp.json)', 'project'),
-        ('User config (available in all your projects)', 'user'),
-    ],
-)
-def test_repair_claude_code_preserves_scope_and_args(scope_line: str, expected_scope: str) -> None:
-    """B1: scope and non-empty args must survive the remove/add round trip."""
-    output = _claude_get_output(scope=scope_line, args='--mode custom --flag')
-    invocations, fake_run = _recording_runner(output)
+def test_repair_claude_code_does_not_clobber_a_hand_made_backup(tmp_path: Path) -> None:
+    """``~/.claude.json.bak`` is a real thing people have; ours must not overwrite it."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    hand_made = tmp_path / '.claude.json.bak'
+    hand_made.write_text('the user made this months ago')
 
-    msg = repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
-    assert 'repaired' in msg
-    remove_call, add_call = invocations[1], invocations[2]
-    assert remove_call == ['mcp', 'remove', 'kioku_mesh', '-s', expected_scope]
-    assert add_call[:6] == ['mcp', 'add', 'kioku_mesh', '-s', expected_scope, '-e']
-    assert add_call[-5:] == ['--', '/home/user/.local/bin/kioku-mesh-mcp', '--mode', 'custom', '--flag']
+    assert hand_made.read_text() == 'the user made this months ago'
+    assert len(list(tmp_path.glob('.claude.json.bak-*'))) == 1
 
 
-def test_repair_claude_code_preserves_env_value_ending_with_colon() -> None:
-    """B1: the old parser treated a trailing `:` as a section header and dropped the key."""
-    output = _claude_get_output(
-        env_lines='    KEEP=ends-with-colon:\n    MESH_MEM_AGENT_FAMILY=claude\n',
+def test_repair_claude_code_preserves_the_files_own_indentation(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _write_claude_config(config, {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}}, indent=4)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    text = config.read_text()
+    assert '\n    "mcpServers"' in text
+    assert text.endswith('\n')
+
+
+def test_repair_claude_code_keeps_a_minified_config_minified(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    config.write_text(json.dumps({'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}}))
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    text = config.read_text()
+    assert '\n' not in text
+    assert 'KIOKU_MESH_AGENT_FAMILY' in text
+
+
+def test_repair_claude_code_restores_the_backup_when_the_write_does_not_verify(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Post-write read-back is the guarantee; a wrong write must not survive it."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
+    monkeypatch.setattr(
+        mcp_install,
+        '_render_json_document',
+        lambda data, *, sample: json.dumps({'mcpServers': {}}),
     )
-    invocations, fake_run = _recording_runner(output)
 
-    repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    with pytest.raises(RuntimeError, match='does not match the intended one'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
-    assert 'KEEP=ends-with-colon:' in invocations[2]
-
-
-def test_repair_claude_code_preserves_multiline_env_value() -> None:
-    """B1: a value with a newline prints its continuation unindented at column 0."""
-    output = _claude_get_output(
-        env_lines='    MULTI=line one\nline two\n    MESH_MEM_CLIENT_ID=claude-code\n',
-    )
-    invocations, fake_run = _recording_runner(output)
-
-    repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
-
-    add_call = invocations[2]
-    assert 'MULTI=line one\nline two' in add_call
-    assert 'KIOKU_MESH_CLIENT_ID=claude-code' in add_call
+    assert config.read_text() == before  # the bad write was rolled back
 
 
-@pytest.mark.parametrize(
-    'drift_line',
-    [
-        '  Metadata: newly-added-field',  # a new indented field after the env section started
-        '    Metadata: newly-added-field',  # same, indented like an env entry
-        '  - bullet shaped drift',
-        '\tTabbed: drift',
-    ],
-)
-def test_repair_claude_code_fails_closed_on_unknown_environment_line(drift_line: str) -> None:
-    """B1-R1: an indented non-``KEY=`` line is *not* assumed to be a continuation.
+def test_repair_claude_code_restores_the_backup_when_the_result_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
+    monkeypatch.setattr(mcp_install, '_render_json_document', lambda data, *, sample: '{"truncated"')
 
-    A future Claude Code that prints an extra field after the first env entry
-    would otherwise have that field swallowed into the preceding value and
-    written back by the add, so the drift has to stop the repair before the
-    destructive remove.
+    with pytest.raises(RuntimeError, match='could not be read back'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+
+
+def test_repair_claude_code_swaps_the_file_in_rather_than_writing_over_it(tmp_path: Path) -> None:
+    """A temp file + ``os.replace`` gives the destination a new inode.
+
+    Writing in place (``path.write_text``) keeps the inode and exposes a
+    window where a reader sees a truncated config, so the inode change is the
+    observable proof the write was atomic.
     """
-    output = _claude_get_output(
-        env_lines=f'    MESH_MEM_AGENT_FAMILY=claude\n{drift_line}\n',
-    )
-    invocations, fake_run = _recording_runner(output)
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    inode_before = config.stat().st_ino
 
-    with pytest.raises(RuntimeError) as excinfo:
-        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
-    message = str(excinfo.value)
-    assert 'cannot be reproduced losslessly' in message
-    assert 'Environment line' in message  # the refusal names the line it could not classify
-    assert [c[:2] for c in invocations] == [['mcp', 'get']]  # nothing was removed
+    assert config.stat().st_ino != inode_before
 
 
-def test_parse_claude_mcp_get_flags_unknown_environment_line() -> None:
-    """B1-R1: the drift lands in ``problems`` and never in an env value."""
-    entry = _parse_claude_mcp_get(
-        _claude_get_output(env_lines='    MESH_MEM_AGENT_FAMILY=claude\n  Metadata: newly-added-field\n')
-    )
+def test_repair_claude_code_leaves_the_original_in_place_when_the_write_blows_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """os.replace lands the new file in one step: a mid-write failure can't truncate."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
 
-    assert entry is not None
-    assert entry.env == {'MESH_MEM_AGENT_FAMILY': 'claude'}
-    assert any('Metadata: newly-added-field' in p for p in entry.problems)
+    def boom(data: object, *, sample: str) -> str:
+        raise OSError('disk full')
 
+    monkeypatch.setattr(mcp_install, '_render_json_document', boom)
 
-@pytest.mark.parametrize(
-    ('kwargs', 'expected'),
-    [
-        ({'command': ''}, 'Command is empty'),
-        ({'scope': None}, 'Scope is missing'),
-        ({'scope': 'Workspace config (new in 3.x)'}, 'unrecognized Scope'),
-        ({'transport': None}, 'transport) is missing'),
-        ({'transport': 'http'}, "transport 'http' is not stdio"),
-        ({'args': None}, 'Args line is missing'),
-    ],
-)
-def test_repair_claude_code_fails_closed_before_remove(kwargs: dict[str, str | None], expected: str) -> None:
-    """B1: anything we cannot reproduce stops the repair *before* the destructive remove."""
-    invocations, fake_run = _recording_runner(_claude_get_output(**kwargs))
+    with pytest.raises(OSError, match='disk full'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
-    with pytest.raises(RuntimeError) as excinfo:
-        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
-
-    message = str(excinfo.value)
-    assert 'cannot be reproduced losslessly' in message
-    assert expected in message  # the refusal names the field it could not reproduce
-    assert [c[:2] for c in invocations] == [['mcp', 'get']]  # nothing was removed
+    assert config.read_text() == before
+    assert not list(tmp_path.glob('*.tmp'))
 
 
-def test_repair_claude_code_rolls_back_when_add_fails() -> None:
-    """B2: a failed add must re-add the original entry rather than leave it deleted."""
-    output = _claude_get_output(
-        scope='Local config (private to you in this project)',
-        args='--mode custom',
-        env_lines='    ZENOH_CONNECT=tcp/127.0.0.1:7447\n    MESH_MEM_AGENT_FAMILY=claude\n',
-    )
-    invocations, fake_run = _recording_runner(output, add_rc=9)
+def test_claude_config_path_follows_claude_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path))
+    assert mcp_install._claude_config_path() == tmp_path / '.claude.json'
 
-    with pytest.raises(RuntimeError, match='was restored unchanged'):
-        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
-
-    assert [c[:2] for c in invocations] == [['mcp', 'get'], ['mcp', 'remove'], ['mcp', 'add'], ['mcp', 'add']]
-    rollback = invocations[3]
-    assert rollback[:5] == ['mcp', 'add', 'kioku_mesh', '-s', 'local']
-    assert 'MESH_MEM_AGENT_FAMILY=claude' in rollback  # original identity env restored verbatim
-    assert 'KIOKU_MESH_AGENT_FAMILY=claude' not in rollback
-    assert 'ZENOH_CONNECT=tcp/127.0.0.1:7447' in rollback
-    assert rollback[-4:] == ['--', '/home/user/.local/bin/kioku-mesh-mcp', '--mode', 'custom']
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR')
+    monkeypatch.setattr(mcp_install.Path, 'home', classmethod(lambda _cls: tmp_path / 'home'))
+    assert mcp_install._claude_config_path() == tmp_path / 'home' / '.claude.json'
 
 
-def test_repair_claude_code_reports_when_rollback_also_fails() -> None:
-    """B2: if restore fails too, say the entry is gone and hand back the exact argv."""
-    invocations, fake_run = _recording_runner(_claude_get_output(), add_rc=9, rollback_rc=7)
+def test_repair_claude_code_defaults_to_the_claude_config_dir_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No explicit path: the file `claude` itself writes is the one we repair."""
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path))
+    _user_scope_config(tmp_path / '.claude.json')
+    monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(RuntimeError, match='currently unregistered') as excinfo:
-        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+    repair_claude_code()
 
-    message = str(excinfo.value)
-    assert 'rollback boom' in message
-    assert 'MESH_MEM_AGENT_FAMILY=claude' in message  # restore command is copy-pasteable
-    assert len(invocations) == 4
-
-
-def test_parse_claude_mcp_get_returns_none_without_command_line() -> None:
-    assert _parse_claude_mcp_get('kioku_mesh:\n  Scope: User config\n') is None
+    servers = json.loads((tmp_path / '.claude.json').read_text())['mcpServers']
+    assert servers[DEFAULT_REGISTRY_NAME]['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
 
 
 # -- repair dispatch ----------------------------------------------------------------
@@ -854,14 +986,15 @@ def test_repair_dispatches_to_codex(tmp_path: Path) -> None:
     assert 'repaired' in msg
 
 
-def test_repair_dispatches_to_claude_code() -> None:
-    def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
-        if argv[1:3] == ['mcp', 'get']:
-            return subprocess.CompletedProcess(argv, 0, stdout=_CLAUDE_MCP_GET_OUTPUT, stderr='')
-        return subprocess.CompletedProcess(argv, 0, stdout='', stderr='')
+def test_repair_dispatches_to_claude_code(tmp_path: Path) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
 
-    msg = repair(MCPClient.CLAUDE_CODE, run=fake_run, which=lambda _n: '/usr/bin/claude')
+    msg = repair(MCPClient.CLAUDE_CODE, config_path=config, project_dir=tmp_path / 'proj')
+
     assert 'repaired' in msg
+    servers = json.loads(config.read_text())['mcpServers']
+    assert servers[DEFAULT_REGISTRY_NAME]['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
 
 
 # -- CLI wiring -----------------------------------------------------------------
@@ -950,6 +1083,58 @@ def test_cli_mcp_install_repair_codex_missing_entry_exits_one(
     rc = cli_main(['mcp', 'install', '--client', 'codex-cli', '--repair'])
     assert rc == 1
     assert 'kioku_mesh' in capsys.readouterr().err
+
+
+def test_cli_mcp_install_repair_claude_code_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path))
+    _user_scope_config(tmp_path / '.claude.json')
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli_main(['mcp', 'install', '--client', 'claude-code', '--repair'])
+
+    assert rc == 0
+    servers = json.loads((tmp_path / '.claude.json').read_text())['mcpServers']
+    assert servers[DEFAULT_REGISTRY_NAME]['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+    assert 'repaired' in capsys.readouterr().out
+
+
+def test_cli_mcp_install_repair_claude_code_missing_entry_exits_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path))
+    (tmp_path / '.claude.json').write_text('{"mcpServers": {}}\n')
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli_main(['mcp', 'install', '--client', 'claude-code', '--repair'])
+
+    assert rc == 1
+    assert DEFAULT_REGISTRY_NAME in capsys.readouterr().err
+
+
+def test_cli_mcp_install_repair_claude_code_multiple_scopes_exits_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail-closed reaches the user as a non-zero exit with the scopes listed."""
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path))
+    project = tmp_path / 'proj'
+    project.mkdir()
+    _write_claude_config(
+        tmp_path / '.claude.json',
+        {
+            'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()},
+            'projects': {str(project): {'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}}},
+        },
+    )
+    monkeypatch.chdir(project)
+
+    rc = cli_main(['mcp', 'install', '--client', 'claude-code', '--repair'])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert 'registered in 2 scopes' in err
+    assert 'user scope' in err and 'local scope' in err
 
 
 def test_cli_mcp_install_repair_does_not_require_kioku_mesh_mcp_on_path(
