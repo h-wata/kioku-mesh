@@ -55,7 +55,16 @@ ADR-0030.
   over-limit body with an explicit `[kioku-mesh: message body withheld — …]`
   notice plus a new `body_rejected` field rather than dropping the message
   silently or truncating it; the push subscriber drops it with a WARNING, since
-  `check_messages` still surfaces the same message with its notice.
+  `check_messages` still surfaces the same message with its notice. Withholding
+  the body alone was not enough: an over-limit envelope could still return its
+  bulk through `delivery_adapters`, `subject`, `scope`, `msg_id`, or a
+  sender/recipient id, so ~197 KiB reached the recipient with
+  `body_rejected: true`. Every field of a `check_messages` item is now bounded —
+  1 KiB per identity-shaped field, 4 KiB per `subject`, 16 `delivery_adapters`
+  entries — an over-limit envelope is rebuilt from the minimal identity + notice
+  set, and the encoded item is then re-measured against a 72 KiB per-message
+  budget as a backstop. A new `withheld_fields` list plus the notice text name
+  what was dropped, so nothing goes missing silently.
 
 ### Fixed
 

@@ -37,8 +37,12 @@ from .memory.metadata import MetadataRequiredError
 from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
+from .messaging.limits import bound_metadata_value
 from .messaging.limits import check_body_size
 from .messaging.limits import check_envelope_size
+from .messaging.limits import MAX_DELIVERY_ADAPTERS
+from .messaging.limits import MAX_RESPONSE_ITEM_BYTES
+from .messaging.limits import MAX_SUBJECT_BYTES
 from .messaging.limits import MessageBodyTooLarge
 from .messaging.limits import withheld_body_notice
 from .messaging.local_index import ack_message as _ack_message_internal
@@ -1050,6 +1054,107 @@ def drain_pending_puts(limit: int | None = None) -> str:
     return f'pending_puts drain complete: drained={drained}, remaining={remaining}'
 
 
+def _bounded_message_item(msg: Message, envelope_reason: str | None, *, acked: bool) -> dict:
+    """Build one ``check_messages`` response item with every field bounded.
+
+    Why per-field caps rather than one shared response budget: a single budget
+    spent in sort order would let one oversized message silently squeeze the
+    content out of the others, so what a recipient sees for message B would
+    depend on message A. Per-field caps keep the guarantee local to each
+    message — identity survives, only the oversized field is withheld — and each
+    field can carry the cap that suits its role (a body is not a subject is not
+    an id). The measured clamp at the end turns those caps into an actual byte
+    guarantee: whatever field the bulk hid in, the encoded item is re-measured
+    and forced under ``MAX_RESPONSE_ITEM_BYTES`` (Issue #202 review finding M1).
+    """
+    withheld_fields: list[str] = []
+
+    def _bound(value: object, field: str, limit: int | None = None) -> object:
+        kwargs = {} if limit is None else {'limit': limit}
+        bounded, was_withheld = bound_metadata_value(value, field=field, **kwargs)  # type: ignore[arg-type]
+        if was_withheld and field not in withheld_fields:
+            withheld_fields.append(field)
+        return bounded
+
+    sender = msg.sender if isinstance(msg.sender, dict) else {}
+    recipient = msg.recipient if isinstance(msg.recipient, dict) else {}
+    # The legacy ``payload`` fallback is a body for every purpose that matters
+    # here — it is what gets returned inline to the LLM — so it goes through the
+    # same cap. Without this, body='' + a 100 KiB payload walks straight past the
+    # 64 KiB limit (Issue #202).
+    body = msg.body if msg.body else msg.payload
+    subject = msg._extras.get('subject', '')  # noqa: SLF001
+    msg_id = _bound(msg.msg_id, 'msg_id')
+
+    reason = envelope_reason
+    if reason is None:
+        try:
+            check_body_size(body, msg_id=str(msg_id))
+        except MessageBodyTooLarge as e:
+            reason = str(e)
+            log.warning('check_messages: withholding over-limit body: %s', e)
+
+    raw_adapters = msg.delivery_adapters if isinstance(msg.delivery_adapters, list) else []
+    if reason is not None:
+        # An over-limit envelope carries its bulk somewhere; withholding the body
+        # alone leaves subject / delivery_adapters as alternate inline channels,
+        # so the item is rebuilt from the minimal identity + notice set instead.
+        if subject:
+            withheld_fields.append('subject')
+        subject = ''
+        if raw_adapters:
+            withheld_fields.append('delivery_adapters')
+        adapters: list = []
+    else:
+        subject = _bound(subject, 'subject', MAX_SUBJECT_BYTES)
+        if len(raw_adapters) > MAX_DELIVERY_ADAPTERS:
+            withheld_fields.append('delivery_adapters')
+            raw_adapters = raw_adapters[:MAX_DELIVERY_ADAPTERS]
+        adapters = [_bound(a, 'delivery_adapters') for a in raw_adapters]
+
+    item = {
+        'msg_id': msg_id,
+        'subject': subject,
+        'body': withheld_body_notice(reason, withheld_fields) if reason is not None else body,
+        'body_rejected': reason is not None,
+        'created_at': msg.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.created_at else '',
+        'expires_at': msg.expires_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.expires_at else None,
+        'scope': _bound(msg.scope, 'scope'),
+        'sender': {
+            'agent_id': _bound(sender.get('agent_id', msg.sender_id), 'sender.agent_id'),
+            'session_id': _bound(sender.get('session_id', ''), 'sender.session_id'),
+        },
+        'recipient': {
+            'kind': _bound(recipient.get('kind', 'session'), 'recipient.kind'),
+            'session_id': _bound(recipient.get('session_id', ''), 'recipient.session_id'),
+        },
+        'acked': acked,
+        'delivery_adapters': adapters,
+    }
+    if withheld_fields:
+        item['withheld_fields'] = withheld_fields
+
+    # Measured backstop: the field caps above are only a byte guarantee if the
+    # encoded result is actually checked. Anything still over budget loses its
+    # body and its remaining metadata rather than being truncated mid-value.
+    encoded = len(json.dumps(item, ensure_ascii=False, default=str).encode('utf-8'))
+    if encoded > MAX_RESPONSE_ITEM_BYTES:
+        for field in ('subject', 'delivery_adapters'):
+            if item[field] and field not in withheld_fields:
+                withheld_fields.append(field)
+        item['subject'] = ''
+        item['delivery_adapters'] = []
+        item['withheld_fields'] = withheld_fields
+        item['body_rejected'] = True
+        item['body'] = withheld_body_notice(
+            f'message item is {encoded} bytes, over the {MAX_RESPONSE_ITEM_BYTES}-byte '
+            f'per-message response limit. Store the full content with save_observation '
+            f'and send a short pointer (observation_id) instead.',
+            withheld_fields,
+        )
+    return item
+
+
 @mcp.tool()
 def check_messages(
     limit: int = 20,
@@ -1168,7 +1273,11 @@ def check_messages(
                     # so anything an older peer or an external publisher wrote
                     # straight into Zenoh arrives unchecked (Issue #202).
                     try:
-                        check_envelope_size(raw_bytes, msg_id=msg.msg_id)
+                        # Bound the msg_id first: it is echoed back inside the
+                        # withhold notice, so an oversized one would smuggle its
+                        # bulk into the body that replaces the withheld content.
+                        _bounded_id, _ = bound_metadata_value(msg.msg_id, field='msg_id')
+                        check_envelope_size(raw_bytes, msg_id=str(_bounded_id))
                     except MessageBodyTooLarge as e:
                         withheld[msg.msg_id] = str(e)
                         log.warning('check_messages: withholding over-limit message: %s', e)
@@ -1268,49 +1377,14 @@ def check_messages(
     truncated = len(filtered) > limit
     page = filtered[:limit]
 
-    items = []
-    for msg in page:
-        sender = msg.sender if isinstance(msg.sender, dict) else {}
-        recipient = msg.recipient if isinstance(msg.recipient, dict) else {}
-        # The legacy ``payload`` fallback is a body for every purpose that
-        # matters here — it is what gets returned inline to the LLM — so it goes
-        # through the same cap. Without this, body='' + a 100 KiB payload walks
-        # straight past the 64 KiB limit (Issue #202).
-        body = msg.body if msg.body else msg.payload
-        subject = msg._extras.get('subject', '')  # noqa: SLF001
-        reason = withheld.get(msg.msg_id)
-        if reason is None:
-            try:
-                check_body_size(body, msg_id=msg.msg_id)
-            except MessageBodyTooLarge as e:
-                reason = str(e)
-                log.warning('check_messages: withholding over-limit body: %s', e)
-        if reason is not None:
-            body = withheld_body_notice(reason)
-            # An over-limit envelope can carry its bulk in ``subject`` instead,
-            # so drop it too rather than leaving an alternate inline channel.
-            subject = ''
-        items.append(
-            {
-                'msg_id': msg.msg_id,
-                'subject': subject,
-                'body': body,
-                'body_rejected': reason is not None,
-                'created_at': msg.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.created_at else '',
-                'expires_at': msg.expires_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.expires_at else None,
-                'scope': msg.scope,
-                'sender': {
-                    'agent_id': sender.get('agent_id', msg.sender_id),
-                    'session_id': sender.get('session_id', ''),
-                },
-                'recipient': {
-                    'kind': recipient.get('kind', 'session'),
-                    'session_id': recipient.get('session_id', ''),
-                },
-                'acked': _acked_flag(classifications.get(msg.msg_id), index, msg.msg_id, session_id),
-                'delivery_adapters': msg.delivery_adapters,
-            }
+    items = [
+        _bounded_message_item(
+            msg,
+            withheld.get(msg.msg_id),
+            acked=_acked_flag(classifications.get(msg.msg_id), index, msg.msg_id, session_id),
         )
+        for msg in page
+    ]
 
     return json.dumps({'messages': items, 'count': len(items), 'truncated': truncated, 'diagnostics': diagnostics})
 

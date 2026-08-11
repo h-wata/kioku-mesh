@@ -21,7 +21,11 @@ from kioku_mesh.messaging.limits import body_byte_len
 from kioku_mesh.messaging.limits import check_body_size
 from kioku_mesh.messaging.limits import check_envelope_size
 from kioku_mesh.messaging.limits import MAX_BODY_BYTES
+from kioku_mesh.messaging.limits import MAX_DELIVERY_ADAPTERS
 from kioku_mesh.messaging.limits import MAX_ENVELOPE_BYTES
+from kioku_mesh.messaging.limits import MAX_METADATA_FIELD_BYTES
+from kioku_mesh.messaging.limits import MAX_RESPONSE_ITEM_BYTES
+from kioku_mesh.messaging.limits import MAX_SUBJECT_BYTES
 from kioku_mesh.messaging.limits import MAX_TMUX_BODY_BYTES
 from kioku_mesh.messaging.limits import MessageBodyTooLarge
 from kioku_mesh.messaging.models import Message
@@ -448,3 +452,224 @@ class TestSubscriberReceiveSideBodyCap:
         with patch('kioku_mesh.messaging.zenoh_bridge.log.warning'):
             self._deliver(bridge, session, msg)
         assert spool.list_active() == []
+
+
+# ---------------------------------------------------------------------------
+# M1 (review of PR #295): withholding the *body* is not enough — the response
+# itself has to be bounded. An over-limit envelope used to return its bulk
+# through ``delivery_adapters`` / ``sender`` / ``scope`` / ``msg_id``, so
+# ~197 KiB still reached the LLM with body_rejected=true. Every test here
+# measures the *encoded* response, never an internal counter.
+# ---------------------------------------------------------------------------
+
+_BULK = MAX_ENVELOPE_BYTES + 1  # 192 KiB + 1 — over the envelope cap on its own
+
+
+def _check_messages_raw(raw_obj: dict, tmp_path: Path, session_id: str = 'recv-sess') -> str:
+    """Run the real ``check_messages`` over an arbitrary raw inbox JSON object.
+
+    Returns the tool's response **string**, so tests can measure the bytes that
+    actually cross the MCP boundary rather than re-encoding a parsed copy.
+    """
+    import asyncio
+
+    pytest.importorskip('fastmcp')
+    from fastmcp import Client
+
+    import kioku_mesh.mcp_server as mcp_module
+
+    mcp_module._messaging_index = None
+    reply = MagicMock()
+    reply.ok = MagicMock()
+    reply.ok.key_expr = 'msg/mesh/inbox/session/recv-sess/m1'
+    reply.ok.payload.to_bytes.return_value = json.dumps(raw_obj, ensure_ascii=False).encode('utf-8')
+    mock_session = MagicMock()
+    mock_session.get.return_value = [reply]
+
+    async def _go() -> str:
+        async with Client(mcp_module.mcp) as client:
+            result = await client.call_tool('check_messages', {})
+            return str(result.data)
+
+    with (
+        patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+        patch('kioku_mesh.mcp_server.get_session_id', return_value=session_id),
+        patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+    ):
+        return asyncio.run(_go())
+
+
+def _raw_inbox_message(**overrides: object) -> dict:
+    raw = json.loads(_msg(body='small', recipient={'kind': 'session', 'session_id': 'recv-sess'}).to_json())
+    raw.update(overrides)
+    return raw
+
+
+# (field name, raw message carrying ~192 KiB in that field)
+_BULK_FIELD_CASES = [
+    ('delivery_adapters', {'delivery_adapters': ['x' * _BULK]}),
+    ('delivery_adapters_many', {'delivery_adapters': ['x' * 900] * 400}),
+    ('sender.agent_id', {'sender': {'agent_id': 'x' * _BULK, 'session_id': 's'}}),
+    ('sender.session_id', {'sender': {'agent_id': 'a', 'session_id': 'x' * _BULK}}),
+    ('recipient.session_id', {'recipient': {'kind': 'session', 'session_id': 'x' * _BULK}}),
+    ('scope', {'scope': 'x' * _BULK}),
+    ('msg_id', {'msg_id': 'x' * _BULK}),
+    ('subject', {'subject': 'x' * _BULK}),
+    ('body', {'body': 'x' * _BULK}),
+    ('payload', {'body': '', 'payload': {'text': 'x' * _BULK}}),
+]
+
+
+class TestCheckMessagesResponseIsBounded:
+    """M1: no field of a check_messages response may carry over-cap content."""
+
+    @pytest.mark.parametrize(('field', 'overrides'), _BULK_FIELD_CASES, ids=[c[0] for c in _BULK_FIELD_CASES])
+    def test_bulk_in_any_field_is_bounded(self, field: str, overrides: dict, tmp_path: Path) -> None:
+        """Whatever field the bulk hides in, the encoded response stays bounded."""
+        raw = _check_messages_raw(_raw_inbox_message(**overrides), tmp_path)
+        assert len(raw.encode('utf-8')) <= MAX_RESPONSE_ITEM_BYTES, f'{field} leaked a large response'
+        assert 'x' * 2000 not in raw, f'{field} smuggled bulk content through'
+
+    def test_over_limit_envelope_response_is_bounded_end_to_end(self, tmp_path: Path) -> None:
+        """The M1 reproduction: small body + ~192 KiB delivery_adapters."""
+        raw_obj = _raw_inbox_message(delivery_adapters=['x' * _BULK])
+        envelope_bytes = len(json.dumps(raw_obj, ensure_ascii=False).encode('utf-8'))
+        assert envelope_bytes > MAX_ENVELOPE_BYTES  # the input really is over-cap
+
+        raw = _check_messages_raw(raw_obj, tmp_path)
+        response_bytes = len(raw.encode('utf-8'))
+        out = json.loads(raw)
+        item = out['messages'][0]
+
+        assert response_bytes <= MAX_RESPONSE_ITEM_BYTES
+        assert response_bytes < envelope_bytes // 10  # not merely "under the cap"
+        assert item['body_rejected'] is True
+        assert item['delivery_adapters'] == []
+        assert 'delivery_adapters' in item['withheld_fields']
+        # Handled by the minimal rebuild, not by the measured backstop clamp —
+        # otherwise this test would still pass with the rebuild removed.
+        assert 'per-message response limit' not in item['body']
+        # The recipient is told what is missing, not left with an empty list that
+        # reads as authoritative.
+        assert 'delivery_adapters' in item['body']
+        assert 'withheld' in item['body']
+
+    def test_withheld_metadata_field_says_what_was_withheld(self, tmp_path: Path) -> None:
+        """An in-envelope-limit message with one over-cap id names that field."""
+        raw = _check_messages_raw(
+            _raw_inbox_message(sender={'agent_id': 'y' * (MAX_METADATA_FIELD_BYTES + 1), 'session_id': 's'}),
+            tmp_path,
+        )
+        item = json.loads(raw)['messages'][0]
+        assert 'sender.agent_id' in item['withheld_fields']
+        assert 'withheld' in item['sender']['agent_id']
+        assert str(MAX_METADATA_FIELD_BYTES) in item['sender']['agent_id']
+        # The body was fine, so it is *not* rejected — only the id is withheld.
+        assert item['body_rejected'] is False
+        assert item['body'] == 'small'
+
+    def test_in_limit_metadata_passes_through_untouched(self, tmp_path: Path) -> None:
+        """Positive control: normal metadata must not be withheld (over-rejection)."""
+        raw = _check_messages_raw(
+            _raw_inbox_message(
+                subject='a subject',
+                delivery_adapters=['tmux', 'mcp'],
+                sender={'agent_id': 'codex-cli', 'session_id': 'send-sess'},
+            ),
+            tmp_path,
+        )
+        item = json.loads(raw)['messages'][0]
+        assert item['delivery_adapters'] == ['tmux', 'mcp']
+        assert item['subject'] == 'a subject'
+        assert item['sender'] == {'agent_id': 'codex-cli', 'session_id': 'send-sess'}
+        assert item['scope'] == 'user'
+        assert item['body_rejected'] is False
+        assert 'withheld_fields' not in item
+
+    def test_at_limit_metadata_field_is_accepted(self, tmp_path: Path) -> None:
+        """At-limit is accepted, limit+1 is not — same boundary rule as the body."""
+        at_limit = 'z' * MAX_METADATA_FIELD_BYTES
+        raw = _check_messages_raw(_raw_inbox_message(sender={'agent_id': at_limit, 'session_id': 's'}), tmp_path)
+        item = json.loads(raw)['messages'][0]
+        assert item['sender']['agent_id'] == at_limit
+        assert 'withheld_fields' not in item
+
+    def test_at_limit_subject_is_accepted(self, tmp_path: Path) -> None:
+        at_limit = 'z' * MAX_SUBJECT_BYTES
+        raw = _check_messages_raw(_raw_inbox_message(subject=at_limit), tmp_path)
+        item = json.loads(raw)['messages'][0]
+        assert item['subject'] == at_limit
+        assert item['body_rejected'] is False
+
+    def test_over_limit_subject_under_envelope_cap_is_withheld(self, tmp_path: Path) -> None:
+        """A subject can sit under the 192 KiB envelope cap and still be a body."""
+        raw = _check_messages_raw(_raw_inbox_message(subject='z' * (MAX_SUBJECT_BYTES + 1)), tmp_path)
+        item = json.loads(raw)['messages'][0]
+        assert 'subject' in item['withheld_fields']
+        assert 'z' * 2000 not in json.dumps(item)
+
+    def test_many_small_adapters_are_capped_by_count(self, tmp_path: Path) -> None:
+        """N entries each under the field cap must not add up.
+
+        Deliberately small enough that the whole item stays under the item cap,
+        so only the *count* cap can produce this result.
+        """
+        raw = _check_messages_raw(_raw_inbox_message(delivery_adapters=['tmux'] * 400), tmp_path)
+        item = json.loads(raw)['messages'][0]
+        assert len(item['delivery_adapters']) == MAX_DELIVERY_ADAPTERS
+        assert 'delivery_adapters' in item['withheld_fields']
+        assert item['body_rejected'] is False  # the body itself was fine
+
+    def test_item_over_budget_from_in_limit_fields_is_clamped(self, tmp_path: Path) -> None:
+        """The measured backstop: every field in limit, the item still over budget.
+
+        64 KiB body + 4 KiB subject + 16 × 1 KiB adapters clears every per-field
+        cap yet encodes to ~85 KiB, over the 72 KiB per-message budget. Only the
+        measured clamp can catch this, which is why the clamp is not redundant.
+        """
+        raw_obj = _raw_inbox_message(
+            body='b' * MAX_BODY_BYTES,
+            subject='s' * MAX_SUBJECT_BYTES,
+            delivery_adapters=['a' * MAX_METADATA_FIELD_BYTES] * MAX_DELIVERY_ADAPTERS,
+        )
+        assert len(json.dumps(raw_obj).encode('utf-8')) <= MAX_ENVELOPE_BYTES  # envelope is fine
+        raw = _check_messages_raw(raw_obj, tmp_path)
+        assert len(raw.encode('utf-8')) <= MAX_RESPONSE_ITEM_BYTES
+        item = json.loads(raw)['messages'][0]
+        assert item['body_rejected'] is True
+        assert 'per-message response limit' in item['body']
+        assert item['subject'] == ''
+        assert item['delivery_adapters'] == []
+
+    def test_oversized_msg_id_does_not_leak_through_the_notice(self, tmp_path: Path) -> None:
+        """The withhold notice echoes msg_id — an over-cap one must be bounded first."""
+        raw = _check_messages_raw(_raw_inbox_message(msg_id='x' * _BULK, body='q' * (MAX_BODY_BYTES + 1)), tmp_path)
+        assert len(raw.encode('utf-8')) <= MAX_RESPONSE_ITEM_BYTES
+        item = json.loads(raw)['messages'][0]
+        assert 'withheld' in item['msg_id']
+        # The notice itself must already be bounded, not rescued by the clamp.
+        assert 'per-message response limit' not in item['body']
+        assert 'x' * 2000 not in item['body']
+
+    def test_over_limit_envelope_drops_even_a_small_subject(self, tmp_path: Path) -> None:
+        """An over-cap envelope is untrusted as a whole, not field by field.
+
+        The subject here is tiny, so nothing but the explicit rebuild can drop
+        it — the measured clamp never fires on an item this small.
+        """
+        raw = _check_messages_raw(_raw_inbox_message(subject='short', delivery_adapters=['x' * _BULK]), tmp_path)
+        item = json.loads(raw)['messages'][0]
+        assert item['body_rejected'] is True
+        assert item['subject'] == ''
+        assert 'subject' in item['withheld_fields']
+        assert 'per-message response limit' not in item['body']
+
+    def test_message_identity_survives_a_bounded_response(self, tmp_path: Path) -> None:
+        """Bounding must not turn into silent loss: the message is still listed."""
+        raw = _check_messages_raw(
+            _raw_inbox_message(msg_id='over-adapters-1', delivery_adapters=['x' * _BULK]), tmp_path
+        )
+        out = json.loads(raw)
+        assert out['count'] == 1
+        assert out['messages'][0]['msg_id'] == 'over-adapters-1'
+        assert out['messages'][0]['created_at']

@@ -33,6 +33,7 @@ messaging モジュールは memory モジュールを直接 import しない (A
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import json
 
 MAX_BODY_BYTES = 65536  # 64 KiB — MCP poll body hard cap
@@ -42,6 +43,19 @@ MAX_BODY_BYTES = 65536  # 64 KiB — MCP poll body hard cap
 # cannot smuggle content past the body cap, not as a second body budget.
 MAX_ENVELOPE_BYTES = 196608
 MAX_TMUX_BODY_BYTES = 8192  # 8 KiB — tmux injection hard cap
+# Receive-side (``check_messages`` response) caps. The envelope cap above bounds
+# what arrives; these bound what is *returned inline to the LLM*, which is a
+# different budget: an in-limit 192 KiB envelope can still put ~190 KiB into a
+# single metadata field, and withholding the body alone leaves that field as an
+# alternate inline channel (Issue #202 review finding M1).
+MAX_METADATA_FIELD_BYTES = 1024  # 1 KiB — identity-shaped fields (ids, scope, one adapter)
+MAX_SUBJECT_BYTES = 4096  # 4 KiB — subject is a header, not a second body
+MAX_DELIVERY_ADAPTERS = 16  # list length cap, so N small entries cannot add up
+# 72 KiB per returned message: the 64 KiB body budget plus 8 KiB of headroom for
+# notice text and the bounded metadata around it. Enforced by *measuring* the
+# encoded item, so it holds regardless of which field the bulk hid in. A whole
+# ``check_messages`` response is therefore bounded by ``limit`` × this value.
+MAX_RESPONSE_ITEM_BYTES = MAX_BODY_BYTES + 8192
 # NOTE: MessagingTmuxAdapterConfig.max_body_bytes in core/config.py must keep the
 # same default (core must not import messaging — ADR-0023). test_messaging_limits.py
 # asserts the two stay in sync.
@@ -120,7 +134,7 @@ def check_body_size(
     return size
 
 
-def withheld_body_notice(reason: str) -> str:
+def withheld_body_notice(reason: str, withheld_fields: Sequence[str] = ()) -> str:
     """Return the placeholder that replaces an over-limit body on the receive path.
 
     Receive-side over-limit handling is **withhold-and-say-so**, not drop and not
@@ -131,8 +145,41 @@ def withheld_body_notice(reason: str) -> str:
         (the same reason the sender path rejects rather than cuts)
     So the message keeps its identity fields and its body is replaced with this
     notice, which states the actual size, the limit, and what to do next.
+
+    ``withheld_fields`` names the other response fields that were dropped for the
+    same message, so the recipient is told *what* is missing rather than seeing a
+    silently empty ``subject`` / ``delivery_adapters`` that reads as authoritative.
     """
-    return f'[kioku-mesh: message body withheld — {reason}]'
+    tail = ''
+    if withheld_fields:
+        tail = f' Also withheld from this response: {", ".join(withheld_fields)}.'
+    return f'[kioku-mesh: message body withheld — {reason}]{tail}'
+
+
+def withheld_field_notice(field: str, size: int, limit: int) -> str:
+    """Return the placeholder that replaces an over-limit *metadata* field.
+
+    Metadata fields are identity-shaped (ids, scope, adapter names). Truncating
+    one yields a value that still reads as an id but no longer denotes anything,
+    so they are replaced wholesale — same withhold-and-say-so rule as the body.
+    """
+    return f'[kioku-mesh: {field} withheld — {size} bytes, over the {limit}-byte limit]'
+
+
+def bound_metadata_value(
+    value: object,
+    *,
+    field: str,
+    limit: int = MAX_METADATA_FIELD_BYTES,
+) -> tuple[object, bool]:
+    """Bound one returned metadata value.
+
+    Returns ``(value, False)`` when it is within ``limit``, or
+    ``(notice, True)`` when it was withheld for being over it.
+    """
+    if body_byte_len(value) <= limit:
+        return value, False
+    return withheld_field_notice(field, body_byte_len(value), limit), True
 
 
 def check_envelope_size(

@@ -12,7 +12,7 @@ Phase 2 exports (presence heartbeat, Zenoh bridge):
 
 Phase 3+ (not yet implemented): tmux adapter.
 
-Body size limits (Issue #202) live in ``limits``: 64 KiB body / 128 KiB envelope
+Body size limits (Issue #202) live in ``limits``: 64 KiB body / 192 KiB envelope
 for the MCP path, 8 KiB for tmux injection. Over-limit is rejected, not truncated.
 
 memory モジュールへの直接依存は禁止（ADR-0023 参照）。
