@@ -124,6 +124,19 @@ ADR-0030.
   that asked for acked mail, and with no diagnostic attached. Callers read
   `acked` (decided inside the classifying transaction) and the code's
   `is_diagnostic` instead.
+- Messaging: `kioku-mesh messaging orphan-acks status` reports whether a node
+  has finished the ack-state rollout, and `docs/messaging-orphan-ack-rollout.md`
+  describes the fleet procedure (N4, unit 3 of 3). The check is read-only and
+  exits 0 when the node is done, 1 when something still blocks it, so it can be
+  the per-host step of a rollout script. Three things block: a database below
+  the current messaging schema, an ack with no message still sitting in `acks`
+  outside the quarantine, and a pair quarantined *after* the migration pass —
+  the last two both mean a writer predating the fix is still running somewhere.
+  Quarantined rows that are merely unresolved do **not** block: they are the
+  ambiguity the design refuses to guess away, and failing the check on them
+  would manufacture pressure to bulk-clear the quarantine. A fleet is done when
+  every node exits 0 with the same reported writer version; the command reads
+  one database and does not infer anything about the others.
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

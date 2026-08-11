@@ -32,6 +32,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from .. import __version__
+
 # Values that look like an attempt to select more than one row. Recovery takes
 # an exact pair only, so these are refused up front rather than being treated as
 # literal ids — a caller typing `--msg-id '*'` means "all of them", and the one
@@ -348,6 +350,175 @@ def _pair_exists(conn: sqlite3.Connection, table: str, msg_id: str, recipient_se
         (msg_id, recipient_session_id),
     ).fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# Rollout status (read-only)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RolloutStatus:
+    """Whether this node has finished the N4 rollout, and what is left if not.
+
+    The judgement is per database, because that is the only thing a single
+    process can observe. A fleet is done when every node reports ``complete``
+    with the same ``writer_version``; nothing here can see the other nodes, so
+    it does not pretend to (see ``docs/messaging-orphan-ack-rollout.md``).
+
+    ``blockers`` is the whole answer: ``complete`` is defined as "no blockers",
+    so a caller cannot get a green result that quietly omits a reason.
+    """
+
+    db_path: str
+    writer_version: str
+    schema_version: int
+    expected_schema_version: int
+    quarantined_total: int
+    quarantined_unresolved: int
+    quarantined_by_state: dict[str, int]
+    quarantined_by_provenance: dict[str, int]
+    quarantined_after_migration: int
+    unmatched_acks_outside_quarantine: int
+    pending_acks: int
+    tombstones: int
+    oldest_migrated_at: str | None
+    newest_migrated_at: str | None
+    blockers: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return not self.blockers
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            'db_path': self.db_path,
+            'writer_version': self.writer_version,
+            'schema_version': self.schema_version,
+            'expected_schema_version': self.expected_schema_version,
+            'quarantined_total': self.quarantined_total,
+            'quarantined_unresolved': self.quarantined_unresolved,
+            'quarantined_by_state': self.quarantined_by_state,
+            'quarantined_by_provenance': self.quarantined_by_provenance,
+            'quarantined_after_migration': self.quarantined_after_migration,
+            'unmatched_acks_outside_quarantine': self.unmatched_acks_outside_quarantine,
+            'pending_acks': self.pending_acks,
+            'tombstones': self.tombstones,
+            'oldest_migrated_at': self.oldest_migrated_at,
+            'newest_migrated_at': self.newest_migrated_at,
+            'complete': self.complete,
+            'blockers': list(self.blockers),
+        }
+
+
+def _count(conn: sqlite3.Connection, table: str) -> int:
+    if not _has_table(conn, table):
+        return 0
+    return int(conn.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0])  # noqa: S608 - fixed table names
+
+
+def _schema_version(conn: sqlite3.Connection) -> int:
+    """Read the stamped schema version, treating an unstamped database as v1."""
+    if not _has_table(conn, 'messaging_schema_version'):
+        return 1
+    row = conn.execute('SELECT version FROM messaging_schema_version').fetchone()
+    return int(row[0]) if row is not None else 1
+
+
+def rollout_status(db_path: str | Path) -> RolloutStatus:
+    """Report this node's N4 rollout state without writing anything.
+
+    The full-table counts here are the reason this is an operator command and
+    not something the message path calls: the hot path is forbidden from
+    scanning these tables, so the scan lives where a human asked for it.
+
+    Three things can block completion, and each is a different failure:
+
+    * the database is not at the current schema — the migration has not run;
+    * an ack with no message exists *outside* the quarantine — a writer is
+      still creating the rows unit 1 was supposed to be the last source of;
+    * a pair was quarantined after the migration pass (``provenance`` other
+      than ``migration``) — an old writer is still running somewhere.
+
+    Unresolved quarantined rows are reported but do **not** block: they are
+    the pre-existing ambiguity the design refuses to guess away, and an
+    operator may legitimately leave them unresolved forever. Blocking on them
+    would push people toward resolving rows just to make a metric go green,
+    which is exactly the bulk-cleanup pressure this module exists to avoid.
+    """
+    from .local_index import MESSAGING_SCHEMA_VERSION  # noqa: PLC0415 - avoids an import cycle at module load
+
+    db_path = Path(db_path)
+    with open_read_only(db_path) as conn:
+        schema_version = _schema_version(conn)
+        by_state: dict[str, int] = {}
+        by_provenance: dict[str, int] = {}
+        oldest = newest = None
+        if _has_table(conn, 'legacy_unknown_acks'):
+            by_state = {
+                str(r[0]): int(r[1])
+                for r in conn.execute('SELECT state, COUNT(*) FROM legacy_unknown_acks GROUP BY state')
+            }
+            by_provenance = {
+                str(r[0]): int(r[1])
+                for r in conn.execute('SELECT provenance, COUNT(*) FROM legacy_unknown_acks GROUP BY provenance')
+            }
+            row = conn.execute('SELECT MIN(migrated_at), MAX(migrated_at) FROM legacy_unknown_acks').fetchone()
+            oldest, newest = (row[0], row[1]) if row is not None else (None, None)
+        # An unmatched ack still sitting in `acks` means something wrote one
+        # after the migration classified the table, so it is counted directly
+        # rather than inferred from the quarantine.
+        unmatched_outside = 0
+        if _has_table(conn, 'acks') and _has_table(conn, 'messages'):
+            unmatched_outside = int(
+                conn.execute(
+                    'SELECT COUNT(*) FROM acks a'
+                    ' LEFT JOIN messages m'
+                    '   ON m.msg_id = a.msg_id AND m.recipient_session_id = a.recipient_session_id'
+                    ' WHERE m.msg_id IS NULL'
+                ).fetchone()[0]
+            )
+        pending = _count(conn, 'pending_acks')
+        tombstones = _count(conn, 'message_tombstones')
+
+    total = sum(by_state.values())
+    unresolved = by_state.get('unresolved', 0)
+    after_migration = sum(count for provenance, count in by_provenance.items() if provenance != 'migration')
+
+    blockers: list[str] = []
+    if schema_version != MESSAGING_SCHEMA_VERSION:
+        blockers.append(
+            f'database is at messaging schema v{schema_version}, expected v{MESSAGING_SCHEMA_VERSION}; '
+            'open it once with a current kioku-mesh to migrate it'
+        )
+    if unmatched_outside:
+        blockers.append(
+            f'{unmatched_outside} ack row(s) with no message are still in `acks` rather than quarantined; '
+            'a writer that predates the fix is still writing to this database'
+        )
+    if after_migration:
+        blockers.append(
+            f'{after_migration} pair(s) were quarantined after the migration pass; '
+            'an old writer created bare acks post-cutover — find it before calling the rollout done'
+        )
+
+    return RolloutStatus(
+        db_path=str(db_path),
+        writer_version=__version__,
+        schema_version=schema_version,
+        expected_schema_version=MESSAGING_SCHEMA_VERSION,
+        quarantined_total=total,
+        quarantined_unresolved=unresolved,
+        quarantined_by_state=by_state,
+        quarantined_by_provenance=by_provenance,
+        quarantined_after_migration=after_migration,
+        unmatched_acks_outside_quarantine=unmatched_outside,
+        pending_acks=pending,
+        tombstones=tombstones,
+        oldest_migrated_at=oldest,
+        newest_migrated_at=newest,
+        blockers=blockers,
+    )
 
 
 # ---------------------------------------------------------------------------
