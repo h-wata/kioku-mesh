@@ -93,6 +93,12 @@ ADR-0030.
     were. Output this parser cannot reproduce (empty `Command`, missing or
     unknown `Scope`, a non-stdio transport, a missing `Args` line) aborts the
     repair *before* the entry is removed.
+  - Claude Code: inside the `Environment:` section only the two shapes the CLI
+    is known to print are accepted — an indented `KEY=VALUE` entry and an
+    unindented continuation of the previous value. A line of any other shape
+    (for example a field a future version adds after the first env entry) is
+    reported and aborts the repair before the remove, instead of being appended
+    to the preceding value and written back by the `add`.
   - Claude Code: the CLI has no delete-free update route, so the pre-remove
     entry is kept and a failed `add` triggers a rollback `add` of the original.
     If that rollback also fails, the error says the entry is unregistered and
@@ -101,7 +107,9 @@ ADR-0030.
     rewritten, so that entry's own `args` / `enabled` / `startup_timeout_sec`,
     its comments and its value quoting survive verbatim. The rewritten file is
     re-parsed and compared against the intended document before it is written;
-    a layout the editor cannot handle fails closed with the file untouched.
+    a layout the editor cannot handle fails closed with the file untouched. A
+    quoted identity key keeps its quote style, so the rename changes the key
+    name and nothing else.
   - `mcp install --client codex-cli` now escapes values per TOML 1.0, so a
     command path or env value containing `"` or `\` no longer produces a
     config that fails to parse.

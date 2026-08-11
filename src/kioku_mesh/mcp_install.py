@@ -453,17 +453,22 @@ def _rename_codex_env_key_line(line: str, legacy: str, current: str) -> tuple[st
     Only the key token is touched — the ``=`` spacing, the value text (basic
     string, literal string, whatever the user wrote) and any trailing comment
     come through byte-for-byte, which is what makes this safe where
-    re-rendering the block was not (Codex review B3 on #287).
+    re-rendering the block was not (Codex review B3 on #287). A quoted key
+    keeps its quotes, so the rename really is the key name and nothing else
+    (Codex review NB1 on #287).
     """
-    quoted = f'{re.escape(legacy)}|"{re.escape(legacy)}"|\'{re.escape(legacy)}\''
-    pattern = re.compile(r'^(\s*)(?:' + quoted + r')(\s*=)')
-    return pattern.subn(lambda m: f'{m.group(1)}{current}{m.group(2)}', line, count=1)
+    pattern = re.compile(r'^(\s*)(["\']?)' + re.escape(legacy) + r'\2(\s*=)')
+    return pattern.subn(lambda m: f'{m.group(1)}{m.group(2)}{current}{m.group(2)}{m.group(3)}', line, count=1)
 
 
 def _rename_codex_env_key_inline(line: str, legacy: str, current: str) -> tuple[str, int]:
-    """Rename ``legacy`` inside an inline ``env = { ... }`` table on one line."""
+    """Rename ``legacy`` inside an inline ``env = { ... }`` table on one line.
+
+    As with :func:`_rename_codex_env_key_line`, the surrounding quote style of
+    the key token is preserved.
+    """
     pattern = re.compile(r'(?<![A-Za-z0-9_.-])(["\']?)' + re.escape(legacy) + r'\1(\s*=)')
-    return pattern.subn(lambda m: f'{current}{m.group(2)}', line, count=1)
+    return pattern.subn(lambda m: f'{m.group(1)}{current}{m.group(1)}{m.group(2)}', line, count=1)
 
 
 _CODEX_INLINE_ENV_RE = re.compile(r'^\s*(?:env|"env"|\'env\')\s*=\s*\{')
@@ -604,13 +609,39 @@ class ClaudeEntry:
 # the CLI flag wants the bare word. Anything else is unmapped on purpose.
 _CLAUDE_SCOPE_WORDS = {'local': 'local', 'user': 'user', 'project': 'project'}
 
-# Env entries are printed as bare ``KEY=VALUE``. A value containing newlines
-# is printed verbatim, so its continuation lines land unindented at column 0
-# (verified against Claude Code 2.1.227) — they are recognized by *not*
-# matching this pattern rather than by indentation.
+# Env entries are printed indented as ``KEY=VALUE``. A value containing
+# newlines is printed verbatim, so its continuation lines land unindented at
+# column 0 (both verified against Claude Code 2.1.227). Those two shapes are
+# the only ones we know how to read back; see :func:`_classify_claude_env_line`.
 _CLAUDE_ENV_KEY_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$')
 
 _CLAUDE_GET_TRAILER = 'To remove this server, run:'
+
+
+def _classify_claude_env_line(line: str, *, last_key: str | None) -> tuple[str, re.Match[str] | None]:
+    """Decide what one line inside the ``Environment:`` section is.
+
+    Returns ``('key', match)`` for an entry, ``('continuation', None)`` for a
+    line that belongs to the previous value, or ``('unknown', None)`` for a
+    shape we have never observed. Only the two shapes Claude Code actually
+    prints are accepted; everything else is ``unknown`` and makes the caller
+    stop *before* the destructive remove (Codex review B1-R1 on #287).
+
+    Guessing the other way — "not a ``KEY=`` line, so it must be a
+    continuation" — is what let a newly added indented field be appended to
+    the preceding env value and written back by the repair's add.
+    """
+    match = _CLAUDE_ENV_KEY_RE.match(line)
+    indented = line[:1].isspace()
+    if match and indented:
+        return 'key', match
+    if match:
+        # Column 0 is where continuation lines live, so a ``KEY=`` there is
+        # only unambiguous while no value is open.
+        return ('key', match) if last_key is None else ('unknown', None)
+    if last_key is not None and not indented:
+        return 'continuation', None
+    return 'unknown', None
 
 
 def _parse_claude_mcp_get(output: str) -> ClaudeEntry | None:
@@ -624,10 +655,12 @@ def _parse_claude_mcp_get(output: str) -> ClaudeEntry | None:
     against.
 
     The env section runs to the first blank line (or the ``To remove this
-    server`` trailer), and lines inside it that aren't ``KEY=`` starts are
-    continuations of the previous value. That is what keeps values ending in
-    ``:`` and multi-line values intact, both of which the first version of
-    this parser dropped (Codex review B1 on #287).
+    server`` trailer). Inside it only the two shapes Claude Code is known to
+    print are accepted — an indented ``KEY=VALUE`` entry and an unindented
+    continuation of the previous value — which keeps values ending in ``:``
+    and multi-line values intact (Codex review B1 on #287) without treating
+    an unfamiliar line as value text (B1-R1). Anything else becomes a
+    ``problem`` so the repair refuses before removing the registration.
     """
     command: str | None = None
     scope_raw: str | None = None
@@ -648,14 +681,14 @@ def _parse_claude_mcp_get(output: str) -> ClaudeEntry | None:
                 cur = lines[i]
                 if not cur.strip() or cur.lstrip().startswith(_CLAUDE_GET_TRAILER):
                     break
-                match = _CLAUDE_ENV_KEY_RE.match(cur)
-                if match:
+                kind, match = _classify_claude_env_line(cur, last_key=last_key)
+                if kind == 'key' and match is not None:
                     last_key = match.group(1)
                     env[last_key] = match.group(2)
-                elif last_key is not None:
+                elif kind == 'continuation' and last_key is not None:
                     env[last_key] += '\n' + cur
                 else:
-                    problems.append(f'unparseable Environment line: {cur!r}')
+                    problems.append(f'unrecognized Environment line: {cur!r}')
                 i += 1
             continue
         if stripped.startswith('Command:'):

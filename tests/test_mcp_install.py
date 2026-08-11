@@ -514,6 +514,42 @@ def test_repair_codex_cli_keeps_quoted_values_valid_toml(tmp_path: Path) -> None
     assert entry['env'] == {'KEEP': 'a"b', 'WINPATH': 'C:\\tools\\bin', 'KIOKU_MESH_CLIENT_ID': 'codex-cli'}
 
 
+@pytest.mark.parametrize('quote', ['"', "'"])
+def test_repair_codex_cli_keeps_the_quote_style_of_a_quoted_identity_key(quote: str, tmp_path: Path) -> None:
+    """NB1: a quoted key token stays quoted — only the name inside it changes."""
+    target = tmp_path / 'config.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\n'
+        'command = "/home/user/.local/bin/kioku-mesh-mcp"\n'
+        '\n'
+        '[mcp_servers.kioku_mesh.env]\n'
+        f'{quote}MESH_MEM_AGENT_FAMILY{quote} = "codex"\n'
+    )
+
+    repair_codex_cli(config_path=target)
+
+    body = target.read_text()
+    assert f'{quote}KIOKU_MESH_AGENT_FAMILY{quote} = "codex"' in body
+    assert tomllib.loads(body)['mcp_servers']['kioku_mesh']['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'codex'}
+
+
+@pytest.mark.parametrize('quote', ['"', "'"])
+def test_repair_codex_cli_keeps_the_quote_style_of_a_quoted_inline_key(quote: str, tmp_path: Path) -> None:
+    """NB1: same contract for the one-line ``env = { ... }`` layout."""
+    target = tmp_path / 'config.toml'
+    target.write_text(
+        '[mcp_servers.kioku_mesh]\n'
+        'command = "/home/user/.local/bin/kioku-mesh-mcp"\n'
+        f'env = {{ {quote}MESH_MEM_CLIENT_ID{quote} = "codex-cli" }}\n'
+    )
+
+    repair_codex_cli(config_path=target)
+
+    body = target.read_text()
+    assert f'{quote}KIOKU_MESH_CLIENT_ID{quote} = "codex-cli"' in body
+    assert tomllib.loads(body)['mcp_servers']['kioku_mesh']['env'] == {'KIOKU_MESH_CLIENT_ID': 'codex-cli'}
+
+
 def test_repair_codex_cli_renames_key_inside_inline_env_table(tmp_path: Path) -> None:
     target = tmp_path / 'config.toml'
     target.write_text(
@@ -700,6 +736,48 @@ def test_repair_claude_code_preserves_multiline_env_value() -> None:
     add_call = invocations[2]
     assert 'MULTI=line one\nline two' in add_call
     assert 'KIOKU_MESH_CLIENT_ID=claude-code' in add_call
+
+
+@pytest.mark.parametrize(
+    'drift_line',
+    [
+        '  Metadata: newly-added-field',  # a new indented field after the env section started
+        '    Metadata: newly-added-field',  # same, indented like an env entry
+        '  - bullet shaped drift',
+        '\tTabbed: drift',
+    ],
+)
+def test_repair_claude_code_fails_closed_on_unknown_environment_line(drift_line: str) -> None:
+    """B1-R1: an indented non-``KEY=`` line is *not* assumed to be a continuation.
+
+    A future Claude Code that prints an extra field after the first env entry
+    would otherwise have that field swallowed into the preceding value and
+    written back by the add, so the drift has to stop the repair before the
+    destructive remove.
+    """
+    output = _claude_get_output(
+        env_lines=f'    MESH_MEM_AGENT_FAMILY=claude\n{drift_line}\n',
+    )
+    invocations, fake_run = _recording_runner(output)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        repair_claude_code(run=fake_run, which=lambda _n: '/usr/bin/claude')
+
+    message = str(excinfo.value)
+    assert 'cannot be reproduced losslessly' in message
+    assert 'Environment line' in message  # the refusal names the line it could not classify
+    assert [c[:2] for c in invocations] == [['mcp', 'get']]  # nothing was removed
+
+
+def test_parse_claude_mcp_get_flags_unknown_environment_line() -> None:
+    """B1-R1: the drift lands in ``problems`` and never in an env value."""
+    entry = _parse_claude_mcp_get(
+        _claude_get_output(env_lines='    MESH_MEM_AGENT_FAMILY=claude\n  Metadata: newly-added-field\n')
+    )
+
+    assert entry is not None
+    assert entry.env == {'MESH_MEM_AGENT_FAMILY': 'claude'}
+    assert any('Metadata: newly-added-field' in p for p in entry.problems)
 
 
 @pytest.mark.parametrize(
