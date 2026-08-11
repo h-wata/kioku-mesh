@@ -577,14 +577,25 @@ def test_init_install_systemd_writes_unit(
     force_systemd_supported: None,
     systemd_unit_under: Path,
     xdg_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # Resolve zenohd to a PATH hit distinct from _SYSTEMD_ZENOHD_FALLBACK so this
+    # test actually exercises the PATH-hit branch instead of coincidentally
+    # matching the hardcoded fallback value (#292 review).
+    def fake_which(name: str) -> str | None:
+        if name == 'zenohd':
+            return '/opt/zenoh/bin/zenohd'
+        return f'/usr/bin/{name}'
+
+    monkeypatch.setattr('kioku_mesh.__main__.shutil.which', fake_which)
+
     rc = cli_main(['init', '--mode', 'hub', '--listen', '127.0.0.1', '--install-systemd'])
     assert rc == 0
     assert xdg_config.is_file()
     assert systemd_unit_under.is_file()
     body = systemd_unit_under.read_text()
-    assert f'ExecStart="/usr/bin/zenohd" -c "{xdg_config}"' in body
+    assert f'ExecStart="/opt/zenoh/bin/zenohd" -c "{xdg_config}"' in body
     out = capsys.readouterr().out
     assert 'systemctl --user enable --now kioku-mesh-zenohd' in out
 
