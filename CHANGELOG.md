@@ -68,7 +68,14 @@ ADR-0030.
 - `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES` (20,000
   UTF-8 bytes); when exceeded, results are dropped from the tail and a
   trailing `[truncated: showing N of M result(s); ...]` line is appended
-  (#277).
+  (#277). The cap covers the *whole* returned text — any prefix banner, the
+  entries, and the truncation notice itself — so
+  `len(result.encode('utf-8')) <= SEARCH_OUTPUT_MAX_BYTES` always holds. When a
+  single observation is too large to show in full, its header and full 32-char
+  `<id=...>` are preserved and only the body is shrunk at a safe UTF-8
+  boundary, so `get_memory` / `delete_memory` stay callable on a partially
+  displayed result. The `showing N of M` counts observations only; a prefix
+  banner (e.g. an AND->OR fallback marker) is never counted as a result.
 
 ### Fixed
 
