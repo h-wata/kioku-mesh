@@ -506,6 +506,119 @@ def save_observation(
     return json.dumps(result, ensure_ascii=False)
 
 
+# Issue #277: search_memory could return unbounded text (62,697 chars observed
+# with limit=200), overflowing the MCP tool-result size the client accepts.
+# Cap the formatted output at a fixed UTF-8 byte budget instead.
+SEARCH_OUTPUT_MAX_BYTES = 20_000
+_SEARCH_ENTRY_SEP = '\n---\n'
+
+
+# A formatted entry ends with the full 32-char observation id. It is identity,
+# not payload: without it the caller cannot call get_memory / delete_memory on
+# the record it just saw, which search_memory's docstring promises.
+_SEARCH_ID_SUFFIX_RE = re.compile(r' <id=[0-9a-f]{32}>\Z')
+_SEARCH_BODY_ELLIPSIS = '…'
+
+
+def _truncation_notice(shown: int, total: int, max_bytes: int) -> str:
+    return f'\n[truncated: showing {shown} of {total} result(s); output capped at {max_bytes} bytes]'
+
+
+def _cut_utf8(text: str, max_bytes: int) -> str:
+    """Cut ``text`` to at most ``max_bytes``, never splitting a code point."""
+    if max_bytes <= 0:
+        return ''
+    encoded = text.encode('utf-8')
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode('utf-8', errors='ignore')
+
+
+def _shrink_entry(entry: str, max_bytes: int) -> str:
+    """Cut a single formatted entry down to ``max_bytes``, keeping its identity.
+
+    The header line and the trailing ``<id=...>`` are what make a partial
+    result actionable, so only the variable-length body between them is
+    shrunk. Entries that do not have that shape fall back to a plain
+    UTF-8-safe cut.
+    """
+    if len(entry.encode('utf-8')) <= max_bytes:
+        return entry
+    match = _SEARCH_ID_SUFFIX_RE.search(entry)
+    if match:
+        head, sep, body = entry[: match.start()].partition('\n')
+        if sep:
+            skeleton = f'{head}\n{_SEARCH_BODY_ELLIPSIS}{match.group(0)}'
+            room = max_bytes - len(skeleton.encode('utf-8'))
+            if room >= 0:
+                kept = _cut_utf8(body, room)
+                return f'{head}\n{kept}{_SEARCH_BODY_ELLIPSIS}{match.group(0)}'
+    return _cut_utf8(entry, max_bytes)
+
+
+def _fit_entries(entries: list[str], budget: int) -> tuple[list[str], bool]:
+    """Take entries from the head until ``budget`` UTF-8 bytes are exhausted."""
+    included: list[str] = []
+    used = 0
+    truncated = False
+
+    for entry in entries:
+        entry_bytes = entry.encode('utf-8')
+        sep_len = len(_SEARCH_ENTRY_SEP.encode('utf-8')) if included else 0
+        needed = sep_len + len(entry_bytes)
+        if used + needed <= budget:
+            included.append(entry)
+            used += needed
+            continue
+        if not included:
+            partial = _shrink_entry(entry, max(budget, 0))
+            if partial:
+                included.append(partial)
+        truncated = True
+        break
+
+    return included, truncated
+
+
+def _cap_search_output(entries: list[str], max_bytes: int, prefix: str = '') -> str:
+    """Join formatted ``search_memory`` entries, capping total UTF-8 byte size.
+
+    The returned string — prefix, entries, separators *and* the truncation
+    notice — always satisfies ``len(result.encode('utf-8')) <= max_bytes``.
+
+    ``prefix`` is any header line that must precede every entry and survive
+    truncation intact — e.g. the PR #285 AND->OR fallback marker
+    ``"(no AND match; fell back to OR)"``. Its bytes count toward
+    ``max_bytes`` so the cap reflects what is actually returned, and it is
+    never counted as a result in the ``showing N of M`` notice. Entries are
+    dropped from the tail once the budget is exhausted. If even the first
+    entry alone does not fit, it is shrunk (keeping its header and full
+    observation id) so at least a partial, actionable result is shown.
+    """
+    # Reserve the '\n' that joins prefix to the first entry too, so the
+    # marker's full on-the-wire footprint counts toward the budget.
+    prefix_bytes = len(prefix.encode('utf-8')) + 1 if prefix else 0
+    total = len(entries)
+
+    included, truncated = _fit_entries(entries, max(max_bytes - prefix_bytes, 0))
+    if truncated:
+        # The notice is part of the returned text, so its bytes have to be
+        # reserved *before* the entry budget is spent (Issue #277 review B1).
+        # ``shown <= total``, so the notice for ``total`` is the longest one.
+        reserve = len(_truncation_notice(total, total, max_bytes).encode('utf-8'))
+        included, _ = _fit_entries(entries, max(max_bytes - prefix_bytes - reserve, 0))
+
+    body = _SEARCH_ENTRY_SEP.join(included)
+    if prefix:
+        body = f'{prefix}\n{body}' if body else prefix
+
+    if truncated:
+        body += _truncation_notice(len(included), total, max_bytes)
+    # Degenerate caps (smaller than the notice itself) cannot fit everything;
+    # the byte contract still holds, at the cost of the notice's tail.
+    return _cut_utf8(body, max_bytes)
+
+
 @mcp.tool()
 def search_memory(
     query: str = '',
@@ -543,6 +656,11 @@ def search_memory(
     result with ``(no AND match; fell back to OR)``. This does not change the
     default itself — only 'and' auto-retries; explicit 'or'/'and_or' calls and
     the ``recall_context`` tool are unaffected.
+    The returned text is capped at ``SEARCH_OUTPUT_MAX_BYTES`` (Issue #277);
+    if the cap is hit, results are dropped from the tail and a trailing
+    ``[truncated: showing N of M result(s); ...]`` line is appended. The
+    AND->OR fallback marker above is passed through as ``prefix=`` so it is
+    never counted as a result entry in the ``showing N of M`` total.
     """
     try:
         from .memory.local_index import _validate_search_mode  # noqa: PLC0415
@@ -585,8 +703,6 @@ def search_memory(
     if not results:
         return 'No matching memories.'
     lines = []
-    if fell_back_to_or:
-        lines.append('(no AND match; fell back to OR)')
     for obs in results:
         body = obs.summary if obs.summary else obs.content[:80]
         subject_part = f' {obs.subject}' if obs.subject else ''
@@ -599,7 +715,11 @@ def search_memory(
             f'{project_part}{subject_part}{refs_part}{origin_part}\n'
             f'{body} <id={obs.observation_id}>'
         )
-    return '\n---\n'.join(lines)
+    # Any banner that is not itself a result (e.g. PR #285's AND->OR fallback
+    # marker) belongs in ``prefix``, never in ``lines`` — otherwise it is
+    # counted as a result in the truncation notice.
+    prefix = '(no AND match; fell back to OR)' if fell_back_to_or else ''
+    return _cap_search_output(lines, SEARCH_OUTPUT_MAX_BYTES, prefix=prefix)
 
 
 @mcp.tool()

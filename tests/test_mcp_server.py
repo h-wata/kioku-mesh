@@ -19,6 +19,7 @@ import asyncio
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+import re
 from types import SimpleNamespace
 from typing import Any
 
@@ -1355,6 +1356,312 @@ def test_search_memory_unknown_search_mode_returns_error(single_zenohd: Any) -> 
 
     text = _run(_go())
     assert 'search_mode' in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Issue #277: search_memory output byte cap + truncated display
+# ---------------------------------------------------------------------------
+
+
+def test_cap_search_output_under_limit_is_unchanged() -> None:
+    entries = ['first entry', 'second entry']
+    expected = '\n---\n'.join(entries)
+    result = mcp_server_module._cap_search_output(entries, max_bytes=10_000)
+    assert result == expected
+    assert 'truncated' not in result
+
+
+def test_cap_search_output_exact_boundary_is_unchanged() -> None:
+    entries = ['abc', 'defgh']
+    joined = '\n---\n'.join(entries)
+    exact_cap = len(joined.encode('utf-8'))
+    result = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap)
+    assert result == joined
+    assert 'truncated' not in result
+
+
+def test_cap_search_output_one_byte_over_boundary_truncates() -> None:
+    entries = ['a' * 100, 'b' * 100]
+    joined = '\n---\n'.join(entries)
+    exact_cap = len(joined.encode('utf-8'))
+    result = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap - 1)
+    assert result != joined
+    assert 'truncated: showing 1 of 2 result(s)' in result
+    assert result.startswith('a' * 100)
+    assert 'b' * 100 not in result
+    assert len(result.encode('utf-8')) <= exact_cap - 1
+
+
+def test_cap_search_output_multibyte_cut_does_not_corrupt_bytes() -> None:
+    # 'あ' is 3 UTF-8 bytes, so any budget that is not a multiple of 3 lands
+    # mid-character. The cut must never emit a partial code point.
+    entry = 'あ' * 50
+    result = mcp_server_module._cap_search_output([entry], max_bytes=100)
+    shown = result.split('\n[truncated')[0]
+    assert set(shown) == {'あ'}
+    assert shown.encode('utf-8').decode('utf-8') == shown
+    assert 'truncated: showing 1 of 1 result(s)' in result
+    assert len(result.encode('utf-8')) <= 100
+
+
+def test_cap_search_output_single_entry_over_cap_shows_partial() -> None:
+    entry = 'x' * 500
+    result = mcp_server_module._cap_search_output([entry], max_bytes=100)
+    shown = result.split('\n[truncated')[0]
+    assert shown
+    assert set(shown) == {'x'}
+    assert 'truncated: showing 1 of 1 result(s)' in result
+    assert len(result.encode('utf-8')) <= 100
+
+
+def test_cap_search_output_prefix_marker_survives_and_counts_toward_budget() -> None:
+    marker = '(no AND match; fell back to OR)'
+    entries = ['first entry here'.ljust(100), 'second entry here'.ljust(100), 'third entry here'.ljust(100)]
+    joined = '\n---\n'.join(entries)
+    full_with_marker = f'{marker}\n{joined}'
+    exact_cap = len(full_with_marker.encode('utf-8'))
+
+    # Exactly enough budget for marker + all entries: unchanged, no truncation.
+    unchanged = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap, prefix=marker)
+    assert unchanged == full_with_marker
+    assert 'truncated' not in unchanged
+
+    # One byte short: marker must still be present and intact; an entry is dropped instead.
+    truncated = mcp_server_module._cap_search_output(entries, max_bytes=exact_cap - 1, prefix=marker)
+    assert truncated.startswith(marker + '\n')
+    assert 'truncated: showing 2 of 3 result(s)' in truncated
+    assert 'third entry here' not in truncated
+
+
+_ENTRY_HEADER = '[pattern][4] 2026-08-11T00:00:00 (kioku-mesh) some subject'
+
+
+def _production_shaped_entry(observation_id: str, body: str) -> str:
+    """Build an entry in the exact shape search_memory formats (header + body + <id=...>)."""
+    return f'{_ENTRY_HEADER}\n{body} <id={observation_id}>'
+
+
+# Review B1: the truncation notice is part of the returned text, so the *final*
+# string — prefix, entries, separators and notice — must fit the byte cap.
+@pytest.mark.parametrize(
+    ('name', 'entries', 'max_bytes', 'prefix'),
+    [
+        ('ascii_one_byte_over', ['a' * 13], 12, ''),
+        ('utf8_mid_character', ['あ' * 50], 10, ''),
+        ('production_single_plus_one', ['q' * 20_001], 20_000, ''),
+        ('prefix_one_short', ['w' * 60], 90, '(no AND match; fell back to OR)'),
+        ('prefix_exact', ['w' * 59], 91, '(no AND match; fell back to OR)'),
+        ('notice_larger_than_cap', ['a' * 100], 5, ''),
+    ],
+)
+def test_cap_search_output_final_text_never_exceeds_cap(
+    name: str,  # noqa: ARG001 — id only
+    entries: list[str],
+    max_bytes: int,
+    prefix: str,
+) -> None:
+    result = mcp_server_module._cap_search_output(entries, max_bytes=max_bytes, prefix=prefix)
+    assert len(result.encode('utf-8')) <= max_bytes
+    # Never emit a partial code point.
+    assert result.encode('utf-8').decode('utf-8') == result
+
+
+def test_cap_search_output_production_cap_with_one_byte_over_entry() -> None:
+    """The Issue #277 headline contract: 20,001 bytes in, <= 20,000 bytes out."""
+    result = mcp_server_module._cap_search_output(['q' * 20_001], max_bytes=20_000)
+    assert len(result.encode('utf-8')) <= 20_000
+    assert 'truncated: showing 1 of 1 result(s)' in result
+
+
+# Review B2: a partially displayed entry must stay actionable — the caller has
+# to be able to feed the id straight into get_memory / delete_memory.
+def test_cap_search_output_partial_entry_keeps_full_observation_id() -> None:
+    observation_id = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+    entry = _production_shaped_entry(observation_id, 'z' * 30_000)
+    result = mcp_server_module._cap_search_output([entry], max_bytes=20_000)
+    assert len(result.encode('utf-8')) <= 20_000
+    assert f'<id={observation_id}>' in result
+    assert result.startswith(_ENTRY_HEADER + '\n')
+    assert 'truncated: showing 1 of 1 result(s)' in result
+
+
+def test_cap_search_output_partial_entry_keeps_id_with_multibyte_body() -> None:
+    observation_id = '0f1e2d3c4b5a69788796a5b4c3d2e1f0'
+    entry = _production_shaped_entry(observation_id, 'あ' * 9_000)
+    result = mcp_server_module._cap_search_output([entry], max_bytes=20_000)
+    assert len(result.encode('utf-8')) <= 20_000
+    assert f'<id={observation_id}>' in result
+    assert result.encode('utf-8').decode('utf-8') == result
+
+
+# Review B3: when PR #285's fallback marker is passed as ``prefix`` (not as an
+# entry), the N/M counts must reflect observations only.
+def test_cap_search_output_prefix_marker_is_not_counted_as_a_result() -> None:
+    marker = '(no AND match; fell back to OR)'
+    entries = [_production_shaped_entry(f'{i:032x}', 'z' * 300) for i in range(4)]
+    result = mcp_server_module._cap_search_output(entries, max_bytes=800, prefix=marker)
+    assert result.startswith(marker + '\n')
+    assert 'of 4 result(s)' in result
+    assert 'of 5 result(s)' not in result
+    assert len(result.encode('utf-8')) <= 800
+
+
+def test_search_memory_single_huge_observation_keeps_id_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single oversized observation still returns its full 32-char id, within the cap."""
+    from kioku_mesh import backend as backend_module
+
+    obs = Observation(
+        content='c' * 100,
+        summary='s' * 60_000,
+        agent_family='claude',
+        client_id='claude-code',
+        pc_id='mcp-pc',
+        session_id='mcp-sess',
+        project='mcp-bytecap-huge',
+    )
+
+    class _HugeResultBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            return [obs]
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _HugeResultBackend())
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-bytecap-huge'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert len(text.encode('utf-8')) <= mcp_server_module.SEARCH_OUTPUT_MAX_BYTES
+    assert len(obs.observation_id) == 32
+    assert f'<id={obs.observation_id}>' in text
+    assert 'truncated: showing 1 of 1 result(s)' in text
+
+
+def test_search_memory_output_truncated_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_memory truncates and reports it when results exceed the byte cap."""
+    from kioku_mesh import backend as backend_module
+
+    big_obs = [
+        Observation(
+            content='x' * 5_000,
+            summary='y' * 5_000,
+            agent_family='claude',
+            client_id='claude-code',
+            pc_id='mcp-pc',
+            session_id='mcp-sess',
+            project='mcp-bytecap',
+        )
+        for _ in range(5)
+    ]
+
+    class _BigResultsBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            return big_obs
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _BigResultsBackend())
+    monkeypatch.setattr(mcp_server_module, 'SEARCH_OUTPUT_MAX_BYTES', 4_000)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-bytecap'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    # The whole returned text — notice included — must fit the cap, not merely be "smaller".
+    assert len(text.encode('utf-8')) <= 4_000
+    assert 'truncated: showing' in text
+    assert 'result(s); output capped at 4000 bytes' in text
+
+
+def test_search_memory_fallback_marker_not_counted_in_capped_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Integration bug (B): the #285 AND->OR fallback marker vs. #277 byte cap.
+
+    The marker must not inflate the byte-cap's ``showing N of M`` total, and
+    must survive truncation (never dropped, never overflow the cap) since it
+    is passed as ``prefix=`` rather than appended into the result entries.
+    """
+    from kioku_mesh import backend as backend_module
+
+    big_obs = [
+        Observation(
+            content='x' * 5_000,
+            summary='y' * 5_000,
+            agent_family='claude',
+            client_id='claude-code',
+            pc_id='mcp-pc',
+            session_id='mcp-sess',
+            project='mcp-fallback-bytecap',
+        )
+        for _ in range(5)
+    ]
+
+    class _FallbackBigResultsBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            # AND misses (empty); OR retry finds the oversized result set,
+            # triggering the #276 fallback marker together with the #277 cap.
+            return [] if kwargs.get('search_mode') == 'and' else big_obs
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _FallbackBigResultsBackend())
+    monkeypatch.setattr(mcp_server_module, 'SEARCH_OUTPUT_MAX_BYTES', 4_000)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-fallback-bytecap'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+
+    # (a) final output never exceeds the byte cap, marker bytes included.
+    assert len(text.encode('utf-8')) <= 4_000
+    # (b) the marker itself survives truncation intact.
+    assert '(no AND match; fell back to OR)' in text
+    # (c) showing N of M counts only real result entries, never the marker.
+    match = re.search(r'showing (\d+) of (\d+) result', text)
+    assert match is not None, text
+    shown, total = int(match.group(1)), int(match.group(2))
+    assert total == len(big_obs), f'expected total={len(big_obs)} (entries only), got {total}'
+    assert 0 < shown <= total
+
+
+def test_search_memory_output_under_cap_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """search_memory returns results verbatim (no truncation notice) when under the byte cap."""
+    from kioku_mesh import backend as backend_module
+
+    small_obs = [
+        Observation(
+            content='small content',
+            summary='small summary',
+            agent_family='claude',
+            client_id='claude-code',
+            pc_id='mcp-pc',
+            session_id='mcp-sess',
+            project='mcp-bytecap-small',
+        )
+    ]
+
+    class _SmallResultsBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN202, ARG002
+            return small_obs
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _SmallResultsBackend())
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('search_memory', {'project': 'mcp-bytecap-small'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'truncated' not in text
+    assert 'small summary' in text
 
 
 # ---------------------------------------------------------------------------

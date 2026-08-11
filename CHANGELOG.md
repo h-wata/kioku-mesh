@@ -65,6 +65,17 @@ ADR-0030.
   set, and the encoded item is then re-measured against a 72 KiB per-message
   budget as a backstop. A new `withheld_fields` list plus the notice text name
   what was dropped, so nothing goes missing silently.
+- `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES` (20,000
+  UTF-8 bytes); when exceeded, results are dropped from the tail and a
+  trailing `[truncated: showing N of M result(s); ...]` line is appended
+  (#277). The cap covers the *whole* returned text — any prefix banner, the
+  entries, and the truncation notice itself — so
+  `len(result.encode('utf-8')) <= SEARCH_OUTPUT_MAX_BYTES` always holds. When a
+  single observation is too large to show in full, its header and full 32-char
+  `<id=...>` are preserved and only the body is shrunk at a safe UTF-8
+  boundary, so `get_memory` / `delete_memory` stay callable on a partially
+  displayed result. The `showing N of M` counts observations only; a prefix
+  banner (e.g. an AND->OR fallback marker) is never counted as a result.
 
 ### Fixed
 
@@ -168,6 +179,13 @@ ADR-0030.
   would manufacture pressure to bulk-clear the quarantine. A fleet is done when
   every node exits 0 with the same reported writer version; the command reads
   one database and does not infer anything about the others.
+- `search_memory`: the #285 AND->OR fallback marker (`(no AND match; fell
+  back to OR)`) was appended directly into the result list, so the #277
+  byte-cap counted it as a result and `showing N of M` was off by one
+  whenever a fallback search also hit the cap. The marker is now passed to
+  `_cap_search_output` via `prefix=` instead: its bytes still count toward
+  the cap and it always survives truncation, but it is excluded from the
+  `N`/`M` entry count.
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with
