@@ -16,11 +16,13 @@ from kioku_mesh import transport
 from kioku_mesh.models import Observation
 from kioku_mesh.models import Tombstone
 
-# Zenoh ``put`` is asynchronous — the storage plugin ingests on its own thread.
-# We sleep briefly after any put sequence before querying via ``_list_tombstones``
-# / ``find_observation_by_id`` so the scan sees the latest state. 100ms is well
-# below the 5s GET timeout and well above typical memory-backend ingestion.
-_INGEST_SETTLE = 0.25
+from .wait_helpers import storage_has
+from .wait_helpers import wait_until
+
+# Zenoh ``put`` is asynchronous — the storage plugin ingests on its own thread,
+# so a query issued right after a put can miss it. Rather than sleeping for a
+# duration picked to be "usually enough", every site below waits for the
+# condition it actually depends on (see tests/wait_helpers.py).
 
 
 def _mk_obs(content: str, project: str = 'gc-demo') -> Observation:
@@ -43,11 +45,55 @@ def _tomb_keys_for(observation_id: str) -> list[str]:
     return [k for k, t in store._list_tombstones() if t.observation_id == observation_id]
 
 
+def _wait_obs_present(observation_id: str) -> None:
+    """Wait until the obs is readable back from the router."""
+    wait_until(lambda: _obs_present(observation_id), f'obs {observation_id} to be readable from the router')
+
+
+def _wait_obs_absent(observation_id: str) -> None:
+    """Wait until the obs no longer answers a live lookup."""
+    wait_until(lambda: not _obs_present(observation_id), f'obs {observation_id} to disappear from the router')
+
+
+def _wait_tomb_key_present(obs: Observation) -> None:
+    """Wait until the tombstone *key* for ``obs`` is stored.
+
+    Key-level rather than body-level so the mismatched-body cases can use it
+    too: ``_tomb_keys_for`` filters on the parsed body id, which those tests
+    deliberately make disagree with the key.
+    """
+    wait_until(
+        lambda: storage_has(store.get_session(), obs.tombstone_key_expr()),
+        f'tomb key for {obs.observation_id} to be stored',
+    )
+
+
+def _wait_tomb_absent(observation_id: str) -> None:
+    """Wait until no tombstone for ``observation_id`` is left on the router."""
+    wait_until(lambda: _tomb_keys_for(observation_id) == [], f'tomb for {observation_id} to be swept')
+
+
+def _barrier(label: str) -> None:
+    """Publish a sentinel obs and wait for it, pinning a point in time.
+
+    The "must survive" assertions state that a purge did *not* happen, which
+    waiting alone can never establish. A sentinel published after the sweep
+    travels the same session -> router -> storage path, in order, behind any
+    delete the sweep would have issued; once the sentinel is readable, an
+    erroneous delete would already have landed. That is strictly stronger
+    than the fixed sleep it replaces.
+    """
+    sentinel = _mk_obs(f'barrier {label}', project=f'_barrier-{label}')
+    store.put_observation(sentinel)
+    wait_until(lambda: _obs_present(sentinel.observation_id), f'barrier sample for {label}')
+
+
 def test_force_id_purges_obs_and_tomb(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('to be force-purged')
     store.put_observation(obs)
     store.put_tombstone(obs, reason='force-test')
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
+    _wait_tomb_key_present(obs)
 
     # Sanity: both keys present.
     assert _obs_present(obs.observation_id)
@@ -57,7 +103,8 @@ def test_force_id_purges_obs_and_tomb(single_zenohd: Any) -> None:  # noqa: ARG0
     assert obs_removed is True
     assert tomb_removed is True
 
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
+    _wait_tomb_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
@@ -77,7 +124,7 @@ def test_force_id_sweeps_orphan_tombstone(single_zenohd: Any) -> None:  # noqa: 
     sess = store.get_session()
     tomb = Tombstone(observation_id=obs.observation_id, reason='orphan')
     sess.put(obs.tombstone_key_expr(), tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_tomb_key_present(obs)
 
     assert _tomb_keys_for(obs.observation_id) != []
     assert not _obs_present(obs.observation_id)
@@ -85,7 +132,7 @@ def test_force_id_sweeps_orphan_tombstone(single_zenohd: Any) -> None:  # noqa: 
     obs_removed, tomb_removed = store.physical_delete_observation(obs.observation_id)
     assert obs_removed is False
     assert tomb_removed is True
-    time.sleep(_INGEST_SETTLE)
+    _wait_tomb_absent(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
 
@@ -101,11 +148,12 @@ def test_retention_purges_aged_tombstone(single_zenohd: Any) -> None:  # noqa: A
         deleted_at=aged.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
     )
     store.get_session().put(obs.tombstone_key_expr(), aged_tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_tomb_key_present(obs)
 
     purged = store.gc_expired_tombstones(retention_days=30)
     assert purged >= 1
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
+    _wait_tomb_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
@@ -114,7 +162,8 @@ def test_retention_keeps_fresh_tombstone(single_zenohd: Any) -> None:  # noqa: A
     obs = _mk_obs('fresh — retention should NOT sweep')
     store.put_observation(obs)
     store.put_tombstone(obs, reason='fresh')
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
+    _wait_tomb_key_present(obs)
 
     before = len(_tomb_keys_for(obs.observation_id))
     assert before >= 1
@@ -137,7 +186,7 @@ def test_retention_with_injected_now_is_deterministic(single_zenohd: Any) -> Non
         deleted_at=ten_days_ago.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
     )
     store.get_session().put(obs.tombstone_key_expr(), tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_tomb_key_present(obs)
 
     # retention=30 with now=today → tomb is 10d old, within retention → kept.
     purged_kept = store.gc_expired_tombstones(retention_days=30)
@@ -148,7 +197,7 @@ def test_retention_with_injected_now_is_deterministic(single_zenohd: Any) -> Non
     future = datetime.now(timezone.utc) + timedelta(days=40)
     purged = store.gc_expired_tombstones(retention_days=30, now=future)
     assert purged == 1
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
 
 
@@ -158,7 +207,7 @@ def test_retention_skips_unparseable_deleted_at(single_zenohd: Any) -> None:  # 
     store.put_observation(obs)
     bad_tomb = Tombstone(observation_id=obs.observation_id, deleted_at='not-a-date')
     store.get_session().put(obs.tombstone_key_expr(), bad_tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_tomb_key_present(obs)
 
     purged = store.gc_expired_tombstones(retention_days=0)  # cutoff = now
     assert purged == 0
@@ -181,7 +230,10 @@ def test_force_id_purges_unparseable_key(single_zenohd: Any) -> None:  # noqa: A
     obs_id = '0' * 32
     malformed_key = f'mem/obs/claude/claude-code/xxx/sess/{obs_id}'
     store.get_session().put(malformed_key, '{ not valid json')
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: storage_has(store.get_session(), malformed_key),
+        'the malformed obs key to be stored',
+    )
 
     # Sanity: payload is unparseable, so the payload-level lookup misses it.
     assert store.find_observation_by_id(obs_id) is None
@@ -194,7 +246,10 @@ def test_force_id_purges_unparseable_key(single_zenohd: Any) -> None:  # noqa: A
     assert obs_removed is True
     assert tomb_removed is False
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: malformed_key not in [str(r.ok.key_expr) for r in sess.get('mem/obs/**', timeout=2.0) if r.ok],
+        'the wildcard broadcast to sweep the malformed key',
+    )
     post = [str(r.ok.key_expr) for r in sess.get('mem/obs/**', timeout=2.0) if r.ok]
     assert (
         malformed_key not in post
@@ -222,12 +277,13 @@ def test_gc_skips_tomb_with_key_body_id_mismatch(single_zenohd: Any) -> None:  #
         deleted_at=aged.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
     )
     store.get_session().put(protected.tombstone_key_expr(), bogus_tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(protected.observation_id)
+    _wait_tomb_key_present(protected)
 
     purged = store.gc_expired_tombstones(retention_days=30)
     # Mismatch must veto the purge for both the tomb and the mirrored obs.
     assert purged == 0
-    time.sleep(_INGEST_SETTLE)
+    _barrier('mismatched-tomb-gc')
     assert _obs_present(protected.observation_id), 'protected obs was purged by a mismatched-body tombstone'
 
 
@@ -310,11 +366,12 @@ def test_gc_project_filter_isolates(single_zenohd: Any) -> None:  # noqa: ARG001
     obs_a = _mk_obs('project-A obs', project='proj-a')
     store.put_observation(obs_a)
     _mk_aged_tombstone(obs_a)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs_a.observation_id)
+    _wait_tomb_key_present(obs_a)
 
     purged = store.gc_expired_tombstones(retention_days=30, project='proj-b')
     assert purged == 0
-    time.sleep(_INGEST_SETTLE)
+    _barrier('gc-project-isolate')
     assert _obs_present(obs_a.observation_id), 'proj-a obs must survive gc --project proj-b'
     assert _tomb_keys_for(obs_a.observation_id) != [], 'proj-a tomb must survive gc --project proj-b'
 
@@ -324,11 +381,13 @@ def test_gc_project_filter_targets(single_zenohd: Any) -> None:  # noqa: ARG001
     obs_a = _mk_obs('project-A obs to purge', project='proj-a')
     store.put_observation(obs_a)
     _mk_aged_tombstone(obs_a)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs_a.observation_id)
+    _wait_tomb_key_present(obs_a)
 
     purged = store.gc_expired_tombstones(retention_days=30, project='proj-a')
     assert purged >= 1
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs_a.observation_id)
+    _wait_tomb_absent(obs_a.observation_id)
     assert not _obs_present(obs_a.observation_id)
     assert _tomb_keys_for(obs_a.observation_id) == []
 
@@ -341,11 +400,15 @@ def test_gc_no_project_unchanged(single_zenohd: Any) -> None:  # noqa: ARG001
     store.put_observation(obs_b)
     _mk_aged_tombstone(obs_a)
     _mk_aged_tombstone(obs_b)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs_a.observation_id)
+    _wait_obs_present(obs_b.observation_id)
+    _wait_tomb_key_present(obs_a)
+    _wait_tomb_key_present(obs_b)
 
     purged = store.gc_expired_tombstones(retention_days=30)
     assert purged >= 2
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs_a.observation_id)
+    _wait_obs_absent(obs_b.observation_id)
     assert not _obs_present(obs_a.observation_id)
     assert not _obs_present(obs_b.observation_id)
 
@@ -360,14 +423,16 @@ def test_gc_force_id_with_project_ignores_project(single_zenohd: Any) -> None:  
     obs = _mk_obs('force-id-project-combo', project='proj-z')
     store.put_observation(obs)
     store.put_tombstone(obs, reason='combo-test')
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
+    _wait_tomb_key_present(obs)
 
     # Simulates: mesh-mem gc --force-id <id> --project other-proj
     # _cmd_gc short-circuits to physical_delete_observation when force_id is set.
     obs_removed, tomb_removed = store.physical_delete_observation(obs.observation_id)
     assert obs_removed is True
     assert tomb_removed is True
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
+    _wait_tomb_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
@@ -391,7 +456,8 @@ def test_gc_project_filter_skips_global_tomb_scan(
     obs = _mk_obs('proj-X tombed', project='proj-fast')
     store.put_observation(obs)
     _mk_aged_tombstone(obs)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
+    _wait_tomb_key_present(obs)
 
     list_tomb_calls: list[bool] = []
     real_list = purge._list_tombstones
@@ -406,7 +472,8 @@ def test_gc_project_filter_skips_global_tomb_scan(
     purged = store.gc_expired_tombstones(retention_days=30, project='proj-fast')
     assert purged == 1
     assert not list_tomb_calls, 'project-scoped gc must not invoke _list_tombstones (full mem/tomb/** scan)'
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
+    _wait_tomb_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
@@ -431,7 +498,9 @@ def test_gc_project_filter_always_rebuilds_for_correctness(
     target = _mk_obs('to-be-purged in same proj', project='proj-pre')
     store.put_observation(target)
     _mk_aged_tombstone(target)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(pre.observation_id)
+    _wait_obs_present(target.observation_id)
+    _wait_tomb_key_present(target)
 
     rebuild_calls: list[bool] = []
     orig = LocalIndex.rebuild_from_zenoh
@@ -465,11 +534,13 @@ def test_gc_project_filter_falls_back_when_index_disabled(
     obs = _mk_obs('disabled-index gc fallback', project='proj-fb')
     store.put_observation(obs)
     _mk_aged_tombstone(obs)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
+    _wait_tomb_key_present(obs)
 
     purged = store.gc_expired_tombstones(retention_days=30, project='proj-fb')
     assert purged == 1
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
+    _wait_tomb_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
@@ -495,7 +566,9 @@ def test_bulk_purge_by_pc_id_dry_run_lists_matches_without_deleting(
     for o in target_obs:
         store.put_observation(o)
     store.put_observation(keep_obs)
-    time.sleep(_INGEST_SETTLE)
+    for o in target_obs:
+        _wait_obs_present(o.observation_id)
+    _wait_obs_present(keep_obs.observation_id)
 
     result = store.bulk_purge_by_pc_id(target_pc, execute=False)
     assert result.executed is False
@@ -519,13 +592,16 @@ def test_bulk_purge_by_pc_id_execute_deletes_only_matching_pc(
     for o in target_obs:
         store.put_observation(o)
     store.put_observation(keep_obs)
-    time.sleep(_INGEST_SETTLE)
+    for o in target_obs:
+        _wait_obs_present(o.observation_id)
+    _wait_obs_present(keep_obs.observation_id)
 
     result = store.bulk_purge_by_pc_id(target_pc, execute=True)
     assert result.executed is True
     assert result.purged == 2
     assert result.failures == 0
-    time.sleep(_INGEST_SETTLE)
+    for o in target_obs:
+        _wait_obs_absent(o.observation_id)
 
     for o in target_obs:
         assert not _obs_present(o.observation_id)
@@ -540,12 +616,13 @@ def test_bulk_purge_by_pc_id_session_prefix_narrows_scope(
     real_obs = _mk_pc_obs('real work', pc_id=pc, session_id='engineering-1')
     store.put_observation(bench_obs)
     store.put_observation(real_obs)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(bench_obs.observation_id)
+    _wait_obs_present(real_obs.observation_id)
 
     result = store.bulk_purge_by_pc_id(pc, session_prefix='bench', execute=True)
     assert result.purged == 1
     assert result.failures == 0
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(bench_obs.observation_id)
 
     assert not _obs_present(bench_obs.observation_id)
     assert _obs_present(real_obs.observation_id), 'session_prefix must shield non-bench sessions'
@@ -575,13 +652,15 @@ def test_bulk_purge_by_pc_id_also_purges_mirrored_tombstone(
     obs = _mk_pc_obs('legit-then-tombed', pc_id=pc, session_id='real-1')
     store.put_observation(obs)
     store.put_tombstone(obs, reason='user-deleted')
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
+    _wait_tomb_key_present(obs)
     assert _tomb_keys_for(obs.observation_id) != []
 
     result = store.bulk_purge_by_pc_id(pc, execute=True)
     assert result.purged == 1
     assert result.tombs_purged == 1
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(obs.observation_id)
+    _wait_tomb_absent(obs.observation_id)
     assert not _obs_present(obs.observation_id)
     assert _tomb_keys_for(obs.observation_id) == []
 
@@ -649,7 +728,7 @@ def test_gc_expired_shadows_revives_when_zenoh_still_has_obs(single_zenohd: Any)
     obs = _mk_obs('shadow but upstream still has it', project='shadow-revive')
     # Put to Zenoh so the live re-verify hits the obs.
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(obs.observation_id)
 
     idx = store.get_index()
     idx.upsert(obs)
@@ -672,7 +751,7 @@ def test_gc_expired_shadows_handles_mixed_revive_and_purge(single_zenohd: Any) -
     gone = _mk_obs('upstream really lost me', project='shadow-mixed')
     store.put_observation(surviving)
     # ``gone`` is not put to Zenoh on purpose.
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(surviving.observation_id)
 
     idx = store.get_index()
     idx.upsert(surviving)
@@ -698,7 +777,8 @@ def test_cli_gc_retention_sweeps_both_tomb_and_shadow(single_zenohd: Any) -> Non
     store.put_observation(tombed)
     aged_tomb = Tombstone(observation_id=tombed.observation_id, reason='aged', deleted_at=aged_iso)
     store.get_session().put(tombed.tombstone_key_expr(), aged_tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(tombed.observation_id)
+    _wait_tomb_key_present(tombed)
 
     # Aged shadow path (purely local index manipulation).
     shadowed = _mk_obs('cli-gc shadow', project='cli-shadow-mix')
@@ -708,7 +788,7 @@ def test_cli_gc_retention_sweeps_both_tomb_and_shadow(single_zenohd: Any) -> Non
 
     rc = cli_main(['gc', '--retention-days', '30'])
     assert rc == 0
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(tombed.observation_id)
     assert not _obs_present(tombed.observation_id)
     assert idx.find_by_id(shadowed.observation_id, include_deleted=True) is None
 
@@ -723,7 +803,8 @@ def test_cli_gc_no_shadow_prune_flag_skips_shadow_only(single_zenohd: Any) -> No
     store.put_observation(tombed)
     aged_tomb = Tombstone(observation_id=tombed.observation_id, reason='aged', deleted_at=aged_iso)
     store.get_session().put(tombed.tombstone_key_expr(), aged_tomb.to_json())
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(tombed.observation_id)
+    _wait_tomb_key_present(tombed)
 
     shadowed = _mk_obs('cli-gc shadow (no-shadow)', project='cli-no-shadow')
     idx = store.get_index()
@@ -732,7 +813,7 @@ def test_cli_gc_no_shadow_prune_flag_skips_shadow_only(single_zenohd: Any) -> No
 
     rc = cli_main(['gc', '--retention-days', '30', '--no-shadow-prune'])
     assert rc == 0
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_absent(tombed.observation_id)
     assert not _obs_present(tombed.observation_id)
     # Shadow survives because --no-shadow-prune was set.
     assert idx.find_by_id(shadowed.observation_id, include_deleted=True) is not None
@@ -756,7 +837,7 @@ def test_rebuild_then_gc_pipeline_discovers_and_processes_stale_row(single_zenoh
     # Surviving row: properly published. Rebuild must leave it live.
     surviving = _mk_obs('upstream-live alongside stale', project='pipeline-discovery')
     store.put_observation(surviving)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(surviving.observation_id)
 
     # Pre-state: stale has no shadowed_at — list_expired_shadowed_obs alone
     # would not surface it.
@@ -796,7 +877,7 @@ def test_cli_gc_runs_rebuild_then_sweep_for_stale_row(single_zenohd: Any) -> Non
 
     surviving = _mk_obs('cli-discovery surviving', project='cli-shadow-discovery')
     store.put_observation(surviving)
-    time.sleep(_INGEST_SETTLE)
+    _wait_obs_present(surviving.observation_id)
 
     # Pre: stale has no shadowed_at yet — list_expired_shadowed_obs would miss it.
     assert idx.find_by_id(stale.observation_id) is not None

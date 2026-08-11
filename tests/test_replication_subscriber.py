@@ -7,10 +7,9 @@ is a pure unit test and does not need a router.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import json
 import time
-from typing import Any, TypeVar
+from typing import Any
 
 import pytest
 import zenoh
@@ -20,32 +19,16 @@ from kioku_mesh import store
 from kioku_mesh.models import Observation
 from kioku_mesh.models import Tombstone
 
-_T = TypeVar('_T')
-
-# Upper bound for the condition waits below, not an expected duration: every
-# wait returns as soon as its condition holds (measured steady-state delivery
-# is well under 10ms). These replace a fixed 0.4s sleep that stood in for the
-# conditions and made the file flaky — see _handshake for why waiting longer
-# was never the fix.
-_WAIT_TIMEOUT = 10.0
-_POLL_INTERVAL = 0.01
+from .wait_helpers import handshake as _handshake_until
+from .wait_helpers import POLL_INTERVAL as _POLL_INTERVAL
+from .wait_helpers import storage_has
+from .wait_helpers import WAIT_TIMEOUT as _WAIT_TIMEOUT
+from .wait_helpers import wait_until as _wait_until
 
 # Repeat count for the one-shot CLI test below: the shape it exercises is a
 # race, so a single pass would only sample it once. Ten open -> put -> close
 # cycles cost well under a second in total on a live path.
 _ONE_SHOT_CYCLES = 10
-
-
-def _wait_until(predicate: Callable[[], _T], description: str, *, timeout: float = _WAIT_TIMEOUT) -> _T:
-    """Poll ``predicate`` until it returns a truthy value, or fail with ``description``."""
-    deadline = time.monotonic() + timeout
-    while True:
-        result = predicate()
-        if result:
-            return result
-        if time.monotonic() >= deadline:
-            raise AssertionError(f'timed out after {timeout:.1f}s waiting for {description}')
-        time.sleep(_POLL_INTERVAL)
 
 
 def _indexed_ids(idx: Any, project: str, **kwargs: Any) -> set[str]:
@@ -91,7 +74,7 @@ def _storage_has(key: str) -> bool:
     they have to wait for the *storage* to hold the sample, which is a
     different condition from "the local index saw it".
     """
-    return any(r.ok for r in store.get_session().get(key, timeout=2.0))
+    return storage_has(store.get_session(), key)
 
 
 def _mk_obs(content: str, *, project: str = 'sub-test') -> Observation:
@@ -156,7 +139,6 @@ def _handshake(sess: zenoh.Session, *, via: str) -> None:
     for the one test that deliberately runs with its subscriber stopped.
     """
     canary = _mk_obs('handshake canary', project='_handshake')
-    deadline = time.monotonic() + _WAIT_TIMEOUT
     if via == 'index':
         idx = store.get_index()
 
@@ -167,19 +149,11 @@ def _handshake(sess: zenoh.Session, *, via: str) -> None:
         def arrived() -> bool:
             return _storage_has(canary.key_expr)
 
-    while True:
-        sess.put(canary.key_expr, canary.to_json())
-        # Give this attempt a short window before re-publishing: on a live
-        # path the canary lands in single-digit milliseconds.
-        attempt_end = min(time.monotonic() + 0.1, deadline)
-        while time.monotonic() < attempt_end:
-            if arrived():
-                return
-            time.sleep(_POLL_INTERVAL)
-        if arrived():
-            return
-        if time.monotonic() >= deadline:
-            raise AssertionError(f'timed out after {_WAIT_TIMEOUT:.1f}s establishing the remote -> {via} path')
+    _handshake_until(
+        lambda: sess.put(canary.key_expr, canary.to_json()),
+        arrived,
+        f'the remote -> {via} path',
+    )
 
 
 def _remote_session(endpoint: str, *, handshake_via: str = 'index') -> zenoh.Session:

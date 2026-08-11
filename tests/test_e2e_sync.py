@@ -16,28 +16,54 @@ routers for the whole session). ``_dual_fresh_state`` restarts both sides
 between tests so the memory-volume state is reset — memory is non-durable
 so a clean restart yields a clean slate.
 
-Replication wait: ``interval`` (2.0s) + ``propagation_delay`` (0.25s) +
-one tick of slack. We wait 5s which also absorbs initial link settling.
+Two things make the waits here subtle:
+
+* Every hop between routers re-opens the store session, and a put issued in
+  the window before the fresh session's declarations reach the router is
+  dropped, not queued (measured: the sample never arrives). ``_point_store_at``
+  therefore hands the session to ``handshake`` before returning it.
+* A query issued on B is answered by *either* router's storage while both are
+  up, so "B can see it" is not evidence that B holds a local replica. The
+  replies carry the answering router's zid, so ``_wait_for_local_replica``
+  waits for a reply from B itself — which is the property these tests then
+  verify by stopping A.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 import os
-import time
 from typing import Any
 
 import pytest
+import zenoh
 
 from kioku_mesh import store
 from kioku_mesh.models import Observation
 
-REPLICATION_WAIT = 5.0
+from .wait_helpers import handshake
+from .wait_helpers import storage_has
+from .wait_helpers import wait_until
+
+# Upper bound for replication to align a restarted peer, not an expected
+# duration: the waits below return as soon as the replica is in place.
+# ``interval`` is 2.0s and ``propagation_delay`` 0.25s, so alignment normally
+# lands within a couple of ticks.
+REPLICATION_TIMEOUT = 30.0
 
 
-def _point_store_at(endpoint: str) -> None:
+def _point_store_at(endpoint: str) -> Any:
+    """Re-point the store session at ``endpoint`` and return it, path proven live."""
     os.environ['ZENOH_CONNECT'] = endpoint
     store._reset_session()
+    sess = store.get_session()
+    canary = _mk_obs('handshake canary', project='_handshake')
+    handshake(
+        lambda: sess.put(canary.key_expr, canary.to_json()),
+        lambda: storage_has(sess, canary.key_expr),
+        f'the store session -> {endpoint} storage path',
+    )
+    return sess
 
 
 def _put_via(handle: Any, obs: Observation) -> None:
@@ -53,6 +79,30 @@ def _tomb_via(handle: Any, obs: Observation) -> None:
 def _search_via(handle: Any, **kwargs: Any) -> list[Observation]:
     _point_store_at(handle.endpoint)
     return store.search_observations(**kwargs)
+
+
+def _wait_for_local_replica(handle: Any, key_expr: str, what: str) -> None:
+    """Wait until ``handle``'s own storage answers a get on ``key_expr``.
+
+    Replies carry the zid of the session that answered. A client connected to
+    a single router only ever has that router as its direct peer, so a reply
+    tagged with that zid came from this side's storage rather than being
+    forwarded from the other router — exactly the condition the tests below
+    check by stopping the other side.
+
+    ``consolidation=NONE`` is essential: under the default consolidation both
+    storages' copies collapse into one reply, and the surviving one is not
+    necessarily this side's — the local replica would stay invisible until the
+    peer is stopped, which is exactly what we are trying to check in advance.
+    """
+    sess = _point_store_at(handle.endpoint)
+    local_zids = {str(z) for z in sess.info.routers_zid()}
+
+    def replicated() -> bool:
+        replies = sess.get(key_expr, timeout=2.0, consolidation=zenoh.ConsolidationMode.NONE)
+        return any(str(r.replier_id.zid) in local_zids for r in replies if r.ok)
+
+    wait_until(replicated, what, timeout=REPLICATION_TIMEOUT)
 
 
 def _mk_obs(content: str, project: str) -> Observation:
@@ -83,8 +133,9 @@ def _dual_fresh_state(dual_zenohd: Any) -> Iterator[None]:
     b.stop()
     a.start()
     b.start()
-    # Small settle for the peer link to re-establish before the test begins.
-    time.sleep(0.5)
+    # No settle here: ``start`` already blocks until each router accepts client
+    # sessions, and every wait in the tests below is a condition with its own
+    # timeout, so a slow peer link is absorbed rather than raced against.
     try:
         yield
     finally:
@@ -114,7 +165,7 @@ def test_offline_diff_sync(dual_zenohd: Any) -> None:
 
     # 2. B rejoins; wait for replication to copy the observation into B's storage.
     b.start()
-    time.sleep(REPLICATION_WAIT)
+    _wait_for_local_replica(b, obs.key_expr, "B's own storage to hold the obs published while B was offline")
 
     # 3. Stop A so any subsequent hit MUST come from B's local replica.
     a.stop()
@@ -128,10 +179,17 @@ def test_offline_diff_sync(dual_zenohd: Any) -> None:
 def test_tombstone_propagates_across_split_brain(dual_zenohd: Any) -> None:
     a, b = dual_zenohd.a, dual_zenohd.b
 
-    # 1. Both up; A publishes X. Give the mesh a beat to replicate X to B.
+    # 1. Both up; A publishes X. Wait until X is readable through B — while
+    # both sides are up this may still be answered by A's storage, which is
+    # all this precondition needs: it only establishes that X exists on the
+    # mesh before the split.
     obs = _mk_obs('about to be tombstoned during split', project='split-tomb')
     _put_via(a, obs)
-    time.sleep(REPLICATION_WAIT)
+    wait_until(
+        lambda: obs.observation_id in [r.observation_id for r in _search_via(b, project='split-tomb')],
+        'X to be readable through B before the split',
+        timeout=REPLICATION_TIMEOUT,
+    )
 
     # Sanity: X is visible via B.
     pre = _search_via(b, project='split-tomb')
@@ -147,7 +205,11 @@ def test_tombstone_propagates_across_split_brain(dual_zenohd: Any) -> None:
 
     # 4. B rejoins; wait for replication to ship the tomb into B.
     b.start()
-    time.sleep(REPLICATION_WAIT)
+    _wait_for_local_replica(
+        b,
+        obs.tombstone_key_expr(),
+        "B's own storage to hold the tombstone issued while B was offline",
+    )
 
     # 5. Stop A so the search on B must read B's local state only.
     a.stop()
