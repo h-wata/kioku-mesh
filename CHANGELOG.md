@@ -14,6 +14,10 @@ ADR-0030.
 
 ## [Unreleased]
 
+### Added
+
+- `get_memory_status` に直近7日の family 別 save 数を追加 (#280)
+
 ### Fixed
 
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
@@ -33,6 +37,15 @@ ADR-0030.
   matching memories."` for any natural-language query missing one term.
   Explicit `search_mode='or'`/`'and_or'` calls and the default value itself
   are unchanged (#276).
+- `get_memory_status` の直近7日集計 (#280): 検索が `MAX_SEARCH` 上限に達し、かつ
+  返却された最古の行がまだ7日窓の内側にある場合、セクション見出しを
+  `family (last 7d) [PARTIAL: search limit … reached; …]` とし、各行を
+  `family_7d <name>: >=N` の下限値表示に変えた（従来は打ち切られた件数を確定値の
+  ように表示していた）。あわせて `created_at` の扱いを堅牢化: offset の無い naive
+  timestamp は UTC とみなして比較する（従来は aware な cutoff との比較が
+  `TypeError` になり、status 出力全体が `failed to read shared memory` に落ちて
+  いた）、欠損・解析不能な値は1件ずつスキップ、窓は `[now-7d, now]` として未来
+  日時を除外し、スキップ件数を出力に明示するようにした。
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
