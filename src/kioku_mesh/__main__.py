@@ -50,6 +50,8 @@ from .memory.metadata import is_missing
 from .memory.metadata import MetadataRequiredError
 from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
+from .messaging.local_index import LocalMessageIndex
+from .messaging.local_index import ORPHAN_ACK_GRACE_SEC
 from .models import Observation
 from .models import VALID_MEMORY_TYPES
 from .paths import data_share_leaf
@@ -672,6 +674,27 @@ def _cmd_drain(args: argparse.Namespace) -> int:
     drained = get_backend().drain_pending(limit=args.limit, wait=True)
     remaining = get_backend().get_status().pending_puts
     print(f'pending_puts drain complete: drained={drained}, remaining={remaining}')
+    return 0
+
+
+def _cmd_messaging_purge_orphan_acks(args: argparse.Namespace) -> int:
+    """Delete acks rows stranded by purge_expired calls that predate #299.
+
+    Operator-invoked on purpose: the routine purge path only removes the acks
+    of the messages it just expired, because an ack with no message row can
+    also be an ack that outran its own message. Age is what separates the two,
+    and picking that threshold is the operator's call, not the hot path's.
+    """
+    from .core.identity import state_dir
+
+    grace_sec = int(round(args.grace_hours * 3600))
+    index = LocalMessageIndex(state_dir() / 'messaging' / 'inbox.db')
+    count = index.purge_orphan_acks(grace_sec=grace_sec, dry_run=args.dry_run)
+    scope = f'older than {args.grace_hours}h'
+    if args.dry_run:
+        print(f'orphan acks {scope}: {count} (dry run, nothing deleted)')
+    else:
+        print(f'orphan acks deleted: {count} ({scope})')
     return 0
 
 
@@ -2195,6 +2218,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_drain.add_argument('--pending', action='store_true', help='replay queued rows in pending_puts.db')
     p_drain.add_argument('--limit', type=_positive_int, default=None, help='max rows drained per invocation')
     p_drain.set_defaults(func=_cmd_drain)
+
+    p_messaging = sub.add_parser('messaging', help='Messaging inbox maintenance')
+    p_messaging_sub = p_messaging.add_subparsers(dest='messaging_cmd', required=True)
+    p_messaging_orphans = p_messaging_sub.add_parser(
+        'purge-orphan-acks',
+        help='Delete ack rows with no message row, left behind by purges predating #299',
+    )
+    p_messaging_orphans.add_argument(
+        '--grace-hours',
+        type=float,
+        default=ORPHAN_ACK_GRACE_SEC / 3600,
+        help='only delete orphan acks at least this old (default: %(default)g)',
+    )
+    p_messaging_orphans.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='report how many rows would be deleted without deleting them',
+    )
+    p_messaging_orphans.set_defaults(func=_cmd_messaging_purge_orphan_acks)
 
     p_gc = sub.add_parser('gc', help='Physically delete tombstoned entries (retention / --force-id / --by-pc-id)')
     p_gc.add_argument(

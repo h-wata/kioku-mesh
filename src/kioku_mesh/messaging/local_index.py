@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 import sqlite3
@@ -25,6 +26,12 @@ def _iso(dt: datetime) -> str:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
+
+#: Minimum age of an acks row with no messages row before
+#: :meth:`LocalMessageIndex.purge_orphan_acks` will delete it. Sized to be far
+#: beyond any plausible ack-before-message delivery race (seconds), so the only
+#: rows it can reach are ones genuinely stranded by the pre-#299 purge.
+ORPHAN_ACK_GRACE_SEC = 86_400
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -145,29 +152,84 @@ class LocalMessageIndex:
         Client-side TTL purge only — Zenoh storage-level cleanup is deferred
         to a later phase (design memo Open Question #1).
 
-        Also deletes any acks rows left orphaned by this call (design doc
-        docs/design/0201-messaging-ack-timeout-policy.md §4.2): without this,
-        a later re-registration of the same msg_id would find a stale acks
-        row and be reported as already-acked, hiding it from the receiver
-        with no error or warning. The orphan cleanup is unconditional (not
-        scoped to msg_ids purged in this call) so it is self-healing for
-        acks rows left behind by earlier code that predates this fix.
+        In the same transaction, deletes the acks rows for exactly the
+        ``(msg_id, recipient_session_id)`` pairs removed by this call (design
+        doc docs/design/0201-messaging-ack-timeout-policy.md §4.2). Without
+        this, a later re-registration of the same msg_id would find a stale
+        acks row and be reported as already-acked, hiding it from the
+        receiver with no error or warning.
+
+        The deletion is deliberately scoped to those pairs. An acks row with
+        no messages row is *not* proof of staleness: distributed delivery is
+        not end-to-end FIFO, so an ack can legitimately be indexed before the
+        message it acks. Sweeping every orphan here would silently drop such
+        a row even on calls that expire nothing. Orphans left behind by code
+        that predates this fix are handled by the explicit, grace-period
+        guarded :meth:`purge_orphan_acks` instead.
         """
         effective_now = now if now is not None else datetime.now(timezone.utc)
         now_iso = _iso(effective_now)
         with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            expired = conn.execute(
+                'SELECT msg_id, recipient_session_id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?',
+                (now_iso,),
+            ).fetchall()
+            if not expired:
+                conn.commit()
+                return 0
+            # Per-pair DELETE via the acks primary key — no scan of acks, so
+            # the cost is proportional to what actually expired, not to how
+            # many acks the receiver has accumulated (this runs on every
+            # check_messages poll).
+            conn.executemany(
+                'DELETE FROM acks WHERE msg_id = ? AND recipient_session_id = ?',
+                [(row['msg_id'], row['recipient_session_id']) for row in expired],
+            )
             cursor = conn.execute(
                 'DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?',
                 (now_iso,),
             )
             removed = cursor.rowcount
-            conn.execute(
-                'DELETE FROM acks WHERE NOT EXISTS ('
-                '  SELECT 1 FROM messages'
-                '  WHERE messages.msg_id = acks.msg_id'
-                '    AND messages.recipient_session_id = acks.recipient_session_id'
-                ')'
-            )
+            conn.commit()
+            return removed
+
+    def purge_orphan_acks(
+        self,
+        *,
+        grace_sec: int = ORPHAN_ACK_GRACE_SEC,
+        now: datetime | None = None,
+        dry_run: bool = False,
+    ) -> int:
+        """Delete acks rows that have no messages row and are older than ``grace_sec``.
+
+        Explicit maintenance path for acks rows stranded by :meth:`purge_expired`
+        before it started removing them (Issue #299). It is deliberately *not*
+        called from ``check_messages`` or :meth:`purge_expired`: it scans the
+        acks table, and the only thing separating a stranded orphan from an ack
+        that raced ahead of its own message is age — a race is reconciled in
+        seconds, so anything older than the grace period is stale by
+        construction.
+
+        ``acked_at <= now - grace_sec`` is deleted (inclusive boundary, matching
+        :meth:`purge_expired`). Returns the number of rows deleted, or, with
+        ``dry_run=True``, the number that would be deleted.
+        """
+        effective_now = now if now is not None else datetime.now(timezone.utc)
+        cutoff_iso = _iso(effective_now - timedelta(seconds=grace_sec))
+        where = (
+            ' FROM acks WHERE acked_at <= ? AND NOT EXISTS ('
+            '  SELECT 1 FROM messages'
+            '  WHERE messages.msg_id = acks.msg_id'
+            '    AND messages.recipient_session_id = acks.recipient_session_id'
+            ')'
+        )
+        with self._connect() as conn:
+            if dry_run:
+                row = conn.execute('SELECT COUNT(*)' + where, (cutoff_iso,)).fetchone()
+                return int(row[0])
+            cursor = conn.execute('DELETE' + where, (cutoff_iso,))
+            removed = cursor.rowcount
             conn.commit()
             return removed
 

@@ -28,6 +28,12 @@ ADR-0030.
   incoming search filter; `save_observation` still persists the literal
   `project` value it was given. `recall_context` names the expansion in its
   `filters:` line (`project='kioku-mesh' (also matching 'mesh-mem')`) (#278).
+- `kioku-mesh messaging purge-orphan-acks`: explicit, operator-invoked cleanup
+  for `acks` rows stranded by `purge_expired` calls that predate the #299 fix.
+  Only rows with no `messages` row **and** an `acked_at` at least
+  `--grace-hours` old (default 24) are deleted, so an ack that merely outran
+  its own message is never swept. `--dry-run` reports the count without
+  deleting. (#299)
 
 ### Fixed
 
@@ -61,10 +67,14 @@ ADR-0030.
   when it deletes expired `messages` rows. Previously, re-registering a msg_id
   after it had been purged would find the stale `acks` row and be reported as
   already-acked by `check_messages`, silently hiding the message from the
-  receiver with no error or warning. `purge_expired` now also removes any
-  `acks` row with no matching `messages` row (unconditionally, so it
-  self-heals orphans left over from before this fix, with no separate
-  migration step needed). (#299)
+  receiver with no error or warning. In the same transaction, `purge_expired`
+  now deletes the `acks` rows for exactly the `(msg_id,
+  recipient_session_id)` pairs it just expired, and nothing else: an `acks`
+  row with no `messages` row is not by itself stale, because distributed
+  delivery is not end-to-end FIFO and an ack can be indexed before the
+  message it acks. Deletion is by primary key, so the cost tracks what
+  actually expired instead of scanning the whole `acks` table on every
+  `check_messages` poll. (#299)
 
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
