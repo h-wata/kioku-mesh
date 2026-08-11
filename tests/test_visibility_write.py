@@ -13,7 +13,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
-import time
 from typing import Any
 
 import pytest
@@ -23,8 +22,9 @@ from kioku_mesh import store
 from kioku_mesh.models import Observation
 from kioku_mesh.models import Tombstone
 
-_SETTLE = 0.4
-
+from .wait_helpers import storage_has
+from .wait_helpers import storage_missing
+from .wait_helpers import wait_until
 
 # ---------------------------------------------------------------------------
 # resolve_write_visibility (pure unit tests)
@@ -297,9 +297,9 @@ def _mk_user_obs(content: str, *, project: str) -> Observation:
 def test_put_observation_lands_under_user_namespace(single_zenohd: Any) -> None:
     obs = _mk_user_obs('user-tier write', project='visw-put')
     store.put_observation(obs)
-    time.sleep(_SETTLE)
-
     sess = store.get_session()
+    wait_until(lambda: storage_has(sess, obs.key_expr), f'{obs.key_expr} to be readable from the router')
+
     keys = [str(r.ok.key_expr) for r in sess.get('mem/user/testuser/obs/**', timeout=2.0) if r.ok]
     assert obs.key_expr in keys, 'tiered write must land under mem/user/{user_id}/obs/...'
     # And nothing under the legacy namespace for this id.
@@ -314,9 +314,12 @@ def test_put_tombstone_mirrors_user_namespace(single_zenohd: Any) -> None:
     obs = _mk_user_obs('user-tier delete target', project='visw-del')
     store.put_observation(obs)
     store.put_tombstone(obs, reason='test')
-    time.sleep(_SETTLE)
-
     sess = store.get_session()
+    wait_until(
+        lambda: storage_has(sess, obs.tombstone_key_expr()),
+        f'{obs.tombstone_key_expr()} to be readable from the router',
+    )
+
     tomb_keys = [str(r.ok.key_expr) for r in sess.get('mem/user/testuser/tomb/**', timeout=2.0) if r.ok]
     assert obs.tombstone_key_expr() in tomb_keys, 'tombstone must mirror the tiered obs key'
     assert store.search_observations(project='visw-del') == []
@@ -332,20 +335,22 @@ def test_gc_purges_tiered_keys(single_zenohd: Any) -> None:
         reason='aged',
         deleted_at=aged.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
     )
-    store.get_session().put(obs.tombstone_key_expr(), tomb.to_json())
-    time.sleep(_SETTLE)
+    sess = store.get_session()
+    sess.put(obs.tombstone_key_expr(), tomb.to_json())
+    wait_until(
+        lambda: storage_has(sess, obs.tombstone_key_expr()),
+        f'{obs.tombstone_key_expr()} to be readable from the router',
+    )
 
     purged = store.gc_expired_tombstones(retention_days=30)
     assert purged >= 1
-    time.sleep(_SETTLE)
 
-    sess = store.get_session()
-    leftover = [
-        str(r.ok.key_expr)
-        for expr in (f'mem/**/obs/**/{obs.observation_id}', f'mem/**/tomb/**/{obs.observation_id}')
-        for r in sess.get(expr, timeout=2.0)
-        if r.ok
-    ]
+    obs_expr = f'mem/**/obs/**/{obs.observation_id}'
+    tomb_expr = f'mem/**/tomb/**/{obs.observation_id}'
+    wait_until(lambda: storage_missing(sess, obs_expr), f'{obs_expr} to be swept by gc')
+    wait_until(lambda: storage_missing(sess, tomb_expr), f'{tomb_expr} to be swept by gc')
+
+    leftover = [str(r.ok.key_expr) for expr in (obs_expr, tomb_expr) for r in sess.get(expr, timeout=2.0) if r.ok]
     assert leftover == [], f'gc must sweep tiered obs+tomb keys, leftover: {leftover}'
 
 
@@ -393,15 +398,17 @@ def test_gc_sweeps_tiered_obs_under_legacy_tombstone(single_zenohd: Any) -> None
         reason='deleted by old peer',
         deleted_at=aged.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
     )
-    store.get_session().put(legacy_tomb_key, tomb.to_json())
-    time.sleep(_SETTLE)
+    sess = store.get_session()
+    sess.put(legacy_tomb_key, tomb.to_json())
+    wait_until(lambda: storage_has(sess, legacy_tomb_key), f'{legacy_tomb_key} to be readable from the router')
 
     purged = store.gc_expired_tombstones(retention_days=30)
     assert purged >= 1
-    time.sleep(_SETTLE)
 
-    sess = store.get_session()
-    leftover = [str(r.ok.key_expr) for r in sess.get(f'mem/**/obs/**/{obs.observation_id}', timeout=2.0) if r.ok]
+    obs_expr = f'mem/**/obs/**/{obs.observation_id}'
+    wait_until(lambda: storage_missing(sess, obs_expr), f'{obs_expr} to be swept by gc')
+
+    leftover = [str(r.ok.key_expr) for r in sess.get(obs_expr, timeout=2.0) if r.ok]
     assert leftover == [], f'tiered obs must not survive a legacy-tomb gc: {leftover}'
 
     # No resurrection: a fresh rebuild must not bring the observation back.

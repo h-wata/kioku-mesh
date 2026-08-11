@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 import shutil
 import sys
-import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -36,7 +35,7 @@ import kioku_mesh.__main__ as cli_module  # noqa: E402
 from kioku_mesh.backend import reset_backend  # noqa: E402
 from kioku_mesh.models import Observation  # noqa: E402
 
-_INGEST_SETTLE = 0.25
+from .wait_helpers import wait_until  # noqa: E402
 
 
 def _saved_id(text: str) -> str:
@@ -126,10 +125,10 @@ def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None: 
     obs_id = _saved_id(msg)
     assert len(obs_id) == 32
 
-    time.sleep(_INGEST_SETTLE)
     # The subprocess MCP server and this test share the same zenohd instance
     # via the inherited ZENOH_CONNECT — so a store lookup here must surface
     # the observation that the subprocess just published.
+    wait_until(lambda: store.find_observation_by_id(obs_id) is not None, f'{obs_id} to be readable from the router')
     found = store.find_observation_by_id(obs_id)
     assert found is not None
     assert found.content == 'saved-through-subprocess'
@@ -173,7 +172,7 @@ def test_cli_save_with_new_fields(single_zenohd: Any, capsys: pytest.CaptureFixt
     obs_id = _saved_id(out)
     assert len(obs_id) == 32
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(lambda: store.find_observation_by_id(obs_id) is not None, f'{obs_id} to be readable from the router')
     obs = store.find_observation_by_id(obs_id)
     assert obs is not None
     assert obs.memory_type == 'decision'
@@ -207,7 +206,11 @@ def test_cli_get_memory(single_zenohd: Any, capsys: pytest.CaptureFixture) -> No
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
-    time.sleep(_INGEST_SETTLE)
+    def _get_memory_out() -> str:
+        cli_main(['get-memory', obs_id])
+        return capsys.readouterr().out
+
+    wait_until(lambda: f'id: {obs_id}' in _get_memory_out(), f'get-memory {obs_id} to return the saved observation')
     rc2 = cli_main(['get-memory', obs_id])
     assert rc2 == 0
     out = capsys.readouterr().out
@@ -241,7 +244,10 @@ def test_cli_search_summary_priority(single_zenohd: Any, capsys: pytest.CaptureF
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs_id in {r.observation_id for r in store.search_observations(project='proj-search')},
+        f'{obs_id} to appear in search',
+    )
     rc2 = cli_main(['search', '--project', 'proj-search'])
     assert rc2 == 0
     out = capsys.readouterr().out
@@ -272,7 +278,11 @@ def test_cli_search_markdown_fallbacks(single_zenohd: Any, capsys: pytest.Captur
     store.put_observation(with_subject)
     store.put_observation(with_summary)
     store.put_observation(with_content)
-    time.sleep(_INGEST_SETTLE)
+    wanted = {with_subject.observation_id, with_summary.observation_id, with_content.observation_id}
+    wait_until(
+        lambda: wanted <= {r.observation_id for r in store.search_observations(project='proj-search-md')},
+        f'{wanted} to appear in search',
+    )
 
     rc = cli_main(['search', '--project', 'proj-search-md', '--format', 'markdown'])
 
@@ -315,7 +325,10 @@ def test_cli_search_json_includes_full_fields(single_zenohd: Any, capsys: pytest
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs_id in {r.observation_id for r in store.search_observations(project='proj-search-json')},
+        f'{obs_id} to appear in search',
+    )
     rc2 = cli_main(['search', '--project', 'proj-search-json', '--format', 'json'])
 
     assert rc2 == 0
@@ -545,7 +558,7 @@ def test_cli_source_files_csv(single_zenohd: Any, capsys: pytest.CaptureFixture)
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(lambda: store.find_observation_by_id(obs_id) is not None, f'{obs_id} to be readable from the router')
     obs = store.find_observation_by_id(obs_id)
     assert obs is not None
     assert obs.source_files == ['a.py', 'b.py']
@@ -559,7 +572,7 @@ def test_cli_references_csv(single_zenohd: Any, capsys: pytest.CaptureFixture) -
     assert rc == 0
     obs_id = _saved_id(capsys.readouterr().out)
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(lambda: store.find_observation_by_id(obs_id) is not None, f'{obs_id} to be readable from the router')
     obs = store.find_observation_by_id(obs_id)
     assert obs is not None
     assert obs.references == ['#73', 'PR#68']
@@ -573,7 +586,12 @@ def test_cli_bulk_delete_dry_run_by_project(single_zenohd: Any, capsys: pytest.C
     store.put_observation(target_a)
     store.put_observation(target_b)
     store.put_observation(other)
-    time.sleep(_INGEST_SETTLE)
+    bulk_dry_ids = {target_a.observation_id, target_b.observation_id}
+    wait_until(
+        lambda: bulk_dry_ids <= {r.observation_id for r in store.search_observations(project='bulk-dry')}
+        and other.observation_id in {r.observation_id for r in store.search_observations(project='other-project')},
+        f'{bulk_dry_ids} and {other.observation_id} to appear in search',
+    )
 
     rc = cli_main(['delete', '--project', 'bulk-dry', '--dry-run'])
     assert rc == 0
@@ -594,7 +612,11 @@ def test_cli_bulk_delete_requires_yes_in_noninteractive(
     """Non-interactive bulk delete must require ``--yes`` before mutating state."""
     target = Observation(content='bulk-needs-yes', project='bulk-needs-yes')
     store.put_observation(target)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: target.observation_id
+        in {r.observation_id for r in store.search_observations(project='bulk-needs-yes')},
+        f'{target.observation_id} to appear in search',
+    )
 
     rc = cli_main(['delete', '--project', 'bulk-needs-yes'])
     assert rc == 2
@@ -622,7 +644,11 @@ def test_cli_bulk_delete_executes_with_until_filter(
     )
     store.put_observation(old_obs)
     store.put_observation(new_obs)
-    time.sleep(_INGEST_SETTLE)
+    until_ids = {old_obs.observation_id, new_obs.observation_id}
+    wait_until(
+        lambda: until_ids <= {r.observation_id for r in store.search_observations(project='bulk-until')},
+        f'{until_ids} to appear in search',
+    )
 
     rc = cli_main(
         [
@@ -638,7 +664,11 @@ def test_cli_bulk_delete_executes_with_until_filter(
     captured = capsys.readouterr()
     assert "bulk delete target: 1 entries (project='bulk-until', until='2026-05-10T00:00:00Z')" in captured.err
     assert 'deleted (tombstone): 1 entries' in captured.out
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: old_obs.observation_id
+        not in {r.observation_id for r in store.search_observations(project='bulk-until')},
+        f'{old_obs.observation_id} to drop out of search after tombstone',
+    )
 
     visible = {obs.observation_id for obs in store.search_observations(project='bulk-until')}
     assert old_obs.observation_id not in visible
@@ -676,14 +706,21 @@ def test_cli_bulk_delete_pages_past_batch_size(
         )
         store.put_observation(obs)
         targets.append(obs)
-    time.sleep(_INGEST_SETTLE)
+    target_ids = {obs.observation_id for obs in targets}
+    wait_until(
+        lambda: target_ids <= {r.observation_id for r in store.search_observations(project=project)},
+        f'{target_ids} to appear in search',
+    )
 
     rc = cli_main(['delete', '--project', project, '--yes', '--batch-size', '3'])
     assert rc == 0
     captured = capsys.readouterr()
     assert f'bulk delete target: 10 entries (project={project!r})' in captured.err
     assert 'deleted (tombstone): 10 entries' in captured.out
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: not target_ids & {r.observation_id for r in store.search_observations(project=project)},
+        f'{target_ids} to be tombstoned',
+    )
 
     visible = {obs.observation_id for obs in store.search_observations(project=project)}
     for obs in targets:
@@ -706,7 +743,11 @@ def test_cli_bulk_delete_continues_on_failure(
         )
         store.put_observation(obs)
         targets.append(obs)
-    time.sleep(_INGEST_SETTLE)
+    fail_target_ids = {obs.observation_id for obs in targets}
+    wait_until(
+        lambda: fail_target_ids <= {r.observation_id for r in store.search_observations(project=project)},
+        f'{fail_target_ids} to appear in search',
+    )
 
     failing_id = targets[1].observation_id
     from kioku_mesh.backend import get_backend
@@ -747,14 +788,21 @@ def test_cli_bulk_delete_pages_through_same_timestamp_ties(
         obs = Observation(content=f'tie-{i:02d}', project=project, created_at=ts)
         store.put_observation(obs)
         targets.append(obs)
-    time.sleep(_INGEST_SETTLE)
+    tie_ids = {obs.observation_id for obs in targets}
+    wait_until(
+        lambda: tie_ids <= {r.observation_id for r in store.search_observations(project=project)},
+        f'{tie_ids} to appear in search',
+    )
 
     rc = cli_main(['delete', '--project', project, '--yes', '--batch-size', '10'])
     assert rc == 0
     captured = capsys.readouterr()
     assert f'bulk delete target: 20 entries (project={project!r})' in captured.err
     assert 'deleted (tombstone): 20 entries' in captured.out
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: not tie_ids & {r.observation_id for r in store.search_observations(project=project)},
+        f'{tie_ids} to be tombstoned',
+    )
 
     visible = {obs.observation_id for obs in store.search_observations(project=project)}
     for obs in targets:
@@ -768,7 +816,10 @@ def test_cli_bulk_delete_emits_local_index_hint(
     """Completion of bulk delete always emits the local-index escape-hatch hint (#66)."""
     obs = Observation(content='hint-target', project='bulk-hint')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='bulk-hint')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     rc = cli_main(['delete', '--project', 'bulk-hint', '--yes'])
     assert rc == 0
@@ -840,7 +891,7 @@ def test_save_lint_done_content_save_succeeds_via_subprocess(single_zenohd: Any)
     obs_id = data['observation_id']
     assert len(obs_id) == 32
 
-    time.sleep(_INGEST_SETTLE)
+    wait_until(lambda: store.find_observation_by_id(obs_id) is not None, f'{obs_id} to be readable from the router')
     found = store.find_observation_by_id(obs_id)
     assert found is not None
 

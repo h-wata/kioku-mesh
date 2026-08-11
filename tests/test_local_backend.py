@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 from pathlib import Path
 import shutil
@@ -20,8 +21,11 @@ import pytest
 from kioku_mesh.backend import get_backend
 from kioku_mesh.backend import LocalBackend
 from kioku_mesh.backend import reset_backend
+from kioku_mesh.backend import ZenohBackend
 from kioku_mesh.config import get_backend_mode
 from kioku_mesh.models import Observation
+
+from .wait_helpers import wait_until
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -345,20 +349,26 @@ def contract_backend(
     return get_backend()
 
 
-def _settle(backend: object) -> None:
-    """Brief sleep after a Zenoh put — storage ingestion is asynchronous."""
-    from kioku_mesh.backend import ZenohBackend
+def _settle(backend: object, predicate: Callable[[], bool], description: str) -> None:
+    """Wait for a Zenoh put to reach storage — ingestion is asynchronous.
 
+    No-op for ``LocalBackend`` (writes are synchronous there).
+    """
     if isinstance(backend, ZenohBackend):
-        import time
-
-        time.sleep(0.25)
+        wait_until(predicate, description)
 
 
 def test_contract_put_and_search(contract_backend: object) -> None:
     obs = _mk_obs('contract put and search', project='contract')
     contract_backend.put_observation(obs)  # type: ignore[union-attr]
-    _settle(contract_backend)
+
+    def _found() -> bool:
+        return any(
+            r.observation_id == obs.observation_id
+            for r in contract_backend.search_observations(query='contract put', project='contract')  # type: ignore[union-attr]
+        )
+
+    _settle(contract_backend, _found, f'search to surface {obs.observation_id}')
     results = contract_backend.search_observations(query='contract put', project='contract')  # type: ignore[union-attr]
     assert any(r.observation_id == obs.observation_id for r in results)
 
@@ -366,7 +376,11 @@ def test_contract_put_and_search(contract_backend: object) -> None:
 def test_contract_get_by_id(contract_backend: object) -> None:
     obs = _mk_obs('contract get by id', project='contract')
     contract_backend.put_observation(obs)  # type: ignore[union-attr]
-    _settle(contract_backend)
+    _settle(
+        contract_backend,
+        lambda: contract_backend.find_observation_by_id(obs.observation_id) is not None,  # type: ignore[union-attr]
+        f'{obs.observation_id} to be readable',
+    )
     found = contract_backend.find_observation_by_id(obs.observation_id)  # type: ignore[union-attr]
     assert found is not None
     assert found.content == 'contract get by id'
@@ -375,9 +389,20 @@ def test_contract_get_by_id(contract_backend: object) -> None:
 def test_contract_delete_tombstone(contract_backend: object) -> None:
     obs = _mk_obs('contract tombstone target', project='contract')
     contract_backend.put_observation(obs)  # type: ignore[union-attr]
-    _settle(contract_backend)
+    _settle(
+        contract_backend,
+        lambda: contract_backend.find_observation_by_id(obs.observation_id) is not None,  # type: ignore[union-attr]
+        f'{obs.observation_id} to be readable before tombstoning',
+    )
     contract_backend.put_tombstone(obs, reason='contract test')  # type: ignore[union-attr]
-    _settle(contract_backend)
+
+    def _gone() -> bool:
+        return not any(
+            r.observation_id == obs.observation_id
+            for r in contract_backend.search_observations(query='contract tombstone', project='contract')  # type: ignore[union-attr]
+        )
+
+    _settle(contract_backend, _gone, f'{obs.observation_id} to drop out of search after tombstone')
     results = contract_backend.search_observations(query='contract tombstone', project='contract')  # type: ignore[union-attr]
     assert not any(r.observation_id == obs.observation_id for r in results)
 
@@ -500,7 +525,11 @@ def test_contract_local_backend_raw_store_parity(contract_backend: object) -> No
     """(c) LocalBackend raw-store rebuild produces same CRUD results as before reopen."""
     obs = _mk_obs('parity raw store c', project='parity-c')
     contract_backend.put_observation(obs)  # type: ignore[union-attr]
-    _settle(contract_backend)
+    _settle(
+        contract_backend,
+        lambda: contract_backend.find_observation_by_id(obs.observation_id) is not None,  # type: ignore[union-attr]
+        f'{obs.observation_id} to be readable',
+    )
 
     found = contract_backend.find_observation_by_id(obs.observation_id)  # type: ignore[union-attr]
     assert found is not None

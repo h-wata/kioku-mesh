@@ -6,7 +6,6 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 import json
-import time
 from typing import Any
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -19,6 +18,8 @@ from kioku_mesh.messaging.presence import _publication_scopes
 from kioku_mesh.messaging.presence import Presence
 from kioku_mesh.messaging.presence import PRESENCE_TTL
 from kioku_mesh.messaging.presence import PresenceManager
+
+from .wait_helpers import wait_until
 
 
 def _utc(dt: datetime) -> datetime:
@@ -229,7 +230,11 @@ class TestPresenceManagerHeartbeat:
         with patch('kioku_mesh.messaging.presence._get_zenoh_session', return_value=mock_session):
             mgr = PresenceManager()
             mgr.start_heartbeat()
-            time.sleep(0.3)
+            wait_until(
+                lambda: any('presence' in k for k in published_keys),
+                'heartbeat thread to publish a presence entry',
+                timeout=2.0,
+            )
             mgr.stop()
 
         assert any('presence' in k for k in published_keys), f'no presence key published; got {published_keys}'

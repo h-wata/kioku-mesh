@@ -6,8 +6,11 @@ a subprocess. The subprocess launch path is covered separately in
 ``test_mcp_cli.py``.
 
 Each test body is sync; we wrap the async MCP client in ``asyncio.run``.
-``_INGEST_SETTLE`` matches the sibling store / gc tests and absorbs the
-async ingest lag between a put and the next query.
+Zenoh ``put`` is asynchronous — the storage plugin ingests on its own
+background thread, so a query issued right after a put can miss it. Every
+site that depends on a prior put waits for the condition it actually cares
+about via ``wait_until`` (see ``tests/wait_helpers.py``) instead of sleeping
+for a duration picked to be "usually enough".
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ import asyncio
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,7 +37,7 @@ from kioku_mesh.mcp_server import mcp  # noqa: E402
 import kioku_mesh.mcp_server as mcp_server_module  # noqa: E402
 from kioku_mesh.models import Observation  # noqa: E402
 
-_INGEST_SETTLE = 0.25
+from .wait_helpers import wait_until  # noqa: E402
 
 
 def _saved_id(text: str) -> str:
@@ -141,9 +143,10 @@ def test_save_observation_persists_to_store(single_zenohd: Any) -> None:  # noqa
     obs_id = _saved_id(msg)
     assert len(obs_id) == 32
 
-    time.sleep(_INGEST_SETTLE)
-    found = store.find_observation_by_id(obs_id)
-    assert found is not None
+    found = wait_until(
+        lambda: store.find_observation_by_id(obs_id),
+        f'{obs_id} to be readable from the router',
+    )
     assert found.content == 'hello from mcp smoke'
     assert found.project == 'mcp-smoke'
     assert set(found.tags) == {'a', 'b'}
@@ -153,7 +156,10 @@ def test_search_memory_finds_saved_entry(single_zenohd: Any) -> None:  # noqa: A
     obs = _mk_obs('needle for mcp search', project='mcp-search')
     obs.references = ['#73', 'PR#68']
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='mcp-search')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -257,9 +263,10 @@ def test_save_observation_with_legacy_project_is_not_rewritten(single_zenohd: An
 
     msg = _run(_go())
     obs_id = _saved_id(msg)
-    time.sleep(_INGEST_SETTLE)
-    stored = store.find_observation_by_id(obs_id)
-    assert stored is not None
+    stored = wait_until(
+        lambda: store.find_observation_by_id(obs_id),
+        f'{obs_id} to be readable from the router',
+    )
     assert stored.project == 'mesh-mem'
 
     async def _search() -> str:
@@ -397,7 +404,10 @@ def test_search_memory_or_fallback_still_resolves_alias(
 def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('soon to be tombstoned via mcp', project='mcp-delete')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='mcp-delete')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -412,9 +422,10 @@ def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG
     assert 'deleted' in msg
     assert obs.observation_id in msg
 
-    time.sleep(_INGEST_SETTLE)
-    remaining = store.search_observations(project='mcp-delete')
-    assert obs.observation_id not in [r.observation_id for r in remaining]
+    wait_until(
+        lambda: obs.observation_id not in {r.observation_id for r in store.search_observations(project='mcp-delete')},
+        f'{obs.observation_id} to drop out of search after tombstone',
+    )
 
 
 def test_delete_memory_rejects_short_id(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -450,7 +461,10 @@ def test_delete_memory_reports_missing_id(single_zenohd: Any) -> None:  # noqa: 
 def test_get_memory_status_reports_version_and_counts(single_zenohd: Any) -> None:  # noqa: ARG001
     store.put_observation(_mk_obs('status obs 1', project='mcp-status'))
     store.put_observation(_mk_obs('status obs 2', project='mcp-status'))
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: len(store.search_observations(project='mcp-status')) >= 2,
+        'both status obs to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -521,7 +535,10 @@ def test_get_memory_status_reports_last_7d_family_counts(single_zenohd: Any) -> 
     )
     for obs in (recent, just_inside_boundary, too_old):
         store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: len(store.search_observations(project='mcp-status-7d')) >= 3,
+        'all mcp-status-7d observations to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -548,7 +565,10 @@ def test_get_memory_status_last_7d_section_present_when_empty(single_zenohd: Any
         created_at=_iso_days_ago(30),
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id),
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -570,7 +590,10 @@ def test_get_memory_status_last_7d_excludes_tombstoned(single_zenohd: Any) -> No
         created_at=_iso_days_ago(1),
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id),
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _delete() -> None:
         async with Client(mcp) as client:
@@ -581,7 +604,11 @@ def test_get_memory_status_last_7d_excludes_tombstoned(single_zenohd: Any) -> No
             assert not result.is_error
 
     _run(_delete())
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        not in {r.observation_id for r in store.search_observations(project='mcp-status-7d-tomb')},
+        f'{obs.observation_id} to drop out of search after tombstone',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -919,9 +946,10 @@ def test_save_observation_with_all_new_fields(single_zenohd: Any) -> None:  # no
     msg = _run(_go())
     assert 'saved' in msg
     obs_id = _saved_id(msg)
-    time.sleep(_INGEST_SETTLE)
-    found = store.find_observation_by_id(obs_id)
-    assert found is not None
+    found = wait_until(
+        lambda: store.find_observation_by_id(obs_id),
+        f'{obs_id} to be readable from the router',
+    )
     assert found.memory_type == 'decision'
     assert found.importance == 4
     assert found.subject == 'test subject'
@@ -956,9 +984,21 @@ def test_save_observation_rejects_invalid_memory_type(single_zenohd: Any) -> Non
     assert 'memory_type' in msg
     assert 'feature' in msg
 
-    time.sleep(_INGEST_SETTLE)
+    # Negative assertion: prove the invalid save never landed rather than
+    # sleeping and hoping. A sentinel put after the rejected call travels the
+    # same session -> router -> storage path; once it is readable, an
+    # erroneous persist of the earlier save would already have landed too.
+    sentinel = _mk_obs('barrier for invalid memory_type', project='mcp-mt-validate')
+    store.put_observation(sentinel)
+    wait_until(
+        lambda: sentinel.observation_id
+        in {r.observation_id for r in store.search_observations(project='mcp-mt-validate', limit=10)},
+        f'barrier {sentinel.observation_id} to appear in search',
+    )
     leaked = store.search_observations(project='mcp-mt-validate', limit=10)
-    assert leaked == [], 'invalid memory_type must not produce a stored obs'
+    assert [r.observation_id for r in leaked] == [
+        sentinel.observation_id
+    ], 'invalid memory_type must not produce a stored obs'
 
 
 def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -979,9 +1019,10 @@ def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: 
     msg = _run(_go())
     assert 'saved' in msg
     obs_id = _saved_id(msg)
-    time.sleep(_INGEST_SETTLE)
-    found = store.find_observation_by_id(obs_id)
-    assert found is not None
+    found = wait_until(
+        lambda: store.find_observation_by_id(obs_id),
+        f'{obs_id} to be readable from the router',
+    )
     assert found.memory_type == 'note'
     assert found.importance == 2
     assert found.subject == 'optional field defaults'
@@ -1002,7 +1043,10 @@ def test_search_memory_summary_priority(single_zenohd: Any) -> None:  # noqa: AR
         references=['#73'],
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='mcp-summary')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1037,7 +1081,10 @@ def test_get_memory_returns_full_metadata(single_zenohd: Any) -> None:  # noqa: 
         supersedes=['a' * 32],
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id) is not None,
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1074,8 +1121,12 @@ def test_tool_descriptions_contain_proactive_hint() -> None:
 
 def test_get_memory_status_includes_last_save_at(single_zenohd: Any) -> None:  # noqa: ARG001
     """get_memory_status output contains last_save_at for proactive save nudging."""
-    store.put_observation(_mk_obs('entry for last_save_at test', project='mcp-last-save'))
-    time.sleep(_INGEST_SETTLE)
+    obs = _mk_obs('entry for last_save_at test', project='mcp-last-save')
+    store.put_observation(obs)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id) is not None,
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1109,7 +1160,10 @@ def test_get_memory_status_reports_session_save_block(
         project='mcp-session-nudge',
     )
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id) is not None,
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1180,9 +1234,10 @@ def test_search_memory_with_search_mode_or(single_zenohd: Any) -> None:  # noqa:
     """search_memory accepts search_mode='or' and returns a valid result."""
     obs = _mk_obs('modesmoke alpha observation', project='mcp-mode-smoke')
     store.put_observation(obs)
-    import time
-
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='mcp-mode-smoke')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1201,9 +1256,10 @@ def test_search_memory_with_search_mode_and_or(single_zenohd: Any) -> None:  # n
     """search_memory accepts search_mode='and_or' and returns a valid result."""
     obs = _mk_obs('andorsmoke content', project='mcp-andor-smoke')
     store.put_observation(obs)
-    import time
-
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id in {r.observation_id for r in store.search_observations(project='mcp-andor-smoke')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1222,7 +1278,11 @@ def test_search_memory_default_and_falls_back_to_or_when_empty(single_zenohd: An
     """Issue #276: default 'and' search that misses falls back to 'or' and says so."""
     obs = _mk_obs('deduplicate search results content', project='mcp-and-or-fallback')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        in {r.observation_id for r in store.search_observations(project='mcp-and-or-fallback')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1244,7 +1304,11 @@ def test_search_memory_and_hit_has_no_fallback_marker(single_zenohd: Any) -> Non
     """When AND already hits, no fallback marker is added (no false-positive fallback)."""
     obs = _mk_obs('deduplicate search results FTS5 content', project='mcp-and-no-fallback')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: obs.observation_id
+        in {r.observation_id for r in store.search_observations(project='mcp-and-no-fallback')},
+        f'{obs.observation_id} to appear in search',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1302,7 +1366,10 @@ def test_get_memory_state_field(single_zenohd: Any) -> None:  # noqa: ARG001
     """get_memory response includes a 'state:' line."""
     obs = _mk_obs('state field test', project='mcp-state')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id) is not None,
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1318,7 +1385,10 @@ def test_get_memory_state_live(single_zenohd: Any) -> None:  # noqa: ARG001
     """A freshly saved observation returns state: live."""
     obs = _mk_obs('live state test', project='mcp-state-live')
     store.put_observation(obs)
-    time.sleep(_INGEST_SETTLE)
+    wait_until(
+        lambda: store.find_observation_by_id(obs.observation_id) is not None,
+        f'{obs.observation_id} to be readable from the router',
+    )
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -1964,9 +2034,10 @@ def test_save_lint_warn_only_save_succeeds(single_zenohd: Any) -> None:  # noqa:
     assert len(obs_id) == 32
     assert 'GENERIC_NOISE' in [w['code'] for w in data['warnings']]
 
-    time.sleep(_INGEST_SETTLE)
-    found = store.find_observation_by_id(obs_id)
-    assert found is not None
+    found = wait_until(
+        lambda: store.find_observation_by_id(obs_id),
+        f'{obs_id} to be readable from the router',
+    )
     assert found.content == 'done'
 
 
