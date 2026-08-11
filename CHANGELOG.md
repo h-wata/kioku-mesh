@@ -258,6 +258,16 @@ ADR-0030.
   `_cap_search_output` via `prefix=` instead: its bytes still count toward
   the cap and it always survives truncation, but it is excluded from the
   `N`/`M` entry count.
+- `mcp install --repair`: a `chmod` / `chgrp` landing on the config while
+  `--repair` was preparing its replacement could be silently reverted. The
+  mode and group stamped onto the staged file came from their own `os.stat`,
+  taken just before the metadata snapshot that the pre-replace
+  compare-and-swap uses as "the original". A concurrent permission change in
+  between was therefore already inside the snapshot — the re-check saw nothing
+  changed and let the replace through, while the staged file still wore the
+  values read a syscall earlier. `--repair` reported success and the change
+  was gone. Both values are now derived from that single snapshot, so the
+  staged file and the compare-and-swap baseline can no longer disagree (#279).
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

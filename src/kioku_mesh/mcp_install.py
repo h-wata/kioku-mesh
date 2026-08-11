@@ -66,7 +66,7 @@ import stat
 import subprocess
 import tempfile
 import tomllib
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 
 class MCPClient(str, Enum):
@@ -974,7 +974,24 @@ def _assert_config_unchanged(path: Path, original_text: str, *, stage: str) -> N
         )
 
 
-def _config_metadata_snapshot(path: Path, *, stage: str) -> tuple[Any, ...]:
+class _ConfigMetadata(NamedTuple):
+    """Everything :func:`os.replace` would carry over from a config besides its bytes.
+
+    Named rather than a bare tuple because the same snapshot is both the
+    compare-and-swap baseline *and* the source of the mode and group stamped
+    onto the staged replacement (Codex re-review 5 on #287); an index mixed up
+    between those two uses would silently stamp the wrong field.
+    """
+
+    dev: int
+    ino: int
+    mode: int
+    uid: int
+    gid: int
+    xattrs: tuple[tuple[str, bytes], ...] | None
+
+
+def _config_metadata_snapshot(path: Path, *, stage: str) -> _ConfigMetadata:
     """Capture everything :func:`os.replace` would carry over from ``path`` besides its bytes.
 
     The staged replacement wears the identity, mode and extended attributes read
@@ -987,6 +1004,12 @@ def _config_metadata_snapshot(path: Path, *, stage: str) -> tuple[Any, ...]:
     exactly what would be lost. A filesystem with no extended attributes at all
     yields ``None`` for that slot on both reads, so the check is inert there
     instead of refusing — the same hybrid boundary :func:`_copy_xattrs` draws.
+
+    This is the *only* metadata read of the original: the caller stamps the
+    staged file from the snapshot it will later compare against, so whatever a
+    concurrent writer changes — before, during or after these syscalls — is
+    either already inside the snapshot (and therefore carried onto the
+    replacement) or shows up as a difference at the pre-replace re-check.
     """
     try:
         st = os.stat(path)
@@ -1012,10 +1035,10 @@ def _config_metadata_snapshot(path: Path, *, stage: str) -> tuple[Any, ...]:
         raise RuntimeError(
             f'refusing to write {path}: its metadata could not be re-read {stage} ({e}); nothing was written.'
         ) from e
-    return (st.st_dev, st.st_ino, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, xattrs)
+    return _ConfigMetadata(st.st_dev, st.st_ino, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, xattrs)
 
 
-def _assert_config_metadata_unchanged(path: Path, original: tuple[Any, ...], *, stage: str) -> None:
+def _assert_config_metadata_unchanged(path: Path, original: _ConfigMetadata, *, stage: str) -> None:
     """Fail closed when ``path``'s metadata is no longer what the replacement carries."""
     if _config_metadata_snapshot(path, stage=stage) != original:
         raise RuntimeError(
@@ -1151,9 +1174,15 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
     caller is about to see is the reason someone might want it back.
     """
     _assert_config_unchanged(path, original_text, stage='after --repair read it')
-    st = os.stat(path)
-    original_mode = stat.S_IMODE(st.st_mode)
+    # One read, not two: the mode and group stamped onto the replacement below
+    # have to be the same ones the pre-replace compare-and-swap treats as "the
+    # original". A separate os.stat() beforehand left a window in which a
+    # concurrent chmod/chgrp landed after the stat but inside the snapshot, so
+    # the re-check saw no change while the staged file already wore the older
+    # values — --repair reported success and reverted that change (Codex
+    # re-review 5 on #287, PR287-R5-B1).
     original_metadata = _config_metadata_snapshot(path, stage='after --repair read it')
+    original_mode = original_metadata.mode
 
     backup = _new_backup_path(path)
     _write_backup(backup, original_text, mode=original_mode & 0o600)
@@ -1169,8 +1198,8 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
             os.fsync(handle.fileno())
             # The replacement inherits the original's permissions and group
             # rather than mkstemp's 0600 and the caller's primary group.
-            if os.fstat(handle.fileno()).st_gid != st.st_gid:
-                os.fchown(handle.fileno(), -1, st.st_gid)
+            if os.fstat(handle.fileno()).st_gid != original_metadata.gid:
+                os.fchown(handle.fileno(), -1, original_metadata.gid)
             os.fchmod(handle.fileno(), original_mode)
             # After the chmod rather than before, because fchmod rewrites the
             # ACL mask. Defensive rather than load-bearing here: the mode being

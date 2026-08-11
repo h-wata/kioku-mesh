@@ -1488,6 +1488,41 @@ def test_repair_claude_code_fails_closed_when_the_mode_changes_while_staging(
     assert not list(tmp_path.glob('.claude.json.*.tmp'))
 
 
+def test_repair_claude_code_keeps_a_mode_change_that_lands_before_the_metadata_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The staged file and the compare-and-swap baseline must come from one read (Codex re-review 5 on #287).
+
+    Reading the mode and group with their own ``os.stat`` before taking the
+    metadata snapshot left a window: a chmod landing in between is *inside* the
+    snapshot, so the pre-replace re-check sees no change and lets the replace
+    through, while the staged file still wears the mode read a syscall earlier.
+    --repair then reports success and the concurrent 0640 is silently back to
+    0600. Injecting the chmod immediately before the snapshot pins that window.
+    """
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    config.chmod(0o600)
+    real_snapshot = mcp_install._config_metadata_snapshot
+    widened = False
+
+    def widen_then_snapshot(path: Path, *, stage: str) -> tuple[object, ...]:
+        nonlocal widened
+        if not widened:
+            widened = True
+            path.chmod(0o640)
+        return real_snapshot(path, stage=stage)
+
+    monkeypatch.setattr(mcp_install, '_config_metadata_snapshot', widen_then_snapshot)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert widened
+    assert 'KIOKU_MESH_AGENT_FAMILY' in config.read_text()
+    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert not list(tmp_path.glob('.claude.json.*.tmp'))
+
+
 def test_repair_claude_code_survives_a_filesystem_without_xattrs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
