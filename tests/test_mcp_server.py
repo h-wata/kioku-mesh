@@ -13,6 +13,9 @@ async ingest lag between a put and the next query.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -269,6 +272,115 @@ def test_get_memory_status_reports_shadow_rows(single_zenohd: Any) -> None:  # n
 
     text = _run(_go())
     assert 'index_rows: live=0 / tomb=0 / shadow=1' in text
+
+
+def _iso_days_ago(days: float) -> str:
+    dt = datetime.now(timezone.utc) - timedelta(days=days)
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
+def test_get_memory_status_reports_last_7d_family_counts(single_zenohd: Any) -> None:  # noqa: ARG001
+    """The last-7d family breakdown counts only entries within the 7-day window.
+
+    Boundary decision: ``created_at >= now - 7 days`` is INCLUDED. This is
+    exercised with a small safety margin (a few seconds either side of the
+    cutoff) rather than an exact 7.000...-day offset, because the tool
+    itself computes its own ``now`` after the observations are constructed
+    and the store round-trip settles — an exact offset would flip sides of
+    the boundary depending on real wall-clock jitter between test setup and
+    the tool call.
+    """
+    recent = Observation(
+        content='recent claude save',
+        agent_family='claude',
+        project='mcp-status-7d',
+        created_at=_iso_days_ago(1),
+    )
+    just_inside_boundary = Observation(
+        content='just under 7 days ago codex save',
+        agent_family='codex',
+        project='mcp-status-7d',
+        created_at=_iso_days_ago(7 - 60 / 86400),
+    )
+    too_old = Observation(
+        content='8 days ago codex save, must not count',
+        agent_family='codex',
+        project='mcp-status-7d',
+        created_at=_iso_days_ago(8),
+    )
+    for obs in (recent, just_inside_boundary, too_old):
+        store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'family (last 7d):' in text
+    # All-time breakdown still reflects all 3 saves.
+    assert '  family claude: 1' in text
+    assert '  family codex: 2' in text
+    # 7-day breakdown includes the boundary entry but excludes the 8-day-old one.
+    assert '  family_7d claude: 1' in text
+    assert '  family_7d codex: 1' in text
+
+
+def test_get_memory_status_last_7d_section_present_when_empty(single_zenohd: Any) -> None:  # noqa: ARG001
+    """The last-7d section header is emitted even when no save falls in the window."""
+    obs = Observation(
+        content='stale save well outside the 7-day window',
+        agent_family='claude',
+        project='mcp-status-7d-empty',
+        created_at=_iso_days_ago(30),
+    )
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'family (last 7d):' in text
+    assert 'family_7d' not in text
+
+
+def test_get_memory_status_last_7d_excludes_tombstoned(single_zenohd: Any) -> None:  # noqa: ARG001
+    """A deleted (tombstoned) recent observation must not count toward the 7-day breakdown."""
+    obs = Observation(
+        content='recent save that gets deleted',
+        agent_family='claude',
+        project='mcp-status-7d-tomb',
+        created_at=_iso_days_ago(1),
+    )
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _delete() -> None:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'delete_memory',
+                {'observation_id': obs.observation_id, 'reason': 'smoke'},
+            )
+            assert not result.is_error
+
+    _run(_delete())
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'family (last 7d):' in text
+    assert 'family_7d' not in text
 
 
 def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.MonkeyPatch) -> None:

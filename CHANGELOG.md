@@ -14,6 +14,10 @@ ADR-0030.
 
 ## [Unreleased]
 
+### Added
+
+- `get_memory_status` に直近7日の family 別 save 数を追加 (#280)
+
 ### Fixed
 
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via

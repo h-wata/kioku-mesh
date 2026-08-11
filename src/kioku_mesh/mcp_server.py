@@ -8,6 +8,7 @@ space by guessing values. Narrow-down is allowed on ``search_memory``.
 
 from contextlib import closing
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 import json
 import logging
@@ -801,7 +802,11 @@ def get_memory_status() -> str:
     Per-session counts are derived by re-querying the store with
     ``session_id == current`` so process restarts and multi-process layouts
     stay consistent. Exception messages preserve the type name so connection
-    / query / implementation failures are distinguishable.
+    / query / implementation failures are distinguishable. Alongside the
+    all-time ``family <name>: N`` breakdown, a separate last-7-days
+    ``family_7d <name>: N`` breakdown is included so a recent drop in save
+    activity is visible even though it is masked in the all-time counts
+    (Issue #280).
     """
     try:
         backend = get_backend()
@@ -809,9 +814,17 @@ def get_memory_status() -> str:
         status = backend.get_status()
         by_family: dict[str, int] = {}
         by_pc: dict[str, int] = {}
+        # search_observations() excludes tombstoned/shadowed rows by default
+        # (include_deleted=False), so no extra filtering is needed here to
+        # keep deleted observations out of the 7-day window count.
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        by_family_7d: dict[str, int] = {}
         for obs in recent:
             by_family[obs.agent_family] = by_family.get(obs.agent_family, 0) + 1
             by_pc[obs.pc_id] = by_pc.get(obs.pc_id, 0) + 1
+            obs_created_at = _parse_iso(obs.created_at)
+            if obs_created_at is not None and obs_created_at >= seven_days_ago:
+                by_family_7d[obs.agent_family] = by_family_7d.get(obs.agent_family, 0) + 1
         truncated = len(recent) >= MAX_SEARCH
         last_save_at = recent[0].created_at if recent else '-'
         session_id = get_session_id()
@@ -850,6 +863,13 @@ def get_memory_status() -> str:
             lines.append(f'nudge: {nudge}')
         for family, count in sorted(by_family.items()):
             lines.append(f'  family {family}: {count}')
+        # Separate section: last-7-days family counts, sourced from the same
+        # `recent` population as the all-time breakdown above (no extra
+        # query), so it is subject to the same MAX_SEARCH truncation. Shown
+        # even when empty — "0 saves in the last 7 days" is itself signal.
+        lines.append('family (last 7d):')
+        for family, count in sorted(by_family_7d.items()):
+            lines.append(f'  family_7d {family}: {count}')
         for pc, count in sorted(by_pc.items()):
             lines.append(f'  pc {pc[:8]}: {count}')
         return '\n'.join(lines)
