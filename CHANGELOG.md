@@ -16,6 +16,15 @@ ADR-0030.
 
 ### Fixed
 
+- Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
+  `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
+  pulls in those plugins' setuptools entry points, which conflict with
+  pytest's built-in `caplog` handler registration and silently drop WARNING
+  log records. That made `tests/test_metadata_required.py`'s 5
+  `agent_family`-resolution tests fail nondeterministically outside CI
+  (`caplog.records` came back empty even though the warning was logged to
+  stderr), unrelated to any code under test. GitHub Actions never sees this
+  since its runners don't have ROS2 sourced. See #289.
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
