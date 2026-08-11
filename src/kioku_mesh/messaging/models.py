@@ -71,7 +71,10 @@ class Message:
     kind: str = 'direct'  # "direct" | "broadcast" (Phase 2+)
     sender: dict[str, Any] = field(default_factory=dict)  # identity object for sender
     recipient: dict[str, Any] = field(default_factory=dict)  # {"kind": "session"|"agent", "id": "..."}
-    body: dict[str, Any] | str = field(default_factory=dict)  # first-class content; use instead of payload
+    # first-class content; use instead of payload.
+    # Max 64 KiB UTF-8 (kioku_mesh.messaging.limits.MAX_BODY_BYTES) — enforced on
+    # send (spool.send_message / ZenohBridge.put_message), rejected not truncated.
+    body: dict[str, Any] | str = field(default_factory=dict)
     content_type: str = 'text/plain'
     requires_ack: bool = False
     delivery_adapters: list[str] = field(default_factory=list)

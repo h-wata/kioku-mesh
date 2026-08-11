@@ -35,6 +35,20 @@ ADR-0030.
   (候補の描画中に例外が出ても save が成功し candidates が落ちるだけであること)
   を追加した。(#236)
 
+### Changed
+
+- messaging: message body size limits are now measured, enforced, and documented
+  (#202). The 64 KiB limit applies to `body` itself (it was previously applied to
+  the whole serialized message, so a 64 KiB body was rejected by the ~434-byte
+  JSON envelope); a separate 192 KiB envelope cap stops `payload` / metadata from
+  smuggling content past it, and tmux injection keeps its 8 KiB body cap. Sizes
+  are counted in UTF-8 bytes, at-limit is accepted, and over-limit is rejected —
+  never truncated or split — with an error naming the actual size, the limit, and
+  the alternative (shorten the body, or `save_observation` plus a short pointer).
+  Zenoh itself was measured carrying 64 MiB payloads intact, so these are
+  recipient-context limits, not transport limits; the measurements are recorded in
+  `docs/design/0185-messaging-mvp-design.md`.
+
 ### Fixed
 
 - Messaging: acknowledgement rows with no matching message are no longer read

@@ -241,13 +241,19 @@ class MessagingTmuxAdapterConfig:
 
     Default off — ``enabled`` must be explicitly set to ``True`` in config;
     no pane injection occurs otherwise.
+
+    ``max_body_bytes`` is the UTF-8 byte cap for tmux injection (Issue #202);
+    over-limit bodies are dropped, never truncated. It must stay equal to
+    ``kioku_mesh.messaging.limits.MAX_TMUX_BODY_BYTES`` — core must not import
+    messaging (ADR-0023), so the value is duplicated here and
+    ``tests/test_messaging_limits.py`` asserts the two stay in sync.
     """
 
     enabled: bool = False
     pane_allowlist: list[str] = field(default_factory=list)
     sender_allowlist: list[str] = field(default_factory=list)
     scope_allowlist: list[str] = field(default_factory=lambda: ['user'])
-    max_body_bytes: int = 8192
+    max_body_bytes: int = 8192  # 8 KiB — keep in sync with messaging.limits.MAX_TMUX_BODY_BYTES
 
 
 def get_messaging_tmux_adapter_config() -> MessagingTmuxAdapterConfig:

@@ -6,8 +6,11 @@ Connects the in-process :class:`MessageSpool` to the Zenoh transport layer:
   - ``setup_subscriber``: declare Zenoh subscribers that feed incoming
     messages into the spool (push-delivery path, Phase 3 activation)
 
-Body size limit: 64 KiB.  ``put_message`` raises ``ValueError`` if the
-serialized payload exceeds ``BODY_SIZE_LIMIT``.
+Body size limit: 64 KiB of body (plus a 192 KiB cap on the serialized
+envelope).  ``put_message`` raises :class:`~.limits.MessageBodyTooLarge`
+(a ``ValueError``) instead of truncating or splitting — see
+:mod:`kioku_mesh.messaging.limits` for the rationale and the measurements
+behind the numbers.
 
 messaging モジュールは memory モジュールを直接 import しない (ADR-0023).
 """
@@ -23,6 +26,10 @@ from ..core.identity import get_session_id
 from .keyspace import ack_key
 from .keyspace import agent_inbox_key
 from .keyspace import session_inbox_key
+from .limits import check_body_size
+from .limits import check_envelope_size
+from .limits import MAX_BODY_BYTES
+from .limits import MAX_ENVELOPE_BYTES
 from .models import Message
 from .spool import MessageSpool
 
@@ -31,7 +38,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-BODY_SIZE_LIMIT = 65536  # 64 KiB — hard cap per design memo
+# Backwards-compatible alias — the canonical constants live in .limits.
+BODY_SIZE_LIMIT = MAX_BODY_BYTES  # 64 KiB body cap
+ENVELOPE_SIZE_LIMIT = MAX_ENVELOPE_BYTES  # 192 KiB serialized-message cap
 
 
 class ZenohBridge:
@@ -59,14 +68,14 @@ class ZenohBridge:
 
         Raises:
         ------
-        ValueError
-            When the serialized payload exceeds ``BODY_SIZE_LIMIT`` bytes.
+        MessageBodyTooLarge
+            When ``msg.body`` exceeds ``BODY_SIZE_LIMIT`` bytes, or the whole
+            serialized message exceeds ``ENVELOPE_SIZE_LIMIT`` bytes. Both are
+            ``ValueError`` subclasses and carry an actionable message.
         """
+        check_body_size(msg.body, limit=BODY_SIZE_LIMIT, channel='mcp', msg_id=msg.msg_id)
         payload_bytes = msg.to_json().encode('utf-8')
-        if len(payload_bytes) > BODY_SIZE_LIMIT:
-            raise ValueError(
-                f'message body exceeds {BODY_SIZE_LIMIT}-byte limit (msg_id={msg.msg_id!r}, size={len(payload_bytes)})'
-            )
+        check_envelope_size(payload_bytes, limit=ENVELOPE_SIZE_LIMIT, msg_id=msg.msg_id)
 
         recipient: dict[str, Any] = msg.recipient if isinstance(msg.recipient, dict) else {}
         kind = recipient.get('kind', 'session')

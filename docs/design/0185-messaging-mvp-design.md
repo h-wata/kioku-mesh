@@ -148,7 +148,7 @@ Field definitions:
 | `sender_seq` | int | no | sender session 内の best-effort monotonic sequence。順序表示用で、厳密配送保証には使わない。 |
 | `priority` | string | no | `low` / `normal` / `high`。MVP は sort の tie-break 程度。 |
 | `subject` | string | no | 短い見出し。 |
-| `body` | string | yes | MVP は text。最大サイズは 64 KiB を推奨上限にする。 |
+| `body` | string | yes | MVP は text。最大 64 KiB（65536 **UTF-8 bytes**、上限ちょうどは許可）。超過は reject（truncate も分割もしない）。→ [メッセージサイズ上限](#メッセージサイズ上限実測-2026-08-11) |
 | `content_type` | string | yes | MVP は `text/plain`。 |
 | `requires_ack` | bool | yes | MVP は default `true`。 |
 | `delivery_adapters` | list[string] | no | `mcp`, `tmux`, `hook`。未指定なら `["mcp"]`。 |
@@ -431,7 +431,7 @@ Security constraints:
 
 - Never enable by default.
 - Message payload must not choose tmux target.
-- Adapter must reject messages larger than a conservative limit, e.g. 8 KiB for direct injection.
+- Adapter rejects messages whose body exceeds 8 KiB (8192 UTF-8 bytes) — implemented in `messaging/tmux_adapter.py` as guard 5; over-limit bodies are dropped with a WARNING that names the size, the limit, and the alternative (drop `tmux` from `delivery_adapters` and let the recipient poll). Never truncated: a cut body is a changed instruction. → [メッセージサイズ上限](#メッセージサイズ上限実測-2026-08-11)
 - Adapter should prefer paste-buffer + Enter over raw per-character `send-keys` when available.
 - Adapter should record local delivery status, but ack still requires `ack_message` or an explicit adapter ack after successful injection. Injection does not mean the agent semantically processed the message.
 
@@ -604,6 +604,60 @@ Tests:
 - messaging layer does not import memory.
 - duplicate promotion can either return existing promoted id or create a new observation only when explicitly requested.
 
+## メッセージサイズ上限（実測 2026-08-11）
+
+確定値（Issue #202）:
+
+| 経路 | 上限 | 単位 | 超過時 | 実装 |
+| --- | --- | --- | --- | --- |
+| MCP poll (`body`) | 64 KiB = 65536 | UTF-8 bytes | reject (`MessageBodyTooLarge`) | `messaging/limits.py` → `spool.send_message` / `ZenohBridge.put_message` |
+| Zenoh envelope（serialized JSON 全体） | 192 KiB = 196608 | bytes | reject | `ZenohBridge.put_message` |
+| tmux 注入 | 8 KiB = 8192 | UTF-8 bytes | drop + WARNING（注入しない） | `messaging/tmux_adapter.py` guard 5 |
+
+上限**ちょうど**は許可、上限 +1 byte から reject。文字数ではなく UTF-8 byte 数で数えるので、マルチバイト文字が境界に跨る場合はそのメッセージ全体が reject される（途中で切らない）。
+
+### Zenoh put/get 実測
+
+測定条件: 単一ホスト（Linux, ローカルループバック）、`zenohd` 1.9.0 + eclipse-zenoh Python 1.9.0、専用 router 1 台（`tcp/127.0.0.1`, multicast scouting off, TLS なし）、storage は memory volume で `msg/**`、client session から `put` → 0.2 s 待機 → `session.get`、各サイズ 5 試行。envelope overhead は本文以外の JSON 分で全サイズ一定 434 bytes。
+
+| body | wire (envelope 込み) | put 中央値 / 最大 (ms) | get 中央値 / 最大 (ms) | 結果 |
+| --- | --- | --- | --- | --- |
+| 1 KiB | 1,458 B | 0.008 / 0.029 | 0.247 / 0.409 | 5/5 byte 一致 |
+| 8 KiB | 8,626 B | 0.011 / 0.013 | 0.248 / 0.279 | 5/5 byte 一致 |
+| 64 KiB | 65,970 B | 0.014 / 0.024 | 0.272 / 0.892 | 5/5 byte 一致 |
+| 256 KiB | 262,578 B | 0.132 / 0.178 | 0.528 / 0.587 | 5/5 byte 一致 |
+| 1 MiB | 1,049,010 B | 0.299 / 0.357 | 0.710 / 0.777 | 5/5 byte 一致 |
+| 4 MiB | 4,194,738 B | 1.150 / 2.375 | 1.531 / 3.113 | 5/5 byte 一致 |
+| 16 MiB | 16,777,650 B | 4.948 / 10.579 | 4.935 / 9.209 | 5/5 byte 一致 |
+| 64 MiB | 67,109,298 B | 48.222 / 52.819 | 17.872 / 40.824 | 5/5 byte 一致 |
+
+つまり **Zenoh 側は 64 MiB まで無傷で通り、上限の制約にはならない**。64 KiB という値は transport 由来ではなく受信側 UX 由来である。
+
+未実測（推測値を書かない）:
+
+- mTLS 経由・LAN 越し・複数 router hop・rocksdb volume での挙動
+- 64 MiB 超（測っていないので「どこで壊れるか」は不明）
+- 実 LLM tokenizer によるトークン数（下表は 4 bytes/token の概算であって実測ではない）
+
+### 受信側 UX（`check_messages` 応答サイズ）
+
+`check_messages` の返す JSON を実際の item 形状で組み立てて計測（1 件あたりの metadata は約 447 B）:
+
+| body | 1 件応答 | 20 件応答（`limit` 既定値） |
+| --- | --- | --- |
+| 0 B | 447 B | 8.0 KB |
+| 1 KiB | 1.4 KB | 28 KB |
+| 8 KiB | 8.6 KB | 168 KB |
+| 64 KiB | 64 KB（概算 16k tokens） | 1.26 MB（概算 330k tokens） |
+
+64 KiB の body 1 通で受信 agent のコンテキストを概算 16k tokens 消費する。これが上限を transport 限界（64 MiB 以上）ではなく 64 KiB に置く理由である。tmux 注入はさらに厳しく、pane に 1 ブロックとして貼り付ける都合上 8 KiB。
+
+### 超過時の挙動を reject にした理由
+
+- **truncate は却下**: body は agent が読んで行動する指示文である。黙って切ると指示の意味が変わる。byte 境界で切ると UTF-8 のマルチバイト列も割れる。
+- **分割は却下**: 再組み立てには順序保証か sequencing プロトコルが要るが、ADR-0022 MVP は配送順序を保証しない（`sender_seq` は best-effort）。MVP スコープ外。
+- **reject を採用**: 送信時点で失敗すれば送信側は原文を持っている。エラーは実サイズ・上限・次の一手（本文を短くする / `save_observation` に本文を入れて pointer だけ送る）を含める。tmux は delivery adapter が best-effort なので raise せず drop + WARNING（正経路の MCP poll では全文が読める）。
+
 ## 未解決事項・ADR 追補候補
 
 - Zenoh storage-level TTL purge for `msg/**`: MVP can filter expired messages client-side, but long-running meshes need a cleanup strategy.
@@ -612,4 +666,3 @@ Tests:
 - Sender ack timeout policy: MVP does not auto-resend solely because ack is missing. If users expect delivery receipts, add explicit delivery state and timeout semantics.
   - Phase 1.5 の設計提案は Issue #201 / `docs/design/0201-messaging-ack-timeout-policy.md` を参照。
 - Multi-session agent delivery: agent-level inbox may be read by multiple active sessions. MVP records ack per recipient session; later work may need "ack by any active session" aggregation.
-- Message body size limit: this memo recommends 64 KiB for MCP poll and 8 KiB for tmux injection, but exact limits should be validated against Zenoh and client UX.
