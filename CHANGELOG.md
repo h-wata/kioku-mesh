@@ -82,6 +82,29 @@ ADR-0030.
   `duplicate_retired`, or as `protocol_violation` when the envelope changed.
   The inbox schema is v3 (two nullable columns on `message_tombstones`
   recording the retired envelope, added in place on existing databases).
+- Messaging: closed the three ways an arrival could still be withheld without
+  a word (cross-review of the above). An ack row written *after* the upgrade
+  pass — what an old writer leaves behind during a rolling upgrade — was not
+  covered by the one-time migration, so it became authoritative as soon as its
+  message was registered and reproduced the original symptom; the classifier
+  now quarantines any ack that has no message, one exact pair at a time, on the
+  ingress path itself, and an unresolved quarantine keeps its message withheld
+  on every poll instead of only the first. An arrival that was already expired
+  skipped the classifier entirely, so its id was never retired and could carry
+  a different message later; expired arrivals are now tombstoned inside the
+  classifying transaction rather than by the purge that follows the poll, which
+  means one failed purge can no longer make a retired id reusable. And a
+  classifier failure (a locked index, a disk error), an unreadable payload, or
+  a failed inbox query were swallowed by a broad `except`, leaving `count: 0`
+  with no diagnostics; each is now reported as `classification_failed`,
+  `arrival_undecodable` or `selector_failed`, carrying the affected message
+  where there is one. Two further withholding reasons became visible in the
+  same pass — `ack_first_promoted` and `expired_on_arrival` — and the delivery
+  filter now takes ack state from the transaction that classified the arrival
+  instead of asking the index a second time. The inbox schema is v4:
+  quarantined acks record a `provenance` (`migration` or
+  `post_migration_ack`), added in place on existing databases and shown by
+  `orphan-acks list`.
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

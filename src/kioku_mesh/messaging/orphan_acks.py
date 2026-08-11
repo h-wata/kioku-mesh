@@ -69,9 +69,9 @@ def classify_unmatched_acks(conn: sqlite3.Connection) -> int:
 
     Note this is not called again on its own. Once the schema version is
     stamped, reopening the database skips the pass entirely, so an ack written
-    by an old binary *after* the upgrade stays in ``acks`` until something calls
-    this function explicitly. The rollout procedure handles that by quiescing
-    old writers before upgrading.
+    by an old binary *after* the upgrade is not covered by this pass at all —
+    :func:`quarantine_bare_ack` is what catches those, on the ingress path,
+    one pair at a time.
 
     Runs inside the caller's transaction so the whole upgrade commits or rolls
     back as one unit. Returns the number of rows moved.
@@ -88,8 +88,8 @@ def classify_unmatched_acks(conn: sqlite3.Connection) -> int:
     _record_conflicting_ack_times(conn, orphans, observed_at=migrated_at)
     conn.executemany(
         'INSERT OR IGNORE INTO legacy_unknown_acks'
-        ' (msg_id, recipient_session_id, acked_at, migrated_at, state)'
-        " VALUES (?, ?, ?, ?, 'unresolved')",
+        ' (msg_id, recipient_session_id, acked_at, migrated_at, state, provenance)'
+        " VALUES (?, ?, ?, ?, 'unresolved', 'migration')",
         [(r[0], r[1], r[2], migrated_at) for r in orphans],
     )
     conn.executemany(
@@ -97,6 +97,41 @@ def classify_unmatched_acks(conn: sqlite3.Connection) -> int:
         [(r[0], r[1]) for r in orphans],
     )
     return len(orphans)
+
+
+def quarantine_bare_ack(conn: sqlite3.Connection, msg_id: str, recipient_session_id: str) -> bool:
+    """Quarantine one ack that has no message, by exact pair. Returns whether one moved.
+
+    The single-pair counterpart of :func:`classify_unmatched_acks`, covering the
+    rows that pass cannot: it runs once per database at upgrade time, so an ack
+    written afterwards by a writer that has not been restarted yet — the case
+    the rollout note calls out — would otherwise stay in ``acks`` and become
+    authoritative the moment its message is registered.
+
+    The caller must already know the pair has no ``messages`` row; this is a
+    primary-key lookup on the ingress hot path and never re-scans for orphans.
+    It runs inside the caller's transaction, so the move and whatever the caller
+    decides about the arrival commit together.
+    """
+    row = conn.execute(
+        'SELECT msg_id, recipient_session_id, acked_at FROM acks WHERE msg_id = ? AND recipient_session_id = ?',
+        (msg_id, recipient_session_id),
+    ).fetchone()
+    if row is None:
+        return False
+    observed_at = _now_iso()
+    _record_conflicting_ack_times(conn, [row], observed_at=observed_at)
+    conn.execute(
+        'INSERT OR IGNORE INTO legacy_unknown_acks'
+        ' (msg_id, recipient_session_id, acked_at, migrated_at, state, provenance)'
+        " VALUES (?, ?, ?, ?, 'unresolved', 'post_migration_ack')",
+        (row[0], row[1], row[2], observed_at),
+    )
+    conn.execute(
+        'DELETE FROM acks WHERE msg_id = ? AND recipient_session_id = ?',
+        (msg_id, recipient_session_id),
+    )
+    return True
 
 
 def _record_conflicting_ack_times(
@@ -170,6 +205,7 @@ class LegacyAckEntry:
     state: str
     has_live_message: bool
     has_tombstone: bool
+    provenance: str = 'migration'
     age_days: float | None = None
     resolved_at: str | None = None
     resolution_note: str | None = None
@@ -181,6 +217,7 @@ class LegacyAckEntry:
             'acked_at': self.acked_at,
             'migrated_at': self.migrated_at,
             'state': self.state,
+            'provenance': self.provenance,
             'has_live_message': self.has_live_message,
             'has_tombstone': self.has_tombstone,
             'age_days': self.age_days,
@@ -273,7 +310,8 @@ def list_legacy_unknown_acks(
         # a second COUNT query.
         params.append(limit + 1)
         rows = conn.execute(
-            'SELECT msg_id, recipient_session_id, acked_at, migrated_at, state, resolved_at, resolution_note'
+            'SELECT msg_id, recipient_session_id, acked_at, migrated_at, state, provenance,'
+            ' resolved_at, resolution_note'
             f' FROM legacy_unknown_acks{where}'
             ' ORDER BY msg_id, recipient_session_id LIMIT ?',
             params,
@@ -287,6 +325,7 @@ def list_legacy_unknown_acks(
                 acked_at=r['acked_at'],
                 migrated_at=r['migrated_at'],
                 state=r['state'],
+                provenance=r['provenance'],
                 has_live_message=_pair_exists(conn, 'messages', r['msg_id'], r['recipient_session_id']),
                 has_tombstone=_pair_exists(conn, 'message_tombstones', r['msg_id'], r['recipient_session_id']),
                 age_days=_age_days(r['acked_at']),

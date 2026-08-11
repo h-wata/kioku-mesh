@@ -19,6 +19,7 @@ import sqlite3
 from typing import Any
 
 from .models import Ack
+from .models import is_expired
 from .models import Message
 
 
@@ -34,8 +35,10 @@ def _iso(dt: datetime) -> str:
 # (immutable msg_id + tombstone + pending ack-first + legacy isolation) and
 # runs the one-time classification of pre-existing acks. v3 records the envelope
 # a tombstoned id was retired with, so a later arrival on that id can be told
-# apart from a plain retry of the same envelope.
-MESSAGING_SCHEMA_VERSION = 3
+# apart from a plain retry of the same envelope. v4 records how a quarantined
+# ack got there, because an ack written after the migration and one that
+# predates it are different situations for whoever has to resolve them.
+MESSAGING_SCHEMA_VERSION = 4
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -79,9 +82,13 @@ CREATE TABLE IF NOT EXISTS message_tombstones (
     original_expires_at  TEXT,
     PRIMARY KEY (msg_id, recipient_session_id)
 );
--- Acks that had no message at upgrade time. Whether each one is purge residue
--- or a legitimate ack observed before its message cannot be decided from the
--- stored columns, so the ambiguity is recorded rather than guessed away.
+-- Acks that had no message when they were found. Whether each one is purge
+-- residue or a legitimate ack observed before its message cannot be decided
+-- from the stored columns, so the ambiguity is recorded rather than guessed
+-- away. ``provenance`` says where the row was found ('migration' for the
+-- upgrade pass, 'post_migration_ack' for one an old writer left behind
+-- afterwards), which is context the operator needs and the code never treats
+-- as evidence of staleness.
 CREATE TABLE IF NOT EXISTS legacy_unknown_acks (
     msg_id               TEXT NOT NULL,
     recipient_session_id TEXT NOT NULL,
@@ -90,6 +97,7 @@ CREATE TABLE IF NOT EXISTS legacy_unknown_acks (
     state                TEXT NOT NULL DEFAULT 'unresolved',
     resolved_at          TEXT,
     resolution_note      TEXT,
+    provenance           TEXT NOT NULL DEFAULT 'migration',
     PRIMARY KEY (msg_id, recipient_session_id)
 );
 -- Append-only. Every recovery writes its before image here with the backup it
@@ -128,15 +136,31 @@ INGRESS_PROTOCOL_VIOLATION = 'protocol_violation'
 #: normal mail, reported with the payload, and resolvable only by an operator.
 INGRESS_LEGACY_ACK_CONFLICT = 'legacy_ack_conflict'
 #: The ack for this pair arrived before the message did; the pending ack is now
-#: authoritative and the message counts as acknowledged.
+#: authoritative and the message counts as acknowledged. Withheld, and
+#: reported: the caller never saw this message, so "you already read it" is a
+#: statement it has to be able to check rather than an empty inbox.
 INGRESS_ACK_FIRST_PROMOTED = 'ack_first_promoted'
+#: The message was already past its expiry the first time it was ever seen, so
+#: it is retired on arrival and never delivered. Reported once — the id is
+#: tombstoned by the same poll, so a re-delivery is a duplicate after that.
+INGRESS_EXPIRED_ON_ARRIVAL = 'expired_on_arrival'
+#: Classification itself failed (a locked database, a disk error). The arrival
+#: is neither registered nor delivered, so it is retried on the next poll; what
+#: must not happen is the failure reading as "no mail".
+INGRESS_CLASSIFY_FAILED = 'classification_failed'
 
 #: Codes whose messages are withheld for a reason the caller has to be told.
+#: Everything except a normal delivery and a duplicate of something already in
+#: the inbox belongs here — see the ``INGRESS_*`` enumeration test, which fails
+#: if a new code is added without deciding this.
 INGRESS_DIAGNOSTIC_CODES = frozenset(
     {
         INGRESS_DUPLICATE_RETIRED,
         INGRESS_PROTOCOL_VIOLATION,
         INGRESS_LEGACY_ACK_CONFLICT,
+        INGRESS_ACK_FIRST_PROMOTED,
+        INGRESS_EXPIRED_ON_ARRIVAL,
+        INGRESS_CLASSIFY_FAILED,
     }
 )
 
@@ -165,6 +189,52 @@ class IngressResult:
     def is_diagnostic(self) -> bool:
         return self.code in INGRESS_DIAGNOSTIC_CODES
 
+    @classmethod
+    def classification_failed(cls, msg_id: str, recipient_session_id: str, error: BaseException) -> IngressResult:
+        """Build the verdict for an arrival the classifier could not judge.
+
+        Constructed by the poller rather than by the index, because the index
+        transaction is exactly what failed. It is a verdict all the same: the
+        arrival has to leave a trace in the same place every other withheld
+        arrival does, or a locked database looks like an empty inbox.
+        """
+        return cls(
+            code=INGRESS_CLASSIFY_FAILED,
+            msg_id=msg_id,
+            recipient_session_id=recipient_session_id,
+            registered=False,
+            acked=False,
+            suppressed=True,
+            detail={'error': f'{type(error).__name__}: {error}'},
+            remedy=(
+                'The local inbox index could not classify this arrival, so it was neither registered nor '
+                'delivered. It is retried on the next poll; if this persists, check the messaging index '
+                'for a stuck writer or a full disk.'
+            ),
+        )
+
+    @classmethod
+    def expired_on_arrival(cls, msg_id: str, recipient_session_id: str, expires_at: str | None) -> IngressResult:
+        """Build the verdict for a message whose TTL had already passed.
+
+        Nothing is registered: the pair goes straight to a tombstone, so the id
+        is retired without ever having been live.
+        """
+        return cls(
+            code=INGRESS_EXPIRED_ON_ARRIVAL,
+            msg_id=msg_id,
+            recipient_session_id=recipient_session_id,
+            registered=False,
+            acked=False,
+            suppressed=True,
+            detail={'expires_at': expires_at},
+            remedy=(
+                'This message expired before it was ever read, so it is not delivered and its msg_id is '
+                'now retired. Ask the sender to resend with a new msg_id and a longer TTL if it still '
+                'matters.'
+            ),
+        )
+
 
 def _stored_schema_version(conn: sqlite3.Connection) -> int:
     """Return the version recorded in the database, or 1 for a pre-versioning file.
@@ -190,6 +260,18 @@ def _add_missing_tombstone_columns(conn: sqlite3.Connection) -> None:
             conn.execute(f'ALTER TABLE message_tombstones ADD COLUMN {column} TEXT')
 
 
+def _add_missing_quarantine_columns(conn: sqlite3.Connection) -> None:
+    """Add the v4 provenance column to a quarantine table created by older code.
+
+    Rows that predate the column were all found by the upgrade pass, which is
+    what the default records — the column is descriptive of where the row came
+    from, so backfilling it with the truth needs no lookup.
+    """
+    existing = {row[1] for row in conn.execute('PRAGMA table_info(legacy_unknown_acks)')}
+    if 'provenance' not in existing:
+        conn.execute("ALTER TABLE legacy_unknown_acks ADD COLUMN provenance TEXT NOT NULL DEFAULT 'migration'")
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Bring an existing inbox database up to :data:`MESSAGING_SCHEMA_VERSION`.
 
@@ -204,9 +286,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     Reopening is not a re-classification, though: once the version is stamped
     the pass is skipped, so an unmatched ack written by an old binary *after*
-    the upgrade stays in ``acks`` until that function is called explicitly. The
-    rollout quiesces old writers before upgrading for exactly this reason, and
-    unit 2 is what stops such a row from being read as an acknowledgement.
+    the upgrade is never seen by it. Those are caught one pair at a time on the
+    ingress path instead (:meth:`LocalMessageIndex._quarantine_bare_ack_locked`),
+    which is what keeps such a row from ever being read as an acknowledgement.
     """
     from . import orphan_acks  # noqa: PLC0415 - avoids an import cycle at module load
 
@@ -215,6 +297,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     try:
         conn.execute('BEGIN IMMEDIATE')
         _add_missing_tombstone_columns(conn)
+        _add_missing_quarantine_columns(conn)
         moved = orphan_acks.classify_unmatched_acks(conn)
         orphan_acks.verify_classification(conn, moved)
         conn.execute('DELETE FROM messaging_schema_version')
@@ -293,6 +376,51 @@ class LocalMessageIndex:
             'SELECT is_acked FROM messages WHERE msg_id = ? AND recipient_session_id = ?',
             pair,
         ).fetchone()
+        if live is None:
+            # An ack row with no message proves nothing about the message now
+            # arriving on the same pair, and leaving it in place is what lets it
+            # answer is_acked once the message is inserted below. The migration
+            # pass only ever saw the rows that existed when the database was
+            # opened, so this is the same quarantine applied to whatever an old
+            # writer left behind afterwards.
+            self._quarantine_bare_ack_locked(conn, msg.msg_id, recipient_session_id)
+
+        # Checked ahead of the live row on purpose: a quarantined pair whose
+        # message is already registered must stay withheld on every later poll,
+        # not turn into ordinary mail the second time it is seen.
+        legacy = conn.execute(
+            'SELECT acked_at, migrated_at, state, provenance FROM legacy_unknown_acks'
+            ' WHERE msg_id = ? AND recipient_session_id = ?',
+            pair,
+        ).fetchone()
+        if legacy is not None and legacy['state'] == 'unresolved':
+            # Register the payload so it is not lost and so an operator can
+            # promote the quarantined ack onto a real message, but keep it out
+            # of normal mail until the ambiguity is resolved one way or another.
+            if live is None:
+                self._insert_message_locked(conn, msg, recipient_session_id, created_iso, expires_iso, is_acked=0)
+            return IngressResult(
+                code=INGRESS_LEGACY_ACK_CONFLICT,
+                msg_id=msg.msg_id,
+                recipient_session_id=recipient_session_id,
+                registered=live is None,
+                acked=False,
+                suppressed=True,
+                detail={
+                    'acked_at': legacy['acked_at'],
+                    'migrated_at': legacy['migrated_at'],
+                    'state': legacy['state'],
+                    'provenance': legacy['provenance'],
+                },
+                remedy=(
+                    f'A quarantined acknowledgement exists for this pair, so it is unknown whether the '
+                    f'message was already read. Inspect it with `{_INVENTORY_COMMAND}`, then resolve the '
+                    f'exact pair with `kioku-mesh messaging orphan-acks recover --msg-id {msg.msg_id} '
+                    f'--session-id {recipient_session_id} --action release|promote --backup <new path> '
+                    f'--execute`.'
+                ),
+            )
+
         if live is not None:
             acked = self._acked_locked(conn, msg.msg_id, recipient_session_id)
             return IngressResult(
@@ -311,37 +439,6 @@ class LocalMessageIndex:
         ).fetchone()
         if tomb is not None:
             return self._retired_result(tomb, msg, recipient_session_id, created_iso, expires_iso)
-
-        legacy = conn.execute(
-            'SELECT acked_at, migrated_at, state FROM legacy_unknown_acks'
-            ' WHERE msg_id = ? AND recipient_session_id = ?',
-            pair,
-        ).fetchone()
-        if legacy is not None and legacy['state'] == 'unresolved':
-            # Register the payload so it is not lost and so an operator can
-            # promote the quarantined ack onto a real message, but keep it out
-            # of normal mail until the ambiguity is resolved one way or another.
-            self._insert_message_locked(conn, msg, recipient_session_id, created_iso, expires_iso, is_acked=0)
-            return IngressResult(
-                code=INGRESS_LEGACY_ACK_CONFLICT,
-                msg_id=msg.msg_id,
-                recipient_session_id=recipient_session_id,
-                registered=True,
-                acked=False,
-                suppressed=True,
-                detail={
-                    'acked_at': legacy['acked_at'],
-                    'migrated_at': legacy['migrated_at'],
-                    'state': legacy['state'],
-                },
-                remedy=(
-                    f'A quarantined acknowledgement exists for this pair, so it is unknown whether the '
-                    f'message was already read. Inspect it with `{_INVENTORY_COMMAND}`, then resolve the '
-                    f'exact pair with `kioku-mesh messaging orphan-acks recover --msg-id {msg.msg_id} '
-                    f'--session-id {recipient_session_id} --action release|promote --backup <new path> '
-                    f'--execute`.'
-                ),
-            )
 
         pending = conn.execute(
             'SELECT acked_at, source_key, first_seen_at FROM pending_acks'
@@ -363,7 +460,26 @@ class LocalMessageIndex:
                 acked=True,
                 suppressed=True,
                 detail={'acked_at': pending['acked_at'], 'source_key': pending['source_key']},
+                remedy=(
+                    'An acknowledgement for this pair was observed before the message arrived, so the '
+                    'message is recorded as already read and is not delivered as new mail. Pass '
+                    'include_acked=true to see it.'
+                ),
             )
+
+        if is_expired(msg):
+            # Retired here rather than by the purge that runs after the poll.
+            # A message that was already dead when it first arrived has to leave
+            # a tombstone even if that purge fails or never runs — otherwise the
+            # id stays reusable, and the immutable-msg_id rule holds only as
+            # long as a second, separate write succeeds.
+            conn.execute(
+                'INSERT OR IGNORE INTO message_tombstones'
+                ' (msg_id, recipient_session_id, tombstoned_at, reason, original_created_at, original_expires_at)'
+                " VALUES (?, ?, ?, 'expired_on_arrival', ?, ?)",
+                (msg.msg_id, recipient_session_id, _iso(datetime.now(timezone.utc)), created_iso, expires_iso),
+            )
+            return IngressResult.expired_on_arrival(msg.msg_id, recipient_session_id, expires_iso)
 
         self._insert_message_locked(conn, msg, recipient_session_id, created_iso, expires_iso, is_acked=0)
         return IngressResult(
@@ -374,6 +490,27 @@ class LocalMessageIndex:
             acked=False,
             suppressed=False,
         )
+
+    @staticmethod
+    def _quarantine_bare_ack_locked(
+        conn: sqlite3.Connection,
+        msg_id: str,
+        recipient_session_id: str,
+    ) -> bool:
+        """Move an ack that has no message into the quarantine. Returns whether one moved.
+
+        The caller has already established that the pair has no ``messages``
+        row, so any ack found here is bare by construction and this stays a
+        bounded primary-key lookup on the poll hot path.
+
+        The row is moved rather than deleted for the same reason the migration
+        moves them: whether it is residue from the old purge bug or a real
+        acknowledgement seen ahead of its message cannot be decided from the
+        stored columns, and deleting it would throw away a real one.
+        """
+        from . import orphan_acks  # noqa: PLC0415 - avoids an import cycle at module load
+
+        return orphan_acks.quarantine_bare_ack(conn, msg_id, recipient_session_id)
 
     @staticmethod
     def _insert_message_locked(
