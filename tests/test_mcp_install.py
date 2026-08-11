@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
+import stat
 import subprocess
 import tomllib
 
@@ -882,17 +884,63 @@ def test_repair_claude_code_keeps_a_minified_config_minified(tmp_path: Path) -> 
     assert 'KIOKU_MESH_AGENT_FAMILY' in text
 
 
-def test_repair_claude_code_restores_the_backup_when_the_write_does_not_verify(
+def _patch_rendered_text(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    """Make the in-place editor produce ``text``, to drive the write guards."""
+    monkeypatch.setattr(
+        mcp_install,
+        '_rename_claude_env_keys',
+        lambda raw_text, *, container, name, renames: text,
+    )
+
+
+def test_repair_claude_code_refuses_to_write_content_that_does_not_verify(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Post-write read-back is the guarantee; a wrong write must not survive it."""
+    """Validation happens on the staged file, so a wrong edit never lands at all."""
     config = tmp_path / '.claude.json'
     _user_scope_config(config)
     before = config.read_text()
+    _patch_rendered_text(monkeypatch, json.dumps({'mcpServers': {}}))
+
+    with pytest.raises(RuntimeError, match='does not match the intended document'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before  # never replaced in the first place
+    assert not list(tmp_path.glob('.claude.json.bak-*'))  # and no half-finished backup left behind
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_repair_claude_code_refuses_to_write_content_that_is_not_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
+    _patch_rendered_text(monkeypatch, '{"truncated"')
+
+    with pytest.raises(RuntimeError, match='not strict JSON'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_repair_claude_code_restores_the_backup_when_the_landed_file_is_wrong(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Read-back is still the last guarantee: our own bad write is rolled back.
+
+    The staged-file validation makes this unreachable in practice, which is
+    exactly why it is worth pinning: dropping the read-back must stay visible.
+    """
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    before = config.read_text()
+    _patch_rendered_text(monkeypatch, json.dumps({'mcpServers': {}}))
     monkeypatch.setattr(
         mcp_install,
-        '_render_json_document',
-        lambda data, *, sample: json.dumps({'mcpServers': {}}),
+        '_validate_pending_write',
+        lambda tmp, new_text, expected, *, destination: None,  # pretend the staged check passed
     )
 
     with pytest.raises(RuntimeError, match='does not match the intended one'):
@@ -901,18 +949,24 @@ def test_repair_claude_code_restores_the_backup_when_the_write_does_not_verify(
     assert config.read_text() == before  # the bad write was rolled back
 
 
-def test_repair_claude_code_restores_the_backup_when_the_result_is_unreadable(
+def test_repair_claude_code_leaves_a_third_party_rewrite_alone_after_the_replace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """A newer config from another writer must not be clobbered by a stale backup."""
     config = tmp_path / '.claude.json'
     _user_scope_config(config)
-    before = config.read_text()
-    monkeypatch.setattr(mcp_install, '_render_json_document', lambda data, *, sample: '{"truncated"')
+    newer = json.dumps({'mcpServers': {}, 'writtenBy': 'claude code itself'})
 
-    with pytest.raises(RuntimeError, match='could not be read back'):
+    def steal(directory: Path) -> None:  # runs right after os.replace
+        config.write_text(newer, encoding='utf-8')
+
+    monkeypatch.setattr(mcp_install, '_fsync_directory', steal)
+
+    with pytest.raises(RuntimeError, match='changed again right after'):
         repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
-    assert config.read_text() == before
+    assert config.read_text() == newer  # left as the other writer left it
+    assert len(list(tmp_path.glob('.claude.json.bak-*'))) == 1  # the pre-repair copy is still there
 
 
 def test_repair_claude_code_swaps_the_file_in_rather_than_writing_over_it(tmp_path: Path) -> None:
@@ -939,16 +993,253 @@ def test_repair_claude_code_leaves_the_original_in_place_when_the_write_blows_up
     _user_scope_config(config)
     before = config.read_text()
 
-    def boom(data: object, *, sample: str) -> str:
+    def boom(raw_text: str, *, container: object, name: str, renames: object) -> str:
         raise OSError('disk full')
 
-    monkeypatch.setattr(mcp_install, '_render_json_document', boom)
+    monkeypatch.setattr(mcp_install, '_rename_claude_env_keys', boom)
 
     with pytest.raises(OSError, match='disk full'):
         repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
 
     assert config.read_text() == before
     assert not list(tmp_path.glob('*.tmp'))
+
+
+# -- repair (Claude Code): write-safety contracts ------------------------------
+#
+# Everything below pins a way the previous whole-document rewrite could damage a
+# config the user did not ask --repair to touch (Codex review B1-B5 on PR #287).
+
+
+def _minimal_document(env: dict[str, str] | None = None) -> str:
+    """One valid config as raw text, formatted the way this module must preserve."""
+    entry = json.dumps(
+        {'type': 'stdio', 'command': '/x', 'env': env or {'MESH_MEM_AGENT_FAMILY': 'claude'}},
+        indent=2,
+    )
+    return '{\n  "mcpServers": {\n    "' + DEFAULT_REGISTRY_NAME + '": ' + entry + '\n  }\n}\n'
+
+
+def test_repair_claude_code_keeps_a_number_python_would_widen_to_infinity(tmp_path: Path) -> None:
+    """``1e400`` is valid JSON; ``Infinity`` is not, and Claude Code rejects it.
+
+    ``json.loads`` turns the literal into ``float('inf')`` and ``json.dumps``
+    writes it back as the non-standard ``Infinity`` token, at which point the
+    real CLI reports the config as corrupted. Editing the key token in place
+    never touches the number (Codex review B1).
+    """
+    config = tmp_path / '.claude.json'
+    before = _minimal_document().replace('{\n  "mcpServers"', '{\n  "futureNumeric": 1e400,\n  "mcpServers"')
+    config.write_text(before, encoding='utf-8')
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    after = config.read_text()
+    assert '1e400' in after
+    assert 'Infinity' not in after
+    assert after == before.replace('"MESH_MEM_AGENT_FAMILY"', '"KIOKU_MESH_AGENT_FAMILY"')
+
+
+def test_repair_claude_code_fails_closed_on_a_config_that_is_already_non_standard(tmp_path: Path) -> None:
+    """A config Claude Code itself cannot read is not something --repair may edit."""
+    config = tmp_path / '.claude.json'
+    before = _minimal_document().replace('{\n  "mcpServers"', '{\n  "weird": Infinity,\n  "mcpServers"')
+    config.write_text(before, encoding='utf-8')
+
+    with pytest.raises(RuntimeError, match='cannot parse'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+
+
+def test_repair_claude_code_fails_closed_when_the_config_changes_before_the_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Claude Code rewrites this file while it runs; a lost update must not pass as success."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    real_rename = mcp_install._rename_claude_env_keys
+
+    def concurrent_writer(raw_text: str, *, container: object, name: str, renames: object) -> str:
+        document = json.loads(config.read_text())
+        document['concurrentClaudeUpdate'] = {'must': 'survive'}
+        config.write_text(json.dumps(document, indent=2) + '\n', encoding='utf-8')
+        return real_rename(raw_text, container=container, name=name, renames=renames)
+
+    monkeypatch.setattr(mcp_install, '_rename_claude_env_keys', concurrent_writer)
+
+    with pytest.raises(RuntimeError, match='changed on disk'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    written = json.loads(config.read_text())
+    assert written['concurrentClaudeUpdate'] == {'must': 'survive'}  # not dropped
+    assert not list(tmp_path.glob('.claude.json.bak-*'))
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_repair_claude_code_fails_closed_when_the_config_changes_while_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same check runs again immediately before the replace, not only once."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    real_backup = mcp_install._write_backup
+
+    def concurrent_writer(backup: Path, text: str, *, mode: int) -> None:
+        real_backup(backup, text, mode=mode)
+        document = json.loads(config.read_text())
+        document['concurrentClaudeUpdate'] = {'must': 'survive'}
+        config.write_text(json.dumps(document, indent=2) + '\n', encoding='utf-8')
+
+    monkeypatch.setattr(mcp_install, '_write_backup', concurrent_writer)
+
+    with pytest.raises(RuntimeError, match='changed on disk'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert json.loads(config.read_text())['concurrentClaudeUpdate'] == {'must': 'survive'}
+    assert not list(tmp_path.glob('.claude.json.bak-*'))  # the useless backup is cleaned up
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_repair_claude_code_keeps_a_symlinked_config_a_symlink(tmp_path: Path) -> None:
+    """``os.replace`` on the link would detach the config from the file it names."""
+    real = tmp_path / 'real.json'
+    _user_scope_config(real)
+    config = tmp_path / '.claude.json'
+    config.symlink_to(real)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.is_symlink()
+    assert os.readlink(config) == str(real)
+    env = json.loads(real.read_text())['mcpServers'][DEFAULT_REGISTRY_NAME]['env']
+    assert env == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}  # the referent is what changed
+    assert [p.name for p in tmp_path.glob('*.bak-*')] == [p.name for p in tmp_path.glob('real.json.bak-*')]
+
+
+def test_resolve_config_target_refuses_a_link_to_something_that_is_not_a_file(tmp_path: Path) -> None:
+    fifo = tmp_path / 'fifo'
+    os.mkfifo(fifo)
+    link = tmp_path / '.claude.json'
+    link.symlink_to(fifo)
+
+    with pytest.raises(RuntimeError, match='not a regular file'):
+        mcp_install._resolve_config_target(link)
+
+
+def _repair_under_umask(config: Path, project_dir: Path, umask: int) -> None:
+    previous = os.umask(umask)
+    try:
+        repair_claude_code(config_path=config, project_dir=project_dir)
+    finally:
+        os.umask(previous)
+
+
+def test_repair_claude_code_never_makes_the_backup_more_readable_than_the_config(tmp_path: Path) -> None:
+    """A 0600 config holds MCP env secrets; a umask-wide 0664 backup leaks them (B4)."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    config.chmod(0o600)
+
+    _repair_under_umask(config, tmp_path / 'proj', 0o002)
+
+    (backup,) = tmp_path.glob('.claude.json.bak-*')
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600  # and the config keeps its own mode
+
+
+def test_repair_claude_code_preserves_a_group_readable_config_mode(tmp_path: Path) -> None:
+    """The other direction: a 0664 project config must not silently become 0600."""
+    config = tmp_path / '.mcp.json'
+    config.write_text(json.dumps({'mcpServers': {DEFAULT_REGISTRY_NAME: _claude_entry()}}, indent=2) + '\n')
+    config.chmod(0o664)
+
+    _repair_under_umask(tmp_path / '.claude.json', tmp_path, 0o002)  # project scope lives in tmp_path
+
+    assert stat.S_IMODE(config.stat().st_mode) == 0o664
+    (backup,) = tmp_path.glob('.mcp.json.bak-*')
+    assert stat.S_IMODE(backup.stat().st_mode) & 0o077 == 0  # backup stays owner-only
+
+
+_HOSTILE_LAYOUT = (
+    '{\n'
+    '\t"numStartups":42,\n'
+    '\t"mcpServers":{"' + DEFAULT_REGISTRY_NAME + '":{"command":"/usr/bin/x","args":["--a","b c"],'
+    '"env":{"KEEP":"a\\/b \\u00e9","MESH_MEM_AGENT_FAMILY":"claude","MESH_MEM_CLIENT_ID":"claude-code"}}},\n'
+    '\t"projects" : { "/p" : { "allowedTools" : [ ] } }\n'
+    '}'
+)
+
+
+def test_repair_claude_code_changes_nothing_but_the_two_identity_key_tokens(tmp_path: Path) -> None:
+    """The byte-level contract: tab indent, compact containers, spacing and escapes all stay.
+
+    Re-serializing the parsed document normalized every one of these, which is
+    not what "leave everything else alone" means (Codex review B5).
+    """
+    config = tmp_path / '.claude.json'
+    config.write_text(_HOSTILE_LAYOUT, encoding='utf-8')
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    after = config.read_text()
+    expected = _HOSTILE_LAYOUT.replace('"MESH_MEM_AGENT_FAMILY"', '"KIOKU_MESH_AGENT_FAMILY"').replace(
+        '"MESH_MEM_CLIENT_ID"', '"KIOKU_MESH_CLIENT_ID"'
+    )
+    assert after == expected
+    assert r'a\/b \u00e9' in after  # escape spelling is the file's, not json.dumps'
+    assert not after.endswith('\n')  # including the missing trailing newline
+
+
+def test_repair_claude_code_validates_the_new_file_before_it_lands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Crash between replace and read-back: whatever is live must already be checked."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+
+    def crash(path: Path, expected: dict[str, object], *, backup: Path, written_text: str) -> None:
+        raise KeyboardInterrupt('power cut right after the replace')
+
+    monkeypatch.setattr(mcp_install, '_verify_written_document', crash)
+
+    with pytest.raises(KeyboardInterrupt):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    entry = json.loads(config.read_text())['mcpServers'][DEFAULT_REGISTRY_NAME]
+    assert entry['env'] == {'KIOKU_MESH_AGENT_FAMILY': 'claude'}
+
+
+def test_repair_claude_code_fsyncs_the_directory_so_the_new_name_survives(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without the directory fsync the rename itself can be lost on a power cut."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    real_fsync = os.fsync
+    fsynced_a_directory = []
+
+    def record(fd: int) -> None:
+        fsynced_a_directory.append(stat.S_ISDIR(os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, 'fsync', record)
+
+    repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert any(fsynced_a_directory)
+
+
+def test_repair_claude_code_fails_closed_on_a_duplicate_json_key(tmp_path: Path) -> None:
+    """Duplicate keys are legal JSON with reader-defined meaning; editing one is a guess."""
+    config = tmp_path / '.claude.json'
+    before = _minimal_document().replace('{\n  "mcpServers"', '{\n  "dup": 1,\n  "dup": 2,\n  "mcpServers"')
+    config.write_text(before, encoding='utf-8')
+
+    with pytest.raises(RuntimeError, match='duplicate JSON key'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
 
 
 def test_claude_config_path_follows_claude_config_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

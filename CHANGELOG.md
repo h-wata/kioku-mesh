@@ -88,10 +88,15 @@ ADR-0030.
 
   - Claude Code: the registration is read from, and written back to, the file
     Claude Code itself stores it in — `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`
-    for the `user` and `local` scopes, `<cwd>/.mcp.json` for `project`. The
-    loaded JSON object is handed back with two keys renamed inside one `env`
-    mapping, so args (including arguments containing spaces), unknown fields
-    and key order survive by construction.
+    for the `user` and `local` scopes, `<cwd>/.mcp.json` for `project`. Only
+    the two identity key *tokens* are rewritten, directly in the file's raw
+    text; every other byte is copied through. Args (including arguments
+    containing spaces), unknown fields, key order, indentation, colon/comma
+    spacing, compact containers, `\/` and `\uXXXX` escapes and number spelling
+    therefore survive by construction — including a valid `1e400`, which a
+    re-serializing rewrite turned into the non-standard `Infinity` token that
+    Claude Code rejects the whole file for. A config that already contains such
+    a token, or a duplicate key, fails closed instead of being edited.
   - Claude Code: this deliberately replaces the earlier `claude mcp get` +
     `remove` + `add` route. That route was lossy and could not be made
     lossless: `Args:` is printed space-joined, so `["--flag", "two words"]`
@@ -99,11 +104,22 @@ ADR-0030.
     lines print at column 0 byte-identically to an unknown field. Editing the
     JSON also removes the window in which the entry was deleted but not yet
     re-added, so no rollback path is needed.
-  - Claude Code: the previous file is copied to `<file>.bak-<UTC timestamp>`
-    (timestamped so a hand-made `.bak` is never clobbered), the new document
-    lands atomically (temp file + `os.replace`), and it is read back and
-    compared against the intended document before the repair reports success —
-    on any mismatch the backup is restored and the command fails.
+  - Claude Code: the write protocol is fail-closed at every step. A symlinked
+    config is written through to its referent, so the link is not replaced by a
+    regular file. The file is compared against the bytes `--repair` read both
+    before the backup and immediately before the replace, so an update another
+    process (Claude Code itself rewrites this file) made in between is never
+    silently dropped — the repair aborts with nothing written. The previous
+    file is copied to `<file>.bak-<UTC timestamp>` (timestamped so a hand-made
+    `.bak` is never clobbered), created exclusively (`O_EXCL`) at no wider than
+    `0600` so a `0600` config's secrets are not copied into a umask-wide
+    backup. The new text is validated as strict JSON equal to the intended
+    document *while it is still the temp file*, so nothing unverified is ever
+    live, and the replacement keeps the original's mode and group. The rename
+    is followed by a directory `fsync`. The result is finally read back: a
+    mismatch restores the backup, unless the file changed again after the
+    replace, in which case that newer file is left alone and the backup path is
+    reported rather than overwriting another writer's update.
   - Claude Code: a name registered in more than one scope fails closed. The
     error lists every scope and file it was found in and how to resolve the
     ambiguity; nothing is written.

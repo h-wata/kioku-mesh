@@ -36,6 +36,12 @@ Design notes:
   continuation lines print at column 0 byte-identically to unknown
   fields. Editing the JSON also removes the window where the entry is
   deleted but not yet re-added. See #279 / PR #287.
+- That JSON edit is token-level too: the identity key tokens are replaced
+  in the raw text and every other byte is copied through, so unknown
+  numbers, escapes and formatting survive. The write itself follows the
+  referent of a symlinked config, fails closed when another process
+  changed the file in the meantime, keeps the original's mode/group,
+  validates the staged file before it lands, and fsyncs the directory.
 """
 
 from __future__ import annotations
@@ -52,6 +58,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -641,23 +648,187 @@ def _project_mcp_json_path(project_dir: Path) -> Path:
     return project_dir / '.mcp.json'
 
 
+def _reject_json_constant(token: str) -> Any:
+    """``parse_constant`` hook that refuses JavaScript-only number tokens."""
+    raise ValueError(f'non-standard JSON token {token!r}')
+
+
+def _strict_json_loads(text: str) -> Any:
+    """:func:`json.loads` without Python's ``NaN`` / ``Infinity`` extensions.
+
+    Python's decoder accepts those tokens; Claude Code's does not, and rejects
+    the whole file as corrupted when it meets one. Repair must therefore neither
+    accept them as input nor emit them (Codex review B1 on #287).
+    """
+    return json.loads(text, parse_constant=_reject_json_constant)
+
+
 def _load_json_document(path: Path) -> tuple[dict[str, Any], str] | None:
     """Read ``path`` as a JSON object. ``None`` when it doesn't exist.
 
     Raises:
-        RuntimeError: when the file exists but isn't a JSON object. Repair
-            never guesses at a shape it doesn't recognize.
+        RuntimeError: when the file exists but isn't a JSON object, or is not
+            strict JSON. Repair never guesses at a shape it doesn't recognize.
     """
     if not path.is_file():
         return None
     raw_text = path.read_text(encoding='utf-8')
     try:
-        data = json.loads(raw_text)
-    except json.JSONDecodeError as e:
+        data = _strict_json_loads(raw_text)
+    except (json.JSONDecodeError, ValueError) as e:
         raise RuntimeError(f'cannot parse {path} as JSON: {e}') from e
     if not isinstance(data, dict):
         raise RuntimeError(f'cannot repair {path}: expected a JSON object at the top level.')
     return data, raw_text
+
+
+# --- Token-level JSON editing -------------------------------------------------
+#
+# The Claude Code repair rewrites the two identity env *key tokens* inside the
+# raw file text and copies every other byte through, the same way the Codex CLI
+# repair edits its TOML. Re-serializing the parsed document instead would
+# normalize things the document is not ours to change: `1e400` becomes the
+# non-standard `Infinity`, colon/comma spacing and compact containers get
+# re-flowed, `\/` and `\uXXXX` escapes get rewritten (Codex review B1/B5 on
+# #287).
+
+_JSON_WHITESPACE = ' \t\n\r'
+
+_JsonPath = tuple[Any, ...]
+
+
+def _skip_json_ws(text: str, i: int) -> int:
+    while i < len(text) and text[i] in _JSON_WHITESPACE:
+        i += 1
+    return i
+
+
+def _scan_json_string(text: str, i: int) -> int:
+    """Return the index just past the JSON string token starting at ``i``."""
+    j = i + 1
+    while True:
+        char = text[j]
+        if char == '\\':
+            j += 2
+            continue
+        if char == '"':
+            return j + 1
+        j += 1
+
+
+def _unsupported_json_layout(text: str, i: int) -> RuntimeError:
+    return RuntimeError(f'unsupported JSON layout for --repair at offset {i}: {text[i : i + 20]!r}')
+
+
+def _scan_json_value(text: str, i: int, path: _JsonPath, spans: dict[_JsonPath, tuple[int, int]]) -> int:
+    i = _skip_json_ws(text, i)
+    char = text[i]
+    if char == '{':
+        return _scan_json_object(text, i, path, spans)
+    if char == '[':
+        return _scan_json_array(text, i, path, spans)
+    if char == '"':
+        return _scan_json_string(text, i)
+    j = i
+    while j < len(text) and text[j] not in ',]}' and text[j] not in _JSON_WHITESPACE:
+        j += 1
+    if j == i:
+        raise _unsupported_json_layout(text, i)
+    return j
+
+
+def _scan_json_object(text: str, i: int, path: _JsonPath, spans: dict[_JsonPath, tuple[int, int]]) -> int:
+    i = _skip_json_ws(text, i + 1)
+    if text[i] == '}':
+        return i + 1
+    while True:
+        i = _skip_json_ws(text, i)
+        if text[i] != '"':
+            raise _unsupported_json_layout(text, i)
+        key_start = i
+        key_end = _scan_json_string(text, i)
+        key = json.loads(text[key_start:key_end])
+        member = path + (key,)
+        if member in spans:
+            # Duplicate keys are legal JSON but their meaning is reader-defined;
+            # editing one of them is a guess, so fail closed instead.
+            raise RuntimeError(
+                f'refusing to edit a document with a duplicate JSON key '
+                f'{".".join(str(part) for part in member)}; unsupported layout for --repair.'
+            )
+        spans[member] = (key_start, key_end)
+        i = _skip_json_ws(text, key_end)
+        if text[i] != ':':
+            raise _unsupported_json_layout(text, i)
+        i = _skip_json_ws(text, _scan_json_value(text, i + 1, member, spans))
+        if text[i] == ',':
+            i += 1
+            continue
+        if text[i] == '}':
+            return i + 1
+        raise _unsupported_json_layout(text, i)
+
+
+def _scan_json_array(text: str, i: int, path: _JsonPath, spans: dict[_JsonPath, tuple[int, int]]) -> int:
+    i = _skip_json_ws(text, i + 1)
+    if text[i] == ']':
+        return i + 1
+    index = 0
+    while True:
+        i = _skip_json_ws(text, _scan_json_value(text, i, path + (index,), spans))
+        if text[i] == ',':
+            i += 1
+            index += 1
+            continue
+        if text[i] == ']':
+            return i + 1
+        raise _unsupported_json_layout(text, i)
+
+
+def _json_key_spans(text: str) -> dict[_JsonPath, tuple[int, int]]:
+    """Map every object member's key path to its ``[start, end)`` span in ``text``.
+
+    Array hops appear in a path as integer indices. ``text`` is assumed to have
+    already parsed as strict JSON; anything this scanner cannot follow raises
+    ``RuntimeError`` so the caller writes nothing.
+    """
+    spans: dict[_JsonPath, tuple[int, int]] = {}
+    try:
+        end = _scan_json_value(text, 0, (), spans)
+        if _skip_json_ws(text, end) != len(text):
+            raise RuntimeError('trailing content after the JSON document; unsupported layout for --repair.')
+    except (IndexError, ValueError) as e:
+        raise RuntimeError(f'cannot locate the JSON keys to edit: {e}') from e
+    return spans
+
+
+def _rename_claude_env_keys(raw_text: str, *, container: tuple[str, ...], name: str, renames: dict[str, str]) -> str:
+    """Rewrite only the ``renames`` key tokens of ``<container>.<name>.env``.
+
+    Every other byte of ``raw_text`` — indentation, spacing, escapes, number
+    spelling, unknown fields, key order — comes through untouched, because
+    nothing is re-serialized.
+
+    Raises:
+        RuntimeError: when a key the parsed document says is present cannot be
+            located as an editable token. Fail closed: the caller writes nothing.
+    """
+    spans = _json_key_spans(raw_text)
+    env_path: _JsonPath = tuple(container) + (name, 'env')
+    edits: list[tuple[tuple[int, int], str]] = []
+    for legacy, current in renames.items():
+        span = spans.get(env_path + (legacy,))
+        if span is None:
+            raise RuntimeError(
+                f'could not locate the {legacy!r} env key token to edit in place; '
+                'unsupported layout for --repair (edit the config by hand).'
+            )
+        edits.append((span, json.dumps(current, ensure_ascii=False)))
+
+    out = raw_text
+    for (start, end), token in sorted(edits, key=lambda edit: edit[0][0], reverse=True):
+        out = out[:start] + token + out[end:]
+    return out
 
 
 def _dig(document: dict[str, Any], container: tuple[str, ...]) -> dict[str, Any] | None:
@@ -740,30 +911,6 @@ def _find_claude_entries(
     return found
 
 
-def _sniff_json_indent(sample: str) -> str | None:
-    """Guess ``sample``'s indentation so a rewrite keeps the file's own style.
-
-    Returns the leading whitespace of the first indented line, ``None`` for a
-    single-line (minified) document. Falls back to two spaces, which is what
-    Claude Code writes.
-    """
-    lines = sample.split('\n')
-    if len([line for line in lines if line.strip()]) <= 1:
-        return None
-    for line in lines[1:]:
-        if line.strip() and line[:1].isspace():
-            return line[: len(line) - len(line.lstrip())]
-    return '  '
-
-
-def _render_json_document(data: dict[str, Any], *, sample: str) -> str:
-    """Serialize ``data`` matching ``sample``'s indentation and trailing newline."""
-    text = json.dumps(data, indent=_sniff_json_indent(sample), ensure_ascii=False)
-    if sample.endswith('\n'):
-        text += '\n'
-    return text
-
-
 def _new_backup_path(path: Path) -> Path:
     """Return an unused ``<file>.bak-<UTC timestamp>`` sibling of ``path``.
 
@@ -781,50 +928,176 @@ def _new_backup_path(path: Path) -> Path:
     return candidate
 
 
-def _write_json_atomically(path: Path, data: dict[str, Any], *, sample: str) -> Path:
-    """Back up ``path``, then replace it with ``data`` atomically.
+def _resolve_config_target(path: Path) -> Path:
+    """Return the real file behind ``path``, so a symlinked config keeps its link.
 
-    The new content goes to a temporary file in the same directory and lands
-    via :func:`os.replace`, so a crash mid-write leaves the original file
-    intact rather than a truncated config. Returns the backup path.
+    ``os.replace`` on a symlink swaps the *link* for a regular file, which
+    silently detaches the config the user actually maintains from the one the
+    tool now writes (Codex review B3 on #287). Writing the referent instead
+    leaves the link topology exactly as it was.
+
+    Raises:
+        RuntimeError: when the link does not lead to a regular file — a fifo or
+            device is not something --repair should be replacing.
     """
-    backup = _new_backup_path(path)
-    backup.write_text(sample, encoding='utf-8')
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.', suffix='.tmp')
-    tmp_path = Path(tmp_name)
+    if not path.is_symlink():
+        return path
+    referent = Path(os.path.realpath(path))
+    if not stat.S_ISREG(os.lstat(referent).st_mode):
+        raise RuntimeError(f'refusing to repair {path}: it points at {referent}, which is not a regular file.')
+    return referent
+
+
+def _assert_config_unchanged(path: Path, original_text: str, *, stage: str) -> None:
+    """Fail closed when ``path`` no longer holds the bytes --repair read.
+
+    Claude Code rewrites its own config while it runs, so "read, edit, write
+    back" without a concurrency check silently drops whatever the other writer
+    added in between (Codex review B2 on #287). This is the optimistic half of
+    a compare-and-swap: it is checked immediately before the backup and again
+    immediately before the atomic replace.
+    """
+    try:
+        current = path.read_text(encoding='utf-8')
+    except OSError as e:
+        raise RuntimeError(
+            f'refusing to write {path}: it could not be re-read {stage} ({e}); nothing was written.'
+        ) from e
+    if current != original_text:
+        raise RuntimeError(
+            f'refusing to write {path}: it changed on disk {stage}, so writing would drop that '
+            'change. Nothing was written — re-run --repair.'
+        )
+
+
+def _write_backup(backup: Path, text: str, *, mode: int) -> None:
+    """Create ``backup`` exclusively at ``mode`` and fsync it.
+
+    ``O_EXCL`` keeps two repairs in the same second from writing the same file,
+    and the explicit mode keeps a 0600 config's secrets from being copied into a
+    umask-wide 0644 backup (Codex review B4 on #287).
+    """
+    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            handle.write(_render_json_document(data, sample=sample))
+            os.fchmod(handle.fileno(), mode)
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
     except BaseException:
-        tmp_path.unlink(missing_ok=True)
+        backup.unlink(missing_ok=True)
+        raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Persist a directory entry so the replaced name survives a power cut."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _validate_pending_write(tmp_path: Path, new_text: str, expected: dict[str, Any], *, destination: Path) -> None:
+    """Check the staged file *before* it lands, so no unverified config is ever live.
+
+    Validating only after :func:`os.replace` leaves a crash window in which the
+    destination holds bytes nothing has vouched for (Codex review B5 on #287).
+    """
+    staged = tmp_path.read_text(encoding='utf-8')
+    if staged != new_text:
+        raise RuntimeError(f'refusing to write {destination}: the staged file is not what --repair rendered.')
+    try:
+        parsed = _strict_json_loads(staged)
+    except ValueError as e:
+        raise RuntimeError(f'refusing to write {destination}: the repaired content is not strict JSON ({e}).') from e
+    if parsed != expected:
+        raise RuntimeError(
+            f'refusing to write {destination}: the repaired content does not match the intended document.'
+        )
+
+
+def _write_json_atomically(path: Path, new_text: str, *, original_text: str, expected: dict[str, Any]) -> Path:
+    """Back up ``path``, then replace it with ``new_text`` atomically.
+
+    The new content goes to a temporary file in the same directory, is
+    validated there, and lands via :func:`os.replace` followed by a directory
+    fsync — so a crash leaves either the untouched original or a config that has
+    already been checked. Returns the backup path.
+
+    ``path`` must already be the real file (see :func:`_resolve_config_target`).
+    On any failure before the replace, the original file and the caller's
+    expectations are left untouched and the backup is cleaned up.
+    """
+    _assert_config_unchanged(path, original_text, stage='after --repair read it')
+    st = os.stat(path)
+    original_mode = stat.S_IMODE(st.st_mode)
+
+    backup = _new_backup_path(path)
+    _write_backup(backup, original_text, mode=original_mode & 0o600)
+
+    tmp_path: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + '.', suffix='.tmp')
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(new_text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            # The replacement inherits the original's permissions and group
+            # rather than mkstemp's 0600 and the caller's primary group.
+            if os.fstat(handle.fileno()).st_gid != st.st_gid:
+                os.fchown(handle.fileno(), -1, st.st_gid)
+            os.fchmod(handle.fileno(), original_mode)
+        _validate_pending_write(tmp_path, new_text, expected, destination=path)
+        _assert_config_unchanged(path, original_text, stage='while --repair was staging the new file')
+        os.replace(tmp_path, path)
+        tmp_path = None
+        _fsync_directory(path.parent)
+    except BaseException:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+        backup.unlink(missing_ok=True)
         raise
     return backup
 
 
-def _verify_written_document(path: Path, expected: dict[str, Any], *, backup: Path) -> None:
-    """Re-read ``path`` and confirm it is exactly ``expected``, or restore and raise.
+def _verify_written_document(path: Path, expected: dict[str, Any], *, backup: Path, written_text: str) -> None:
+    """Re-read ``path`` and confirm it is exactly what was written, or raise.
 
     Declaring "nothing else changed" in a docstring is not a guarantee; reading
-    the file back is. On any mismatch the backup is put back so the user's
-    config is never left in a state this code cannot vouch for.
+    the file back is. A file that is ours but wrong is rolled back; a file some
+    *other* writer has since changed is left alone and reported, because putting
+    a stale backup over a newer config would destroy that writer's update.
     """
+
+    def restore(reason: str) -> None:
+        try:
+            os.replace(backup, path)
+        except OSError as e:  # pragma: no cover - restore itself failing is rare
+            raise RuntimeError(
+                f'refusing to keep the repaired {path}: {reason}; restoring the original ALSO failed ({e}). '
+                f'The pre-repair copy is at {backup}.'
+            ) from e
+        raise RuntimeError(f'refusing to keep the repaired {path}: {reason}; restored the original.')
+
     try:
-        written = json.loads(path.read_text(encoding='utf-8'))
-        matches = written == expected
-    except (OSError, json.JSONDecodeError) as e:
-        os.replace(backup, path)
+        current = path.read_text(encoding='utf-8')
+    except OSError as e:
+        restore(f'it could not be read back ({e})')
+        return  # pragma: no cover - restore always raises
+    if current != written_text:
         raise RuntimeError(
-            f'refusing to keep the repaired {path}: it could not be read back ({e}); restored the original.'
-        ) from e
-    if not matches:
-        os.replace(backup, path)
-        raise RuntimeError(
-            f'refusing to keep the repaired {path}: the written document does not match the '
-            'intended one; restored the original.'
+            f'refusing to vouch for {path}: it changed again right after --repair replaced it, so it was '
+            f'left as it is now. The pre-repair copy is kept at {backup}.'
         )
+    try:
+        written = _strict_json_loads(current)
+    except ValueError as e:
+        restore(f'it could not be read back ({e})')
+        return  # pragma: no cover - restore always raises
+    if written != expected:
+        restore('the written document does not match the intended one')
 
 
 def repair_claude_code(
@@ -849,10 +1122,22 @@ def repair_claude_code(
     registrations whose args contained spaces. Editing in place also drops
     the window where the entry was removed but not yet re-added.
 
-    Safety: the original is copied to ``<file>.bak-<timestamp>``, the new document lands
-    via a temp file + :func:`os.replace`, and the result is re-read and
-    compared against the intended document (restoring the backup on any
-    mismatch).
+    The edit itself is made on the raw file text — only the identity key
+    tokens are rewritten — so number spelling, escapes, spacing and compact
+    containers stay byte-for-byte what the file had. Re-serializing the parsed
+    document instead turned a valid ``1e400`` into the non-standard
+    ``Infinity`` that Claude Code refuses to load, and reflowed formatting that
+    was not ours to change.
+
+    Safety: a symlinked config is written through to its referent so the link
+    survives; the file is checked for concurrent modification both before the
+    backup and immediately before the replace (fail closed, nothing written);
+    the original is copied to ``<file>.bak-<timestamp>`` created exclusively at
+    no wider than 0600; the new text is validated as strict JSON matching the
+    intended document *while still on the temp file*, then lands via
+    :func:`os.replace` (preserving the original's mode and group) followed by a
+    directory fsync; and it is finally re-read to confirm what is live is what
+    was written.
 
     Raises:
         RuntimeError: when ``name`` is registered in more than one scope
@@ -906,8 +1191,16 @@ def repair_claude_code(
     expected_servers[name] = dict(entry)
     expected_servers[name]['env'] = _repair_identity_env(env)
 
-    backup = _write_json_atomically(location.path, expected, sample=location.raw_text)
-    _verify_written_document(location.path, expected, backup=backup)
+    new_text = _rename_claude_env_keys(
+        location.raw_text,
+        container=location.container,
+        name=name,
+        renames=renames,
+    )
+
+    write_target = _resolve_config_target(location.path)
+    backup = _write_json_atomically(write_target, new_text, original_text=location.raw_text, expected=expected)
+    _verify_written_document(write_target, expected, backup=backup, written_text=new_text)
     return (
         f'repaired identity env for {name!r} in {location.path} ({location.scope} scope); '
         f'previous file kept at {backup}'
