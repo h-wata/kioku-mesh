@@ -205,29 +205,41 @@ def test_search_memory_alias_resolves_to_canonical_project(
     assert obs.observation_id in text
 
 
-def test_search_memory_canonical_project_unaffected_by_alias(
+def test_search_memory_alias_query_returns_both_eras(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Searching with the canonical name behaves exactly as before alias resolution existed."""
+    """The legacy name is an equivalent label, not a redirect.
+
+    Querying ``mesh-mem`` must return rows stored under *both* labels; a plain
+    legacy->canonical rewrite would silently drop the legacy-stored rows.
+    """
     backend = _mk_local_backend(monkeypatch)
-    obs = _mk_obs_full('canonical-only content', project='kioku-mesh')
-    backend.put_observation(obs)
+    legacy = _mk_obs_full('both eras content legacy', project='mesh-mem')
+    canonical = _mk_obs_full('both eras content canonical', project='kioku-mesh')
+    for obs in (legacy, canonical):
+        backend.put_observation(obs)
 
     async def _go() -> str:
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'search_memory',
-                {'query': 'canonical-only', 'project': 'kioku-mesh', 'limit': 20},
+                {'query': 'both eras', 'project': 'mesh-mem', 'limit': 20},
             )
             assert not result.is_error
             return result.data
 
     text = _run(_go())
-    assert obs.observation_id in text
+    assert text.count(legacy.observation_id) == 1
+    assert text.count(canonical.observation_id) == 1
 
 
 def test_save_observation_with_legacy_project_is_not_rewritten(single_zenohd: Any) -> None:  # noqa: ARG001
-    """Alias resolution is read-side only: save_observation still persists the literal project value given."""
+    """Write side keeps the literal project value, and the read side still finds it.
+
+    Round trip for the Issue #278 contract: nothing is rewritten on save
+    (ADR-0028, append-only), so a row written under the legacy label has to be
+    reachable through the canonical label at search time instead.
+    """
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -250,25 +262,99 @@ def test_save_observation_with_legacy_project_is_not_rewritten(single_zenohd: An
     assert stored is not None
     assert stored.project == 'mesh-mem'
 
+    async def _search() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'legacy project write path', 'project': 'kioku-mesh', 'limit': 20},
+            )
+            assert not result.is_error
+            return result.data
+
+    assert obs_id in _run(_search())
+
 
 def test_search_memory_unknown_project_still_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A project name with neither an alias entry nor stored data still returns nothing."""
+    """An unknown project stays empty while an aliased one still expands.
+
+    The empty half alone is insensitive to alias resolution, so it is paired
+    with the positive half here: expansion must apply to alias members only.
+    """
     backend = _mk_local_backend(monkeypatch)
-    obs = _mk_obs_full('unrelated content', project='kioku-mesh')
+    obs = _mk_obs_full('unrelated content', project='mesh-mem')
+    backend.put_observation(obs)
+
+    async def _go() -> tuple[str, str]:
+        async with Client(mcp) as client:
+            unknown = await client.call_tool(
+                'search_memory',
+                {'project': 'totally-unknown-project'},
+            )
+            aliased = await client.call_tool(
+                'search_memory',
+                {'project': 'kioku-mesh', 'limit': 20},
+            )
+            return unknown.data, aliased.data
+
+    unknown_text, aliased_text = _run(_go())
+    assert 'No matching memories' in unknown_text
+    assert obs.observation_id in aliased_text
+
+
+def test_search_memory_canonical_project_finds_legacy_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce the Issue #278 symptom itself.
+
+    History saved under the legacy name must be reachable when searching by
+    the canonical name.
+
+    Before the fix, ``project='kioku-mesh'`` matched only rows literally stored
+    as ``kioku-mesh`` and the ``mesh-mem`` era was invisible.
+    """
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('legacy era content', project='mesh-mem')
     backend.put_observation(obs)
 
     async def _go() -> str:
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'search_memory',
-                {'project': 'totally-unknown-project'},
+                {'query': 'legacy era', 'project': 'kioku-mesh', 'limit': 20},
             )
+            assert not result.is_error
             return result.data
 
     text = _run(_go())
-    assert 'No matching memories' in text
+    assert obs.observation_id in text
+
+
+def test_search_memory_canonical_project_merges_legacy_and_canonical_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canonical search returns both eras exactly once each (dedupe contract)."""
+    backend = _mk_local_backend(monkeypatch)
+    legacy = _mk_obs_full('merged era content legacy', project='mesh-mem')
+    canonical = _mk_obs_full('merged era content canonical', project='kioku-mesh')
+    other = _mk_obs_full('merged era content elsewhere', project='some-other-project')
+    for obs in (legacy, canonical, other):
+        backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'merged era', 'project': 'kioku-mesh', 'limit': 20},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert text.count(legacy.observation_id) == 1
+    assert text.count(canonical.observation_id) == 1
+    assert other.observation_id not in text
 
 
 def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG001
@@ -1425,18 +1511,67 @@ def test_recall_context_alias_resolves_to_canonical_project(
 def test_recall_context_unknown_project_still_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """recall_context with an unknown project name (no alias, no stored data) returns nothing."""
+    """recall_context stays empty for an unknown project but still expands aliases.
+
+    Same pairing as the search_memory case: the negative half on its own does
+    not exercise alias resolution at all.
+    """
     backend = _mk_local_backend(monkeypatch)
-    obs = _mk_obs_full('unrelated recall content', project='kioku-mesh')
+    obs = _mk_obs_full('unrelated recall content', project='mesh-mem')
+    backend.put_observation(obs)
+
+    async def _go() -> tuple[str, str]:
+        async with Client(mcp) as client:
+            unknown = await client.call_tool('recall_context', {'project': 'totally-unknown-project'})
+            aliased = await client.call_tool('recall_context', {'project': 'kioku-mesh'})
+            return unknown.data, aliased.data
+
+    unknown_text, aliased_text = _run(_go())
+    assert obs.observation_id not in unknown_text
+    assert obs.observation_id in aliased_text
+
+
+def test_recall_context_canonical_project_finds_legacy_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #278 symptom on the recall path: canonical project must surface legacy-era rows."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('recall legacy era content', project='mesh-mem')
     backend.put_observation(obs)
 
     async def _go() -> str:
         async with Client(mcp) as client:
-            result = await client.call_tool('recall_context', {'project': 'totally-unknown-project'})
+            result = await client.call_tool('recall_context', {'project': 'kioku-mesh'})
+            assert not result.is_error
             return result.data
 
     text = _run(_go())
-    assert obs.observation_id not in text
+    assert obs.observation_id in text
+    # Observability: the filters line names what the project filter expanded to.
+    assert "project='kioku-mesh' (also matching 'mesh-mem')" in text
+
+
+def test_recall_context_canonical_project_merges_legacy_and_canonical_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recall_context returns both eras exactly once each when they coexist."""
+    backend = _mk_local_backend(monkeypatch)
+    legacy = _mk_obs_full('recall merged legacy', project='mesh-mem')
+    canonical = _mk_obs_full('recall merged canonical', project='kioku-mesh')
+    other = _mk_obs_full('recall merged elsewhere', project='some-other-project')
+    for obs in (legacy, canonical, other):
+        backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'kioku-mesh'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert text.count(legacy.observation_id) == 1
+    assert text.count(canonical.observation_id) == 1
+    assert other.observation_id not in text
 
 
 # Case 4: source_files exact-match filter

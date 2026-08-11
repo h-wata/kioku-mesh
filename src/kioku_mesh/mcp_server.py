@@ -29,7 +29,7 @@ from .config import get_team_id
 from .config import get_user_id
 from .config import resolve_write_visibility
 from .core.identity import state_dir
-from .core.project_alias import resolve_project_alias
+from .core.project_alias import expand_project_aliases
 from .core.transport import get_session as _get_zenoh_session
 from .identity import get_pc_id
 from .identity import get_session_id
@@ -463,13 +463,18 @@ def search_memory(
         _validate_search_mode(search_mode)
     except ValueError as exc:
         return str(exc)
+    # Issue #278: expand the project filter exactly once, here, and rebind the
+    # parameter so every query issued below — including ones added later, e.g.
+    # a retry with a different search_mode — inherits the expanded filter
+    # instead of re-deriving it per call site (PR #288 review B3).
+    project = expand_project_aliases(project)  # type: ignore[assignment]
     results = get_backend().search_observations(
         query=query,
         agent_family=agent_family,
         client_id=client_id,
         pc_id=pc_id,
         session_id=session_id,
-        project=resolve_project_alias(project),
+        project=project,
         since_iso=since_iso,
         limit=limit,
         include_superseded=include_superseded,
@@ -666,9 +671,13 @@ def recall_context(
     if idx is None:
         return 'recall_context requires the local index; run without KIOKU_MESH_DISABLE_INDEX=1 or use search_memory.'
     limit = _clamp_recall_limit(limit)
+    # Issue #278: same single expansion point as ``search_memory``. The raw
+    # input is kept for the filters summary below so the caller can see both
+    # what they asked for and what it matched.
+    project_filter = expand_project_aliases(project)
     hits_obs = idx.search(
         query=query,
-        project=resolve_project_alias(project),
+        project=project_filter,
         since_iso=since_iso,
         limit=limit,
         search_mode=search_mode,
@@ -685,7 +694,9 @@ def recall_context(
         hits.append({'obs': obs, 'state': state})
     filter_parts = []
     if project:
-        filter_parts.append(f'project={project!r}')
+        also_matched = [value for value in project_filter if value != project]
+        alias_note = f' (also matching {", ".join(repr(v) for v in also_matched)})' if also_matched else ''
+        filter_parts.append(f'project={project!r}{alias_note}')
     if memory_types_norm:
         filter_parts.append(f'memory_types={memory_types_norm}')
     if source_files_norm:
