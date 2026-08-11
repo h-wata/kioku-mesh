@@ -37,6 +37,10 @@ from .memory.metadata import MetadataRequiredError
 from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
+from .messaging.limits import check_body_size
+from .messaging.limits import check_envelope_size
+from .messaging.limits import MessageBodyTooLarge
+from .messaging.limits import withheld_body_notice
 from .messaging.local_index import ack_message as _ack_message_internal
 from .messaging.local_index import INGRESS_EXPIRED_ON_ARRIVAL
 from .messaging.local_index import IngressResult
@@ -1120,6 +1124,9 @@ def check_messages(
     # Failures that have no message behind them (an unparseable payload, a
     # selector that raised), reported alongside the per-message diagnostics.
     ingress_errors: list[dict[str, object]] = []
+    # msg_id -> reason, for messages whose body must not be returned inline
+    # (Issue #202 receive-side re-validation).
+    withheld: dict[str, str] = {}
 
     try:
         session = _get_zenoh_session()
@@ -1146,7 +1153,8 @@ def check_messages(
                         continue
                     msg_key = str(reply.ok.key_expr)
                     try:
-                        json_str = reply.ok.payload.to_bytes().decode('utf-8')
+                        raw_bytes = reply.ok.payload.to_bytes()
+                        json_str = raw_bytes.decode('utf-8')
                         msg = Message.from_json(json_str)
                     except Exception as e:  # noqa: BLE001
                         # An arrival that will not parse is still an arrival: it
@@ -1155,6 +1163,15 @@ def check_messages(
                         log.warning('check_messages: undecodable arrival at %s: %s', msg_key, e)
                         ingress_errors.append(_ingress_error_diagnostic('arrival_undecodable', msg_key, e))
                         continue
+                    # Re-validate the envelope after deserialization: the
+                    # sender-side cap only binds senders running this version,
+                    # so anything an older peer or an external publisher wrote
+                    # straight into Zenoh arrives unchecked (Issue #202).
+                    try:
+                        check_envelope_size(raw_bytes, msg_id=msg.msg_id)
+                    except MessageBodyTooLarge as e:
+                        withheld[msg.msg_id] = str(e)
+                        log.warning('check_messages: withholding over-limit message: %s', e)
                     # Dedup by msg_id across multiple selectors before any action.
                     if msg.msg_id in seen_ids:
                         continue
@@ -1255,12 +1272,30 @@ def check_messages(
     for msg in page:
         sender = msg.sender if isinstance(msg.sender, dict) else {}
         recipient = msg.recipient if isinstance(msg.recipient, dict) else {}
+        # The legacy ``payload`` fallback is a body for every purpose that
+        # matters here — it is what gets returned inline to the LLM — so it goes
+        # through the same cap. Without this, body='' + a 100 KiB payload walks
+        # straight past the 64 KiB limit (Issue #202).
         body = msg.body if msg.body else msg.payload
+        subject = msg._extras.get('subject', '')  # noqa: SLF001
+        reason = withheld.get(msg.msg_id)
+        if reason is None:
+            try:
+                check_body_size(body, msg_id=msg.msg_id)
+            except MessageBodyTooLarge as e:
+                reason = str(e)
+                log.warning('check_messages: withholding over-limit body: %s', e)
+        if reason is not None:
+            body = withheld_body_notice(reason)
+            # An over-limit envelope can carry its bulk in ``subject`` instead,
+            # so drop it too rather than leaving an alternate inline channel.
+            subject = ''
         items.append(
             {
                 'msg_id': msg.msg_id,
-                'subject': msg._extras.get('subject', ''),  # noqa: SLF001
+                'subject': subject,
                 'body': body,
+                'body_rejected': reason is not None,
                 'created_at': msg.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.created_at else '',
                 'expires_at': msg.expires_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.expires_at else None,
                 'scope': msg.scope,

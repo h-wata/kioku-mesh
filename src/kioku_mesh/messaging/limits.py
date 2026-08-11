@@ -19,6 +19,13 @@ Over-limit behaviour is **reject**, never truncate or split:
   - splitting needs reassembly plus ordering, and ADR-0022 MVP explicitly gives
     no ordering guarantee (``sender_seq`` is best-effort only)
 
+The limits are enforced on **both** ends. Sender-side checks only bind senders
+running this version, so data already in Zenoh storage, older peers and external
+publishers would otherwise walk straight past the cap; the receive path
+(``check_messages`` and the push subscriber) re-validates after deserialization.
+See :func:`withheld_body_notice` for what the receive path does with an
+over-limit message.
+
 All sizes are **UTF-8 byte** counts, not character counts.
 
 messaging モジュールは memory モジュールを直接 import しない (ADR-0023).
@@ -111,6 +118,21 @@ def check_body_size(
     if size > limit:
         raise MessageBodyTooLarge(size=size, limit=limit, channel=channel, msg_id=msg_id)
     return size
+
+
+def withheld_body_notice(reason: str) -> str:
+    """Return the placeholder that replaces an over-limit body on the receive path.
+
+    Receive-side over-limit handling is **withhold-and-say-so**, not drop and not
+    truncate:
+      - dropping the message outright would remove the recipient's only signal
+        that anything arrived, i.e. content vanishes with no warning
+      - truncating hands the agent a partial instruction that reads as complete
+        (the same reason the sender path rejects rather than cuts)
+    So the message keeps its identity fields and its body is replaced with this
+    notice, which states the actual size, the limit, and what to do next.
+    """
+    return f'[kioku-mesh: message body withheld — {reason}]'
 
 
 def check_envelope_size(

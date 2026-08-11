@@ -10,6 +10,7 @@ Covers, for both the MCP path (64 KiB) and the tmux path (8 KiB):
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -248,3 +249,202 @@ class TestTmuxAdapterBoundaries:
         assert str(MAX_TMUX_BODY_BYTES) in text  # the limit
         assert str(MAX_TMUX_BODY_BYTES + 1) in text  # the actual size
         assert 'delivery_adapters' in text  # what to do instead
+
+
+# ---------------------------------------------------------------------------
+# Receive-side re-validation (Codex cross-review A1 / C1)
+#
+# The sender-side checks above only bind senders running this version. Data
+# already in Zenoh storage, older peers, and external publishers all reach the
+# recipient without ever passing through ``put_message`` / ``send_message``.
+# The cap exists to protect the *recipient's* context, so it has to hold on the
+# receive path too.
+# ---------------------------------------------------------------------------
+
+_OVERSIZE = MAX_BODY_BYTES + 1
+
+
+def _oversized_payload() -> dict:
+    """Build a legacy ``payload`` whose JSON form is ~100 KiB (over the body cap)."""
+    return {'text': 'x' * 100_000}
+
+
+def _inbox_reply(msg: Message, key: str = 'msg/mesh/inbox/session/recv-sess/m1') -> MagicMock:
+    reply = MagicMock()
+    reply.ok = MagicMock()
+    reply.ok.key_expr = key
+    reply.ok.payload.to_bytes.return_value = msg.to_json().encode('utf-8')
+    return reply
+
+
+def _check_messages(msg: Message, tmp_path: Path, session_id: str = 'recv-sess') -> dict:
+    """Run the real ``check_messages`` MCP tool against a mock Zenoh reply."""
+    import asyncio
+
+    pytest.importorskip('fastmcp')
+    from fastmcp import Client
+
+    import kioku_mesh.mcp_server as mcp_module
+
+    mcp_module._messaging_index = None
+    mock_session = MagicMock()
+    mock_session.get.return_value = [_inbox_reply(msg)]
+
+    async def _go() -> dict:
+        async with Client(mcp_module.mcp) as client:
+            result = await client.call_tool('check_messages', {})
+            return json.loads(result.data)
+
+    with (
+        patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+        patch('kioku_mesh.mcp_server.get_session_id', return_value=session_id),
+        patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+    ):
+        return asyncio.run(_go())
+
+
+class TestCheckMessagesReceiveSideBodyCap:
+    """A1/C1: check_messages must not hand an over-cap body to the LLM."""
+
+    def _recipient(self, session_id: str = 'recv-sess') -> dict:
+        return {'kind': 'session', 'session_id': session_id}
+
+    def test_within_limit_body_is_returned_intact(self, tmp_path: Path) -> None:
+        """Positive control: a normal body is untouched (guards over-rejection)."""
+        msg = _msg(body='hello there', recipient=self._recipient())
+        out = _check_messages(msg, tmp_path)
+        assert out['count'] == 1
+        assert out['messages'][0]['body'] == 'hello there'
+        assert out['messages'][0]['body_rejected'] is False
+
+    def test_empty_body_with_oversized_legacy_payload_is_withheld(self, tmp_path: Path) -> None:
+        """A1: body='' + ~100 KiB legacy payload must not be returned inline."""
+        msg = _msg(body='', payload=_oversized_payload(), recipient=self._recipient())
+        out = _check_messages(msg, tmp_path)
+        assert out['count'] == 1
+        item = out['messages'][0]
+        assert item['body_rejected'] is True
+        assert 'x' * 1000 not in json.dumps(item)  # payload not smuggled through
+        assert len(json.dumps(item['body']).encode('utf-8')) <= MAX_BODY_BYTES
+        assert 'withheld' in item['body']
+
+    def test_empty_body_with_small_legacy_payload_still_falls_back(self, tmp_path: Path) -> None:
+        """The legacy payload fallback keeps working for in-limit payloads."""
+        msg = _msg(body='', payload={'text': 'legacy hello'}, recipient=self._recipient())
+        out = _check_messages(msg, tmp_path)
+        assert out['messages'][0]['body'] == {'text': 'legacy hello'}
+        assert out['messages'][0]['body_rejected'] is False
+
+    def test_oversized_body_from_zenoh_is_withheld(self, tmp_path: Path) -> None:
+        """C1: a 65,537-byte body put directly into Zenoh is re-validated on read."""
+        msg = _msg(body='x' * _OVERSIZE, recipient=self._recipient())
+        out = _check_messages(msg, tmp_path)
+        item = out['messages'][0]
+        assert item['body_rejected'] is True
+        assert 'x' * 1000 not in item['body']
+        assert str(_OVERSIZE) in item['body']  # actual size stated
+        assert str(MAX_BODY_BYTES) in item['body']  # limit stated
+
+    def test_withheld_message_is_still_listed_with_its_identity(self, tmp_path: Path) -> None:
+        """Withholding must not silently swallow the message (no unwarned loss)."""
+        msg = _msg(body='x' * _OVERSIZE, recipient=self._recipient(), msg_id='over-1')
+        out = _check_messages(msg, tmp_path)
+        assert out['count'] == 1
+        assert out['messages'][0]['msg_id'] == 'over-1'
+
+    def test_oversized_envelope_from_zenoh_is_withheld(self, tmp_path: Path) -> None:
+        """C1: an over-cap serialized envelope is rejected even when body is small."""
+        msg = _msg(
+            body='small',
+            payload={'text': 'y' * (MAX_ENVELOPE_BYTES + 10)},
+            recipient=self._recipient(),
+        )
+        out = _check_messages(msg, tmp_path)
+        item = out['messages'][0]
+        assert item['body_rejected'] is True
+        assert 'y' * 1000 not in json.dumps(item)
+
+    def test_oversized_subject_is_not_returned(self, tmp_path: Path) -> None:
+        """An over-cap envelope must not smuggle content through ``subject`` either."""
+        msg = _msg(body='small', recipient=self._recipient())
+        msg._extras['subject'] = 'z' * (MAX_ENVELOPE_BYTES + 10)
+        raw = json.loads(msg.to_json())
+        raw['subject'] = msg._extras['subject']
+        reply = MagicMock()
+        reply.ok = MagicMock()
+        reply.ok.key_expr = 'msg/mesh/inbox/session/recv-sess/m1'
+        reply.ok.payload.to_bytes.return_value = json.dumps(raw, ensure_ascii=False).encode('utf-8')
+
+        import asyncio
+
+        pytest.importorskip('fastmcp')
+        from fastmcp import Client
+
+        import kioku_mesh.mcp_server as mcp_module
+
+        mcp_module._messaging_index = None
+        mock_session = MagicMock()
+        mock_session.get.return_value = [reply]
+
+        async def _go() -> dict:
+            async with Client(mcp_module.mcp) as client:
+                result = await client.call_tool('check_messages', {})
+                return json.loads(result.data)
+
+        with (
+            patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+            patch('kioku_mesh.mcp_server.get_session_id', return_value='recv-sess'),
+            patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+        ):
+            out = asyncio.run(_go())
+
+        item = out['messages'][0]
+        assert item['body_rejected'] is True
+        assert 'z' * 1000 not in json.dumps(item)
+
+
+class TestSubscriberReceiveSideBodyCap:
+    """C1: the push-delivery subscriber must not spool an over-cap message."""
+
+    def _bridge_and_spool(self) -> tuple[ZenohBridge, MessageSpool, MagicMock]:
+        session = MagicMock()
+        spool = MessageSpool()
+        return ZenohBridge(session, spool), spool, session
+
+    def _deliver(self, bridge: ZenohBridge, session: MagicMock, msg: Message) -> None:
+        """Invoke the subscriber callback declared by ``setup_subscriber``."""
+        bridge.setup_subscriber('mesh')
+        callback = session.declare_subscriber.call_args_list[0].args[1]
+        sample = MagicMock()
+        sample.payload.to_bytes.return_value = msg.to_json().encode('utf-8')
+        callback(sample)
+
+    def test_in_limit_message_is_spooled(self) -> None:
+        """Positive control: a normal message still reaches the spool."""
+        bridge, spool, session = self._bridge_and_spool()
+        self._deliver(bridge, session, _msg(body='hi', msg_id='ok-1'))
+        assert [m.msg_id for m in spool.list_active()] == ['ok-1']
+
+    def test_oversized_body_is_dropped_with_warning(self) -> None:
+        bridge, spool, session = self._bridge_and_spool()
+        with patch('kioku_mesh.messaging.zenoh_bridge.log.warning') as warn:
+            self._deliver(bridge, session, _msg(body='x' * _OVERSIZE, msg_id='big-1'))
+        assert spool.list_active() == []
+        warn.assert_called_once()
+        text = warn.call_args.args[0] % warn.call_args.args[1:]
+        assert str(_OVERSIZE) in text
+        assert str(MAX_BODY_BYTES) in text
+
+    def test_oversized_legacy_payload_is_dropped(self) -> None:
+        """A1 on the subscriber path: empty body + huge payload is also over-cap."""
+        bridge, spool, session = self._bridge_and_spool()
+        with patch('kioku_mesh.messaging.zenoh_bridge.log.warning'):
+            self._deliver(bridge, session, _msg(body='', payload=_oversized_payload(), msg_id='big-2'))
+        assert spool.list_active() == []
+
+    def test_oversized_envelope_is_dropped(self) -> None:
+        bridge, spool, session = self._bridge_and_spool()
+        msg = _msg(body='small', payload={'text': 'y' * (MAX_ENVELOPE_BYTES + 10)}, msg_id='big-3')
+        with patch('kioku_mesh.messaging.zenoh_bridge.log.warning'):
+            self._deliver(bridge, session, msg)
+        assert spool.list_active() == []

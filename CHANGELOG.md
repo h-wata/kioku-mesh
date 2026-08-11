@@ -47,7 +47,15 @@ ADR-0030.
   the alternative (shorten the body, or `save_observation` plus a short pointer).
   Zenoh itself was measured carrying 64 MiB payloads intact, so these are
   recipient-context limits, not transport limits; the measurements are recorded in
-  `docs/design/0185-messaging-mvp-design.md`.
+  `docs/design/0185-messaging-mvp-design.md`. The limits are enforced on both
+  ends: `check_messages` and the push subscriber re-validate `body` (including
+  the legacy `payload` fallback) and the serialized envelope after
+  deserialization, so a message written straight into Zenoh by an older peer or
+  an external publisher cannot bypass the cap. `check_messages` replaces an
+  over-limit body with an explicit `[kioku-mesh: message body withheld — …]`
+  notice plus a new `body_rejected` field rather than dropping the message
+  silently or truncating it; the push subscriber drops it with a WARNING, since
+  `check_messages` still surfaces the same message with its notice.
 
 ### Fixed
 

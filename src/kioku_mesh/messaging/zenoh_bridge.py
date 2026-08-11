@@ -30,6 +30,7 @@ from .limits import check_body_size
 from .limits import check_envelope_size
 from .limits import MAX_BODY_BYTES
 from .limits import MAX_ENVELOPE_BYTES
+from .limits import MessageBodyTooLarge
 from .models import Message
 from .spool import MessageSpool
 
@@ -132,12 +133,35 @@ class ZenohBridge:
 
         def _on_sample(sample: Any) -> None:
             try:
-                json_str = sample.payload.to_bytes().decode('utf-8')
+                raw_bytes = sample.payload.to_bytes()
+                json_str = raw_bytes.decode('utf-8')
                 msg = Message.from_json(json_str)
+            except Exception as e:  # noqa: BLE001
+                log.warning('subscriber failed to parse incoming message: %s', e)
+                return
+            # Re-validate after deserialization: put_message only binds senders
+            # running this version, so an older peer or an external publisher
+            # can place an over-limit message on the inbox key directly.
+            # Dropping (rather than withholding, as check_messages does) is the
+            # right call here because this is the best-effort push path — the
+            # message stays in Zenoh storage and check_messages will surface it
+            # with an explicit "withheld" notice, so nothing goes unreported.
+            try:
+                check_body_size(
+                    msg.body if msg.body else msg.payload,
+                    limit=BODY_SIZE_LIMIT,
+                    channel='mcp',
+                    msg_id=msg.msg_id,
+                )
+                check_envelope_size(raw_bytes, limit=ENVELOPE_SIZE_LIMIT, msg_id=msg.msg_id)
+            except MessageBodyTooLarge as e:
+                log.warning('subscriber dropped over-limit incoming message: %s', e)
+                return
+            try:
                 spool.put(msg)
                 log.debug('subscriber received msg_id=%r', msg.msg_id)
             except Exception as e:  # noqa: BLE001
-                log.warning('subscriber failed to parse incoming message: %s', e)
+                log.warning('subscriber failed to spool incoming message: %s', e)
 
         selectors = [
             f'msg/{scope}/inbox/session/{session_id}/**',
