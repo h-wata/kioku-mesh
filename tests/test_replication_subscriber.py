@@ -7,9 +7,10 @@ is a pure unit test and does not need a router.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import time
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 import zenoh
@@ -19,7 +20,78 @@ from kioku_mesh import store
 from kioku_mesh.models import Observation
 from kioku_mesh.models import Tombstone
 
-_SETTLE = 0.4  # seconds to wait for async subscriber delivery
+_T = TypeVar('_T')
+
+# Upper bound for the condition waits below, not an expected duration: every
+# wait returns as soon as its condition holds (measured steady-state delivery
+# is well under 10ms). These replace a fixed 0.4s sleep that stood in for the
+# conditions and made the file flaky — see _handshake for why waiting longer
+# was never the fix.
+_WAIT_TIMEOUT = 10.0
+_POLL_INTERVAL = 0.01
+
+# Repeat count for the one-shot CLI test below: the shape it exercises is a
+# race, so a single pass would only sample it once. Ten open -> put -> close
+# cycles cost well under a second in total on a live path.
+_ONE_SHOT_CYCLES = 10
+
+
+def _wait_until(predicate: Callable[[], _T], description: str, *, timeout: float = _WAIT_TIMEOUT) -> _T:
+    """Poll ``predicate`` until it returns a truthy value, or fail with ``description``."""
+    deadline = time.monotonic() + timeout
+    while True:
+        result = predicate()
+        if result:
+            return result
+        if time.monotonic() >= deadline:
+            raise AssertionError(f'timed out after {timeout:.1f}s waiting for {description}')
+        time.sleep(_POLL_INTERVAL)
+
+
+def _indexed_ids(idx: Any, project: str, **kwargs: Any) -> set[str]:
+    return {r.observation_id for r in idx.search(project=project, **kwargs)}
+
+
+def _wait_for_indexed(idx: Any, project: str, observation_id: str, what: str) -> None:
+    _wait_until(lambda: observation_id in _indexed_ids(idx, project), what)
+
+
+def _wait_for_gone(idx: Any, project: str, what: str, **kwargs: Any) -> None:
+    _wait_until(lambda: idx.search(project=project, **kwargs) == [], what)
+
+
+def _barrier(remote: zenoh.Session, idx: Any, label: str) -> None:
+    """Publish a sentinel obs on ``remote`` and wait until the subscriber indexes it.
+
+    The negative tests assert that something did *not* reach the index, which
+    no amount of waiting can establish on its own. Publishing a sentinel after
+    the samples under test and waiting for that sentinel gives a concrete
+    point in time by which the earlier samples have been delivered and handled:
+    they travel the same session -> router -> subscriber path, in order, ahead
+    of the sentinel. That is strictly stronger than the fixed sleep it replaces.
+
+    This relies on Zenoh preserving publish order across *different* key
+    expressions — the sentinel lives under its own ``_barrier-{label}``
+    project, distinct from whatever key(s) the samples under test use — as
+    long as both are put on the same session with the same priority and
+    congestion-control settings. Ordering here is a property of the
+    session's transport link, not of any single key expression, so it holds
+    for every put in this file today; it would silently stop holding if a
+    future put on this session used a different priority.
+    """
+    sentinel = _mk_obs(f'barrier {label}', project=f'_barrier-{label}')
+    remote.put(sentinel.key_expr, sentinel.to_json())
+    _wait_for_indexed(idx, f'_barrier-{label}', sentinel.observation_id, f'barrier sample for {label}')
+
+
+def _storage_has(key: str) -> bool:
+    """Whether Zenoh storage currently answers a get on ``key``.
+
+    The rebuild tests scan storage rather than relying on the subscriber, so
+    they have to wait for the *storage* to hold the sample, which is a
+    different condition from "the local index saw it".
+    """
+    return any(r.ok for r in store.get_session().get(key, timeout=2.0))
 
 
 def _mk_obs(content: str, *, project: str = 'sub-test') -> Observation:
@@ -47,12 +119,146 @@ def _mk_legacy_obs(content: str, *, project: str = 'sub-test') -> Observation:
     )
 
 
-def _remote_session(endpoint: str) -> zenoh.Session:
+def _handshake(sess: zenoh.Session, *, via: str) -> None:
+    """Publish a canary on ``sess`` until it is observed, proving the path is live.
+
+    ``zenoh.open`` returns before the new session's declarations have been
+    exchanged with the router, and a sample published in that window is
+    routed against a routing table that does not know every destination yet.
+    The sample itself is not lost — the router's storage still holds it, and a
+    query or a later index rebuild reads it back. What is lost is the *live
+    delivery to subscribers*: the notification is never re-sent, so a
+    subscriber that was not routed to at publish time never sees that sample.
+    Measured under the conditions that first triggered this fix (this
+    author's machine, single-host loopback zenohd, contended load — see PR
+    #298): the local index still had not seen such a sample 10s later while
+    the same key answered a storage query, so no amount of extra waiting
+    recovered it there. Whether that symptom reproduces is machine-dependent:
+    an independent cross-review on a quieter, higher-core-count host
+    (nproc=16) could not reproduce it at all after disabling this handshake
+    (30 runs, 0 failures) — the drop appears to depend on how contended
+    declaration propagation is, which this suite has no way to control or
+    detect from inside a single run.
+
+    Re-publishing the canary until it is observed is what makes the tests
+    deterministic: nothing under test is published until the session ->
+    router -> (subscriber | storage) path has actually delivered something.
+    Re-publishing is side-effect free — the subscriber upserts by
+    observation_id and the storage overwrites by key — and once the path is
+    established it stays established for the life of the session. Kept
+    unconditionally rather than only on hosts known to need it: the cost is
+    negligible (idempotent re-publish, single-digit milliseconds on a live
+    path) against the downside of a suite that goes flaky again on whichever
+    machine happens to be under load at the time.
+
+    ``via='index'`` proves delivery all the way to the local index subscriber;
+    ``via='storage'`` proves only that the router's storage took the sample,
+    for the one test that deliberately runs with its subscriber stopped.
+    """
+    canary = _mk_obs('handshake canary', project='_handshake')
+    deadline = time.monotonic() + _WAIT_TIMEOUT
+    if via == 'index':
+        idx = store.get_index()
+
+        def arrived() -> bool:
+            return canary.observation_id in _indexed_ids(idx, '_handshake')
+    else:
+
+        def arrived() -> bool:
+            return _storage_has(canary.key_expr)
+
+    while True:
+        sess.put(canary.key_expr, canary.to_json())
+        # Give this attempt a short window before re-publishing: on a live
+        # path the canary lands in single-digit milliseconds.
+        attempt_end = min(time.monotonic() + 0.1, deadline)
+        while time.monotonic() < attempt_end:
+            if arrived():
+                return
+            time.sleep(_POLL_INTERVAL)
+        if arrived():
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f'timed out after {_WAIT_TIMEOUT:.1f}s establishing the remote -> {via} path')
+
+
+def _remote_session(endpoint: str, *, handshake_via: str = 'index') -> zenoh.Session:
     cfg = zenoh.Config()
     cfg.insert_json5('mode', '"client"')
     cfg.insert_json5('connect/endpoints', f'["{endpoint}"]')
     cfg.insert_json5('scouting/multicast/enabled', 'false')
-    return zenoh.open(cfg)
+    sess = zenoh.open(cfg)
+    _handshake(sess, via=handshake_via)
+    return sess
+
+
+def _warm_peer_subscriber(endpoint: str) -> tuple[zenoh.Session, Any, set[str]]:
+    """Declare an independent ``mem/**`` subscriber and prove it is live.
+
+    Stands in for another peer's replication subscriber: it lives on its own
+    session, so it survives the store-session resets the one-shot CLI test
+    performs. Returns the session, the subscriber handle and the mutable set
+    of key expressions it has observed so far.
+    """
+    cfg = zenoh.Config()
+    cfg.insert_json5('mode', '"client"')
+    cfg.insert_json5('connect/endpoints', f'["{endpoint}"]')
+    cfg.insert_json5('scouting/multicast/enabled', 'false')
+    peer = zenoh.open(cfg)
+    seen: set[str] = set()
+    sub = peer.declare_subscriber('mem/**', lambda sample: seen.add(str(sample.key_expr)))
+
+    # The peer's own declaration has to reach the router before it can be
+    # routed to, so publish a canary from an already-established session until
+    # the peer observes it — same reasoning as _handshake, one hop further.
+    warm = _remote_session(endpoint, handshake_via='storage')
+    try:
+        canary = _mk_obs('peer canary', project='_peer-canary')
+        deadline = time.monotonic() + _WAIT_TIMEOUT
+        while canary.key_expr not in seen:
+            warm.put(canary.key_expr, canary.to_json())
+            attempt_end = min(time.monotonic() + 0.1, deadline)
+            while canary.key_expr not in seen and time.monotonic() < attempt_end:
+                time.sleep(_POLL_INTERVAL)
+            if canary.key_expr not in seen and time.monotonic() >= deadline:
+                raise AssertionError(f'timed out after {_WAIT_TIMEOUT:.1f}s establishing the peer subscriber')
+    finally:
+        warm.close()
+    return peer, sub, seen
+
+
+def test_one_shot_cli_put_reaches_peer_subscriber_and_storage(single_zenohd: Any) -> None:
+    """The one-shot CLI shape (lazy-open -> put -> close) still reaches a peer.
+
+    ``kioku-mesh save`` is a one-shot process: ``store.put_observation`` opens
+    the Zenoh session on demand and ``main``'s ``finally`` closes it right
+    after, so production does publish from a just-opened session — the same
+    shape the tests in this file used to hit. This pins what that path
+    guarantees for an *already established* peer: the sample reaches both the
+    peer's live subscriber and the router's storage. It is the production
+    counterpart of ``_handshake``'s reasoning, which is about a peer whose own
+    declaration has not propagated yet.
+    """
+    peer, sub, seen = _warm_peer_subscriber(single_zenohd.endpoint)
+    try:
+        for i in range(_ONE_SHOT_CYCLES):
+            obs = _mk_obs(f'one-shot cli put {i}', project='sub-oneshot')
+            # A fresh process: no cached session, no cached index.
+            store._reset_index()
+            store._reset_session()
+            store.put_observation(obs)
+            # What __main__.main does in its finally clause.
+            store._reset_index()
+            store._reset_session()
+
+            _wait_until(lambda: obs.key_expr in seen, f'peer subscriber to receive one-shot put {i}')
+            _wait_until(
+                lambda: any(r.ok for r in peer.get(obs.key_expr, timeout=2.0)),
+                f'router storage to hold one-shot put {i}',
+            )
+    finally:
+        sub.undeclare()
+        peer.close()
 
 
 def test_subscriber_picks_up_remote_put_into_index(single_zenohd: Any) -> None:
@@ -64,12 +270,9 @@ def test_subscriber_picks_up_remote_put_into_index(single_zenohd: Any) -> None:
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, obs.to_json())
-        time.sleep(_SETTLE)
+        _wait_for_indexed(idx, 'sub-obs', obs.observation_id, 'subscriber to upsert replicated obs into index')
     finally:
         remote.close()
-
-    ids = {r.observation_id for r in idx.search(project='sub-obs')}
-    assert obs.observation_id in ids, 'subscriber must upsert replicated obs into index'
 
 
 def test_subscriber_preserves_extras_end_to_end(single_zenohd: Any) -> None:
@@ -96,13 +299,16 @@ def test_subscriber_preserves_extras_end_to_end(single_zenohd: Any) -> None:
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, json.dumps(newer))
-        time.sleep(_SETTLE)
+        # Public search API routes through LocalIndex.search -> from_json.
+        hits = _wait_until(
+            lambda: [
+                r for r in store.search_observations(project='sub-extras') if r.observation_id == obs.observation_id
+            ],
+            'subscriber to upsert the newer-schema obs into the index',
+        )
     finally:
         remote.close()
 
-    # Public search API routes through LocalIndex.search -> from_json.
-    hits = [r for r in store.search_observations(project='sub-extras') if r.observation_id == obs.observation_id]
-    assert hits, 'subscriber must upsert the newer-schema obs into the index'
     restored = hits[0]
     assert getattr(restored, '_extras', {}) == extras_expected
     # Known fields are intact alongside the extras.
@@ -134,7 +340,7 @@ def test_rebuild_preserves_extras_from_zenoh_storage(single_zenohd: Any) -> None
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, json.dumps(newer))
-        time.sleep(_SETTLE)
+        _wait_until(lambda: _storage_has(obs.key_expr), 'zenoh storage to hold the newer-schema obs')
     finally:
         remote.close()
 
@@ -159,11 +365,9 @@ def test_subscriber_picks_up_remote_tombstone(single_zenohd: Any) -> None:
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.tombstone_key_expr(), tomb.to_json())
-        time.sleep(_SETTLE)
+        _wait_for_gone(idx, 'sub-tomb', 'subscriber to mark the row deleted')
     finally:
         remote.close()
-
-    assert idx.search(project='sub-tomb') == [], 'subscriber must mark row deleted'
 
 
 def test_subscriber_mirrors_remote_obs_delete_into_index(single_zenohd: Any) -> None:
@@ -181,13 +385,13 @@ def test_subscriber_mirrors_remote_obs_delete_into_index(single_zenohd: Any) -> 
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.delete(obs.key_expr)
-        time.sleep(_SETTLE)
+        _wait_for_gone(
+            idx,
+            'sub-obs-delete',
+            'subscriber to physical-delete the index row after a remote peer deletes the obs key',
+        )
     finally:
         remote.close()
-
-    assert (
-        idx.search(project='sub-obs-delete') == []
-    ), 'subscriber must physical-delete the index row when a remote peer deletes the obs key'
 
 
 def test_subscriber_mirrors_remote_tomb_delete_into_index(single_zenohd: Any) -> None:
@@ -204,13 +408,14 @@ def test_subscriber_mirrors_remote_tomb_delete_into_index(single_zenohd: Any) ->
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.delete(obs.tombstone_key_expr())
-        time.sleep(_SETTLE)
+        _wait_for_gone(
+            idx,
+            'sub-tomb-delete',
+            'subscriber to physical-delete the index row after a remote peer deletes the tomb key',
+            include_deleted=True,
+        )
     finally:
         remote.close()
-
-    assert (
-        idx.search(project='sub-tomb-delete', include_deleted=True) == []
-    ), 'subscriber must physical-delete the index row when a remote peer deletes the tomb key'
 
 
 def test_subscriber_ignores_delete_with_invalid_obs_id(
@@ -241,7 +446,7 @@ def test_subscriber_ignores_delete_with_invalid_obs_id(
         # Trailing segment is not 32 hex → must be ignored.
         remote.delete('mem/obs/a/b/c/sess/not-a-real-obs-id')
         remote.delete('mem/tomb/a/b/c/sess/short-id')
-        time.sleep(_SETTLE)
+        _barrier(remote, idx, 'invalid-delete')
     finally:
         remote.close()
 
@@ -309,13 +514,16 @@ def test_subscriber_demotes_non_json_payload_to_debug(
         # the JSON-parse branch instead of the legacy-gate or non-canonical-key gate.
         remote.put('mem/mesh/obs/x/y/z/sess/' + 'a' * 32, 'not json at all')
         remote.put('mem/mesh/tomb/x/y/z/sess/' + 'b' * 32, '{not json either')
-        time.sleep(_SETTLE)
+        # Wait for *both* callbacks to have handled their sample: that is the
+        # point at which "and no WARNING was emitted" is a real assertion
+        # rather than a statement about how fast the box happened to be.
+        _wait_until(
+            lambda: sum('non-JSON payload' in m for m in debug_msgs) >= 2,
+            'DEBUG logs for the non-JSON payloads from both on_obs and on_tomb',
+        )
     finally:
         remote.close()
 
-    assert any(
-        'non-JSON payload' in m for m in debug_msgs
-    ), 'expected DEBUG log for non-JSON payload (one of on_obs/on_tomb)'
     assert not warning_msgs, f'non-JSON payloads must NOT log WARNING; got {warning_msgs}'
 
 
@@ -323,7 +531,7 @@ def test_startup_rebuild_runs_when_index_empty(single_zenohd: Any) -> None:  # n
     """After index reset, get_index triggers rebuild from zenoh."""
     obs = _mk_obs('pre-existing in zenoh', project='rebuild-start')
     store.put_observation(obs)
-    time.sleep(0.25)
+    _wait_until(lambda: _storage_has(obs.key_expr), 'zenoh storage to hold the pre-existing obs')
 
     # Simulate restart: clear the index (and subscriber).
     store._reset_index()
@@ -344,14 +552,18 @@ def test_rebuild_shadows_remote_delete_missed_while_subscriber_stopped(single_ze
     idx = store.get_index()
     obs = _mk_obs('stale after missed delete', project='rebuild-shadow-after-miss')
     store.put_observation(obs)
-    time.sleep(_SETTLE)
+    _wait_until(lambda: _storage_has(obs.key_expr), 'zenoh storage to hold the obs before the missed delete')
 
     store._reset_subscribers()
     try:
-        remote = _remote_session(single_zenohd.endpoint)
+        # The subscriber is deliberately stopped here, so the handshake can
+        # only prove the path as far as the router's storage.
+        remote = _remote_session(single_zenohd.endpoint, handshake_via='storage')
         try:
             remote.delete(obs.key_expr)
-            time.sleep(_SETTLE)
+            # The rebuild scan reads storage, so the delete has to have landed
+            # there — the subscriber is deliberately stopped and cannot tell us.
+            _wait_until(lambda: not _storage_has(obs.key_expr), 'zenoh storage to drop the deleted obs key')
         finally:
             remote.close()
 
@@ -700,13 +912,10 @@ def test_subscriber_picks_up_tiered_namespace_puts(single_zenohd: Any) -> None:
     try:
         for prefix, obs in cases:
             remote.put(_tiered_obs_key(prefix, obs), obs.to_json())
-        time.sleep(_SETTLE)
+        for prefix, obs in cases:
+            _wait_for_indexed(idx, 'sub-tiered', obs.observation_id, f'obs replicated under {prefix} to be indexed')
     finally:
         remote.close()
-
-    ids = {r.observation_id for r in idx.search(project='sub-tiered')}
-    for prefix, obs in cases:
-        assert obs.observation_id in ids, f'subscriber must index obs replicated under {prefix}'
 
 
 def test_subscriber_mirrors_tiered_namespace_delete(single_zenohd: Any) -> None:
@@ -719,11 +928,9 @@ def test_subscriber_mirrors_tiered_namespace_delete(single_zenohd: Any) -> None:
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.delete(_tiered_obs_key('mem/user/hwata', obs))
-        time.sleep(_SETTLE)
+        _wait_for_gone(idx, 'sub-tiered-del', 'tiered-namespace DELETE to mirror into the index')
     finally:
         remote.close()
-
-    assert idx.search(project='sub-tiered-del') == [], 'tiered-namespace DELETE must mirror into the index'
 
 
 def test_rebuild_indexes_tiered_namespace_rows(single_zenohd: Any) -> None:
@@ -736,11 +943,15 @@ def test_rebuild_indexes_tiered_namespace_rows(single_zenohd: Any) -> None:
     try:
         remote.put(_tiered_obs_key('mem/team/kioku-mesh', obs), obs.to_json())
         remote.put(_tiered_obs_key('mem/team/kioku-mesh', tombed), tombed.to_json())
-        remote.put(
-            _tiered_obs_key('mem/team/kioku-mesh', tombed).replace('/obs/', '/tomb/', 1),
-            tomb.to_json(),
-        )
-        time.sleep(_SETTLE)
+        tomb_key = _tiered_obs_key('mem/team/kioku-mesh', tombed).replace('/obs/', '/tomb/', 1)
+        remote.put(tomb_key, tomb.to_json())
+        # The rebuild scan reads storage, so every sample has to be stored first.
+        for key in (
+            _tiered_obs_key('mem/team/kioku-mesh', obs),
+            _tiered_obs_key('mem/team/kioku-mesh', tombed),
+            tomb_key,
+        ):
+            _wait_until(lambda k=key: _storage_has(k), f'zenoh storage to hold {key}')
     finally:
         remote.close()
 
@@ -766,7 +977,7 @@ def test_subscriber_rejects_payload_under_non_canonical_key(single_zenohd: Any) 
         remote.put('mem/obs/x/y/z/sess/not-a-hex-id', smuggled.to_json())
         # Canonical shape but the key leaf disagrees with the payload id.
         remote.put('mem/obs/f/c/p/s/' + 'c' * 32, mismatched.to_json())
-        time.sleep(_SETTLE)
+        _barrier(remote, idx, 'noncanonical-put')
     finally:
         remote.close()
 
@@ -780,7 +991,9 @@ def test_rebuild_rejects_payload_under_non_canonical_key(single_zenohd: Any) -> 
     try:
         remote.put(f'mem/control/obs/f/c/p/s/{smuggled.observation_id}', smuggled.to_json())
         remote.put('mem/obs/f/c/p/s/' + 'd' * 32, smuggled.to_json())  # id mismatch
-        time.sleep(_SETTLE)
+        # The rebuild scan reads storage, so wait for the samples to be stored.
+        for key in (f'mem/control/obs/f/c/p/s/{smuggled.observation_id}', 'mem/obs/f/c/p/s/' + 'd' * 32):
+            _wait_until(lambda k=key: _storage_has(k), f'zenoh storage to hold {key}')
     finally:
         remote.close()
 
@@ -813,7 +1026,7 @@ def test_subscriber_always_skips_legacy_put(
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, obs.to_json())  # key_expr is legacy mem/obs/...
-        time.sleep(_SETTLE)
+        _barrier(remote, idx, 'legacy-put')
     finally:
         remote.close()
 
@@ -836,7 +1049,8 @@ def test_rebuild_always_skips_legacy_obs(
     remote = _remote_session(single_zenohd.endpoint)
     try:
         remote.put(obs.key_expr, obs.to_json())  # legacy key
-        time.sleep(_SETTLE)
+        # The rebuild scan reads storage, so wait for the sample to be stored.
+        _wait_until(lambda: _storage_has(obs.key_expr), 'zenoh storage to hold the legacy-key obs')
     finally:
         remote.close()
 

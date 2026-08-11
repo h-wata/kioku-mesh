@@ -63,6 +63,28 @@ ADR-0030.
   `TypeError` になり、status 出力全体が `failed to read shared memory` に落ちて
   いた）、欠損・解析不能な値は1件ずつスキップ、窓は `[now-7d, now]` として未来
   日時を除外し、スキップ件数を出力に明示するようにした。
+- tests: `tests/test_replication_subscriber.py` is no longer flaky. The suite
+  published from a just-opened Zenoh session and then waited a fixed 0.4s for
+  asynchronous delivery. A sample published before that session's declarations
+  have propagated to the router is not delivered to the subscribers the router
+  did not yet route to, and that notification is never re-sent, so the wait
+  could never succeed under the conditions that first triggered this fix
+  (single-host loopback zenohd, contended load) — measured there: the local
+  index still had not seen such a sample 10s later, while a storage query on
+  the same key answered. An independent re-measurement on a quieter,
+  higher-core-count host could not reproduce that particular symptom (30
+  runs, 0 failures with the canary handshake disabled), so how often the
+  window is actually hit appears to depend on load and hardware, not only on
+  the race existing. The sample is durable (it reaches the router's
+  storage); what is lost, when the window is hit, is the live delivery to
+  subscribers, i.e. the index update. Every fixed sleep in the file
+  is now a wait on the condition the test actually cares about (row indexed /
+  row gone / storage holds the key / both callbacks logged), and opening a
+  remote session now re-publishes a canary until it is observed, so nothing
+  under test is published before the path is known to deliver. A new test pins
+  what the production one-shot CLI shape (lazy-open -> put -> close, as in
+  `kioku-mesh save`) delivers to an already-established peer: both its live
+  subscriber and the router's storage receive the sample.
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
