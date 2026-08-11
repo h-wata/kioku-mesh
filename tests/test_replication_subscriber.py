@@ -69,6 +69,15 @@ def _barrier(remote: zenoh.Session, idx: Any, label: str) -> None:
     point in time by which the earlier samples have been delivered and handled:
     they travel the same session -> router -> subscriber path, in order, ahead
     of the sentinel. That is strictly stronger than the fixed sleep it replaces.
+
+    This relies on Zenoh preserving publish order across *different* key
+    expressions — the sentinel lives under its own ``_barrier-{label}``
+    project, distinct from whatever key(s) the samples under test use — as
+    long as both are put on the same session with the same priority and
+    congestion-control settings. Ordering here is a property of the
+    session's transport link, not of any single key expression, so it holds
+    for every put in this file today; it would silently stop holding if a
+    future put on this session used a different priority.
     """
     sentinel = _mk_obs(f'barrier {label}', project=f'_barrier-{label}')
     remote.put(sentinel.key_expr, sentinel.to_json())
@@ -120,16 +129,27 @@ def _handshake(sess: zenoh.Session, *, via: str) -> None:
     query or a later index rebuild reads it back. What is lost is the *live
     delivery to subscribers*: the notification is never re-sent, so a
     subscriber that was not routed to at publish time never sees that sample.
-    Measured on this suite: the local index still had not seen such a sample
-    10s later while the same key answered a storage query, so no amount of
-    extra waiting recovers it.
+    Measured under the conditions that first triggered this fix (this
+    author's machine, single-host loopback zenohd, contended load — see PR
+    #298): the local index still had not seen such a sample 10s later while
+    the same key answered a storage query, so no amount of extra waiting
+    recovered it there. Whether that symptom reproduces is machine-dependent:
+    an independent cross-review on a quieter, higher-core-count host
+    (nproc=16) could not reproduce it at all after disabling this handshake
+    (30 runs, 0 failures) — the drop appears to depend on how contended
+    declaration propagation is, which this suite has no way to control or
+    detect from inside a single run.
 
     Re-publishing the canary until it is observed is what makes the tests
     deterministic: nothing under test is published until the session ->
     router -> (subscriber | storage) path has actually delivered something.
     Re-publishing is side-effect free — the subscriber upserts by
     observation_id and the storage overwrites by key — and once the path is
-    established it stays established for the life of the session.
+    established it stays established for the life of the session. Kept
+    unconditionally rather than only on hosts known to need it: the cost is
+    negligible (idempotent re-publish, single-digit milliseconds on a live
+    path) against the downside of a suite that goes flaky again on whichever
+    machine happens to be under load at the time.
 
     ``via='index'`` proves delivery all the way to the local index subscriber;
     ``via='storage'`` proves only that the router's storage took the sample,

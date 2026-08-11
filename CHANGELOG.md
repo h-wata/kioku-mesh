@@ -62,10 +62,16 @@ ADR-0030.
   asynchronous delivery. A sample published before that session's declarations
   have propagated to the router is not delivered to the subscribers the router
   did not yet route to, and that notification is never re-sent, so the wait
-  could never succeed — measured: the local index still had not seen such a
-  sample 10s later, while a storage query on the same key answered. The sample
-  is durable (it reaches the router's storage); what is lost is the live
-  delivery to subscribers, i.e. the index update. Every fixed sleep in the file
+  could never succeed under the conditions that first triggered this fix
+  (single-host loopback zenohd, contended load) — measured there: the local
+  index still had not seen such a sample 10s later, while a storage query on
+  the same key answered. An independent re-measurement on a quieter,
+  higher-core-count host could not reproduce that particular symptom (30
+  runs, 0 failures with the canary handshake disabled), so how often the
+  window is actually hit appears to depend on load and hardware, not only on
+  the race existing. The sample is durable (it reaches the router's
+  storage); what is lost, when the window is hit, is the live delivery to
+  subscribers, i.e. the index update. Every fixed sleep in the file
   is now a wait on the condition the test actually cares about (row indexed /
   row gone / storage holds the key / both callbacks logged), and opening a
   remote session now re-publishes a canary until it is observed, so nothing
