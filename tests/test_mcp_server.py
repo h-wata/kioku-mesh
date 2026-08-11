@@ -2076,3 +2076,63 @@ def test_recall_context_shows_origin_line(
 
     text = _run(_go())
     assert 'origin: claude-code (other pc)' in text
+
+
+# ---------------------------------------------------------------------------
+# ADR-0026 supersede suggestion: MCP renderer-error path (#236 TEST-2)
+# ---------------------------------------------------------------------------
+
+
+def test_save_swallows_supersede_renderer_error_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """save_observation returns saved even when candidate rendering raises, with a debug breadcrumb."""
+    import json as _json
+
+    class _BoomCandidate:
+        observation_id = 'c' * 32
+        summary = 'old summary'
+        subject = 'db'
+
+        @property
+        def created_at(self) -> str:
+            raise RuntimeError('render boom')
+
+    class _Backend:
+        def put_observation(self, obs: Any) -> None:  # noqa: ANN401
+            pass
+
+        def find_supersede_candidates(self, obs: Any) -> list:  # noqa: ANN401
+            return [_BoomCandidate()]
+
+        def close(self) -> None:
+            pass
+
+    backend = _Backend()
+    monkeypatch.setattr(mcp_server_module, 'get_backend', lambda: backend)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'use PostgreSQL going forward',
+                    'project': 'sup-render',
+                    'subject': 'db',
+                    'summary': 'switching primary datastore to PostgreSQL',
+                },
+            )
+            assert not result.is_error
+            return result.data
+
+    debug_calls: list[str] = []
+    monkeypatch.setattr(
+        mcp_server_module.log,
+        'debug',
+        lambda msg, *args, **kw: debug_calls.append(msg % args if args else msg),
+    )
+
+    msg = _run(_go())
+
+    data = _json.loads(msg)
+    assert data['status'] == 'saved'
+    assert 'supersede_candidates' not in data
+    assert any('supersede suggestion failed' in m for m in debug_calls)

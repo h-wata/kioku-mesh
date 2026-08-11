@@ -414,8 +414,8 @@ def save_observation(
                     }
                     for c in candidates
                 ]
-        except Exception:  # noqa: BLE001 — detection must never fail a save
-            pass
+        except Exception as e:  # noqa: BLE001 — detection must never fail a save
+            log.debug('supersede suggestion failed (save succeeded): %s', e, exc_info=True)
     return json.dumps(result, ensure_ascii=False)
 
 

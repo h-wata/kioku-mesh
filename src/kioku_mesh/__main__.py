@@ -13,6 +13,7 @@ import dataclasses
 from datetime import datetime
 from datetime import timezone
 import json
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -66,6 +67,8 @@ from .store import scan_obs_by_pc_id
 from .store import set_rebuild_on_init_default
 from .store import set_rebuild_on_init_explicit
 from .store import stop_pending_drain_background
+
+log = logging.getLogger(__name__)
 
 _SEARCH_FORMATS = ('text', 'markdown', 'json')
 
@@ -200,8 +203,8 @@ def _cmd_save(args: argparse.Namespace) -> int:
             candidates = backend.find_supersede_candidates(obs)
             for line in _format_supersede_hint(candidates):
                 print(line)
-        except Exception:  # noqa: BLE001 — detection is best-effort, never fail a save
-            pass
+        except Exception as e:  # noqa: BLE001 — detection is best-effort, never fail a save
+            log.debug('supersede suggestion failed (save succeeded): %s', e, exc_info=True)
     return 0
 
 

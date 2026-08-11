@@ -28,6 +28,12 @@ ADR-0030.
   incoming search filter; `save_observation` still persists the literal
   `project` value it was given. `recall_context` names the expansion in its
   `filters:` line (`project='kioku-mesh' (also matching 'mesh-mem')`) (#278).
+- supersede suggestion (ADR-0026) の候補検出・ヒント描画で握り潰していた例外に
+  debug ログの breadcrumb を追加した (CLI `save` / MCP `save_observation` の
+  両経路)。save の成功は従来どおり守りつつ、検出が繰り返し失敗している場合に
+  原因を追えるようにする。あわせて MCP 経路の renderer-error 回帰テスト
+  (候補の描画中に例外が出ても save が成功し candidates が落ちるだけであること)
+  を追加した。(#236)
 
 ### Fixed
 
