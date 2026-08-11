@@ -152,7 +152,7 @@ Phase 1.5 はこの領域について後方互換の制約をほぼ受けない�
 |---|---|
 | `expires_at` あり | `expires_at`（`ttl_sec` が併記されていても `expires_at` が勝つ） |
 | `expires_at` 無し・`ttl_sec` あり | `created_at + ttl_sec` |
-| どちらも無し | **無期限**（`None`）。拒否はしない — `models.py:65-66` の現行 default をそのまま許容する |
+| どちらも無し | **無期限**（`None`）。拒否はしない — `models.py:65-66` の現行 default をそのまま許容する（**決定事項**。12.3 の旧 U2） |
 
 #### 実効 ack deadline の定義
 
@@ -181,9 +181,13 @@ Phase 1.5 はこの領域について後方互換の制約をほぼ受けない�
    束ねられる）が戻ってくるため。この message は `timed_out` には遷移するが
    `expired` には決して遷移しない。
 
-なお `ttl_sec` そのものの範囲（`0185:147` の min 30 / max 86400）は本メモの決定事項ではなく、
-0185 の既存規定に従う。実装は現状 `ttl_sec` を必須にも範囲検証もしていない (1.7) ため、
-どちらに寄せるかは 11 節の引継ぎ事項として残す。
+なお `ttl_sec` そのものの範囲（`0185:147` の min 30 / max 86400）と、`ttl_sec` を schema 上
+required にするか否かは、本メモの決定事項ではなく 0185 の既存規定に従う（11 節の引継ぎ事項）。
+実装は現状 `ttl_sec` を必須にも範囲検証もしていない (1.7)。
+**これは「無期限を許すか」とは別の論点である**: 本メモは「両方未指定 = 無期限の message を
+拒否しない」ことを決定事項として扱い (上表)、0185 側が `ttl_sec` を required 化した場合は
+その枝に到達する message が作られなくなるだけで、本メモの畳み込み規則も state machine も
+変わらない。
 
 #### 計時源と境界演算子
 
@@ -268,11 +272,35 @@ message 自身に載っているべきだからである。A1 単独を却下す
   したがって「今まさに実行している試行の番号」は `attempt_count + 1`（1-indexed）になる。
 - **合計 6 回で打ち切る**（initial attempt 1 回 + retry 5 回）。
 - 総試行が 6 回なので、attempt 間の遅延は **5 段階**: `1s, 2s, 4s, 8s, 16s`。
-  **実装契約（off-by-one を避けるため手順で書く）**: 「put 呼び出しが戻る → `attempt_count += 1`
-  → 打ち切り判定（後述）→ 続行するなら `2^(attempt_count - 1)` 秒の遅延を計算して
-  `next_attempt_at` を書く」。`attempt_count` は完了回数（初期値 0）であって
-  「今の試行番号」ではない、という点だけ取り違えないこと。
   遅延の合計は公称 31 秒（jitter 込みの最悪値 37.2 秒）。
+
+  **実装契約（評価順を手順で固定する）**: 打ち切り判定は「次の試行がいつになるか」を
+  参照するため、**判定より前に候補値を計算し終えていなければならない**。1 回の put について
+  以下の順序で実行し、この順序から外れた実装を認めない:
+
+  1. `session.put()` の呼び出しが戻る（成功・例外のいずれでも）。
+  2. `attempt_count += 1` する（成功・失敗のどちらでも加算する）。
+  3. **`now` を 1 度だけ読み、`candidate_next_attempt_at` を計算する。**
+     ここで読んだ `now` は 4. の打ち切り判定でもそのまま使う（判定の途中で時計を読み直さない。
+     読み直すと候補値の計算基準と判定基準がずれる）。`attempt_count < 6` のとき、
+     公称遅延 `2^(attempt_count - 1)` 秒に jitter を掛けた実効遅延を求め、
+     `candidate_next_attempt_at = now + 実効遅延`（wall clock）とする。
+     **jitter はこの時点で 1 度だけ引き、以降の判定と永続化で同じ値を使う**
+     （判定用と永続化用で別々に引くと、判定した時刻と実際に待つ時刻がずれる）。
+     `attempt_count >= 6`（次の試行が存在しない）のときは
+     **`candidate_next_attempt_at` は未定義**とし、後述の打ち切り条件 1. の
+     「次の試行予定時刻」節は評価しない（回数上限が先に効く）。
+  4. **打ち切り判定を 1 回だけ実行する**（後述）。条件 1. の期限比較には、
+     行に永続化されている `next_attempt_at`（= 前回値）ではなく、
+     **必ず 3. で計算した `candidate_next_attempt_at` を使う**。
+  5. 続行が確定した場合に**限り**、`candidate_next_attempt_at` を
+     `next_attempt_at` として outbox 行に永続化する。打ち切った場合は
+     `next_attempt_at` を書き換えない（`NULL` のまま、または前回値のまま残す。
+     どちらであっても `termination_reason` が記録済みなので 6.4 の reducer は
+     `next_attempt_at` を読まない）。
+
+  `attempt_count` は完了回数（初期値 0）であって「今の試行番号」ではない、という点だけ
+  取り違えないこと（今まさに実行している試行の番号は `attempt_count + 1`）。
 
   | 試行番号 (`attempt_count + 1`) | 直前に待つ遅延 | 待ち終えた時点の累積経過（公称） |
   |---|---|---|
@@ -289,27 +317,45 @@ message 自身に載っているべきだからである。A1 単独を却下す
   障害は「一時的」とは見なさない、という線引き。(iii) memory 層の `core.transport.with_retry` と
   同じ指数 backoff の形を保ったまま、段階数だけを messaging の用途（対話的な依頼の配送。
   分単位で待たせる価値が無い）に合わせて短くした。
-  **この 6 という値は運用計測で見直す前提のチューニングパラメータ**であり、
-  設計上の不変条件は「上限が有限であること」だけである（12 節「未決事項」参照）。
+  **6 回・5 段階・遅延列 `1,2,4,8,16s` は初期実装値として決定済み**である。
+  運用計測の結果として値を見直せるチューニングパラメータでもあるが、
+  「後で変えられる」ことは「まだ決まっていない」ことを意味しない — 実装はこの値で書く
+  (12.2)。設計上の不変条件は「上限が有限であること」だけである。
 - 遅延そのものに対する別途の上限（「最大 60 秒」等のクランプ）は**設けない**。
   遅延列は `16s` で終わる有限列なのでクランプが働く余地が無く、上限秒を書くと
   7 回目以降の試行が存在するかのように読めてしまうため。
 - 各遅延に **±20% の jitter** を掛ける（複数 worker が同時に切断復帰したときの同期を崩すため）。
-  実効遅延 = 公称遅延 × `uniform(0.8, 1.2)`。jitter は打ち切り条件を変えない
-  （打ち切りは回数と `effective_expires_at` だけで決まる）。
+  実効遅延 = 公称遅延 × `uniform(0.8, 1.2)`。**jitter は打ち切り条件の構造を変えない**
+  （打ち切り条件の集合は回数と `effective_expires_at` だけで決まり、jitter が新しい条件を
+  足すことはない）。ただし jitter 済みの `candidate_next_attempt_at` が条件 1. の比較対象なので、
+  **期限直前では jitter の引き値によって「あと 1 回試すか、ここで `expired` にするか」が
+  分岐しうる**。これは意図した挙動である（期限を跨ぐ待ちを挟まないことが条件 1. の目的で、
+  跨ぐか否かは実際に待つ長さで判定するのが正しい）。上の実装契約 3. で jitter を 1 度だけ引き、
+  判定と永続化で同じ値を使うと定めているのは、この分岐を決定論的にするためである。
 - **計時源**: 待ちのスケジューリングは monotonic clock、永続化する `next_attempt_at` は wall clock
   （2 節「計時源」と同じ理由）。プロセスが再起動した場合は `now >= next_attempt_at` で再開判定する。
-- **打ち切り判定**は、各 put が戻って `attempt_count` を加算した直後に 1 回だけ実行する。
-  上から評価し、**最初に真になったものを `termination_reason` として outbox 行に 1 つだけ記録する**
+- **打ち切り判定**は、各 put が戻って `attempt_count` を加算し、
+  `candidate_next_attempt_at` を計算し終えた直後に 1 回だけ実行する（上の実装契約 4.）。
+  **`now` は実装契約 3. で読んだ値をそのまま使い、以下のすべての条件で同じ値を使う**
+  （条件ごとに時計を読み直さない。6.4 の reducer と同じ理由）。上から評価し、**最初に真になったものを
+  `termination_reason` として outbox 行に 1 つだけ記録する**
   （複数は記録しない。これが state の一意性の根拠になる）:
-  1. `effective_expires_at` が定義されていて `now >= effective_expires_at`、または次の試行予定時刻が
-     期限以降になる（`next_attempt_at >= effective_expires_at`）→ `termination_reason = expired`。
+  1. `effective_expires_at` が定義されていて、次のいずれかが成り立つ
+     → `termination_reason = expired`。
+     - `now >= effective_expires_at`（既に期限に達している）
+     - `candidate_next_attempt_at` が定義されていて
+       `candidate_next_attempt_at >= effective_expires_at`
+       （次の試行が期限以降になる。**比較するのは今回計算した候補値であって、
+       行に残っている前回の `next_attempt_at` ではない**）
+
      **この条件が回数上限より優先する**（期限切れ message を storage に載せても誰も読めないため。
      また、結果が確定している待ちを挟まないため）。
   2. 直前の例外が非 retryable → `termination_reason = nonretryable`。
-  3. `attempt_count >= 6` → `termination_reason = attempts_exhausted`。
+  3. `attempt_count >= 6` → `termination_reason = attempts_exhausted`
+     （このとき `candidate_next_attempt_at` は未定義なので、1. の 2 つ目の節は評価されていない）。
   4. put が成功していた → 終了理由は記録せず `sent` へ。
-  5. いずれでもない → 終了理由を記録せず、`next_attempt_at` まで待って次の試行を実行する。
+  5. いずれでもない → 終了理由を記録せず、`candidate_next_attempt_at` を
+     `next_attempt_at` として永続化し（実装契約 5.）、その時刻まで待って次の試行を実行する。
 - **1 回の put で複数条件が同時に真になっても、記録されるのは最初の 1 つだけ**である。
   例: 「6 回目の put が失敗し、その put の実行中に `effective_expires_at` を跨いだ」場合は
   1. が先に真になるので `expired` が記録され、`attempts_exhausted` は記録されない。
@@ -318,7 +364,7 @@ message 自身に載っているべきだからである。A1 単独を却下す
   期限切れ後に無駄な put を積まないために expiry を先に見る。6.4 は「記録済みの事実に
   どの名前を付けるか」を決める順序である。**両者が食い違わないのは、6.4 が生の `attempt_count` や
   `now` ではなく、ここで記録した `termination_reason` を読むから**である。
-  たとえば `next_attempt_at >= effective_expires_at` で打ち切った行は、まだ
+  たとえば `candidate_next_attempt_at >= effective_expires_at` で打ち切った行は、まだ
   `now < effective_expires_at` の時点でも `termination_reason = expired` を根拠に `expired` と
   報告される（`now` を見て `queued` に戻ることはない）。
 - `effective_expires_at` が無期限の message では条件 1. が決して真にならず、打ち切りは回数上限
@@ -403,8 +449,20 @@ sender 側の状態のみを定義する。receiver 側は既存の「登録済�
 「もう二度と state が変わらない」の意味で混用することにある。本メモは**後者だけ**を terminal と呼ぶ。
 
 - **terminal（終端）= 出ていく遷移が 1 本も無い state。** `acked` **のみ**。
-- **quiescent（静止）= sender 側の能動的な作業（put / 待ち）はもう無いが、ack を観測すれば
-  まだ `acked` へ遷移しうる state。** `timed_out` / `expired` / `failed` の 3 つ。
+- **quiescent（静止）= sender 側の能動的な作業（put / 待ち）はもう無い state。**
+  quiescent は `(state, requires_ack)` の組に対して定まる分類であって state 単独の属性ではない
+  ため、集合として次のように定義する:
+  - `timed_out` / `expired` / `failed` — `requires_ack` の値に依らず quiescent。
+    ack を観測すればまだ `acked` へ遷移しうる。
+  - **`requires_ack = false` の `sent`** — quiescent。put が成功した時点で sender の作業は
+    終わっており、ack も deadline も見ない以上、ここから出ていく遷移は 1 本も無い
+    （6.2 の注記、6.3 の表、6.4 の reducer と同じ扱い）。**遷移が無いという意味では
+    `acked` と同じだが terminal とは呼ばない。** terminal は「配送が確認できた終わり方」を
+    指す語として `acked` に予約しており、`requires_ack = false` の `sent` は
+    「確認しないと決めた終わり方」で意味が違うためである。
+  - `requires_ack = true` の `sent` は quiescent では**ない**（ack 観測待ちが残っている）。
+- 以降、本メモで「quiescent の 3 state」のような state だけの数え方はしない。
+  quiescent か否かを判定するときは必ず `requires_ack` と併せて見ること。
 
 **決定: `expired` は terminal ではなく quiescent とする。**
 理由は、ack reader が状態照会時にしか動かない（3 節）以上、「`expires_at` を過ぎた後に初めて
@@ -420,10 +478,42 @@ storage には載っていた、という曖昧な失敗 (ambiguous failure) が
 図と表の両方でこれを許す。**terminal は `acked` ただ 1 つ**であり、
 「もう sender は何もしない」を意味するのは quiescent の方である。
 
-**late ack の観測窓には上限がある。** ack key は `msg/{scope}/ack/...` すなわち `msg/**` 配下なので、
-`purge_expired_messages` の sweep (`purge.py:44`) で消える。消えた後は `expired` のまま確定する。
-sweep は手動実行なのでこの窓の長さは運用依存であり、**設計上の保証は「窓は有限」までとする**
-（12 節「未決事項」参照）。加えて outbox 行自体にも保持上限を置く（6.4）。
+#### late ack を観測できる窓（2 つの独立した窓を分けて定義する）
+
+late ack（`timed_out` / `expired` / `failed` から `acked` への遷移。`requires_ack = false` の
+`sent` は ack を見ないのでここには含まれない）が実際に起こるには、**ack key が Zenoh 上に残っている**
+ことと、**その ack を突き合わせる outbox 行が残っている**ことの両方が必要である。この 2 つは
+別々の機構で消えるので、別々の窓として定義する。**片方をもう片方の根拠にしてはならない。**
+
+**(a) ack-key retention — ack key 自体が Zenoh 上に残る期間**
+
+- ack key は `msg/{scope}/ack/...` すなわち `msg/**` 配下なので、`purge_expired_messages` の
+  sweep (`purge.py:44`) が走ったときに消える。
+- **この sweep は手動実行である**（定期実行の機構は無い。`purge.py:15-18` が periodic background GC を
+  却下している）。したがって:
+  - sweep が一度も走らなければ ack key は**消えない**。上限は保証されない。
+  - sweep がいつ走るかも保証されない。送信直後に走れば ack key はすぐ消える。下限も保証されない。
+- すなわち **ack-key retention には設計上の保証が無く、完全に運用依存である**。
+  「ack key 側が先に閉じる」とも「後に閉じる」とも仮定してはならない。
+  これを保証したい場合は sweep を定期実行にして間隔を決定事項にする必要がある（12.1 の U5。
+  **これは未決事項**であり、決めずに実装へ進んでよい前提が「保証は無い」である）。
+
+**(b) observable receipt window — `get_message_status` が late ack を報告できる期間**
+
+- 上限は **outbox 行の保持上限（6.4 の 24 時間）** である。行が GC された後の
+  `get_message_status(msg_id)` は `unknown` を返す (7 節の項目 6) ので、たとえ ack key が
+  Zenoh 上に残っていても late ack は報告されない。
+- したがって **現在の実装契約における observable late-ack window は、行が quiescent に入った
+  時刻 (`quiesced_at`) から最大 24 時間**である。これは決定事項であり、運用に依存しない。
+- 24 時間はあくまで**上限**である。(a) の ack key がそれより早く sweep されていれば、
+  実際に観測できる窓はそこで閉じる。すなわち
+  **実効窓 = min(24h, ack key が sweep されるまでの時間)** であり、後者に保証が無いため
+  **下限は保証されない**（0 でありうる）。
+
+**設計上の保証はこの 1 文に集約される: late ack が観測される保証は無く、
+観測されうる期間の上限だけが 24 時間として決まっている。** ack key が先に消えたか、
+そもそも ack が来ていないかを sender が区別する手段は無い（ack key の不在は
+`failed` の根拠にしてはならない、という 11 節の注意と同じ理由）。
 
 ### 6.2 状態遷移図
 
@@ -431,10 +521,10 @@ sweep は手動実行なのでこの窓の長さは運用依存であり、**設
 stateDiagram-v2
     [*] --> queued: outbox 行を作成
 
-    queued --> queued: put 失敗(retryable) かつ 終了理由が記録されない<br/>(attempt_count += 1, next_attempt_at を再計算)
+    queued --> queued: put 失敗(retryable) かつ 終了理由が記録されない<br/>(attempt_count += 1, candidate_next_attempt_at を<br/>next_attempt_at として永続化)
     queued --> sent: put 成功
     queued --> failed: termination_reason = nonretryable / attempts_exhausted
-    queued --> expired: termination_reason = expired<br/>(put 成功前に期限到達 or 次の試行が期限外)
+    queued --> expired: termination_reason = expired<br/>(put 成功前に期限到達 or<br/>candidate_next_attempt_at >= effective_expires_at)
 
     sent --> acked: ack key を 1 件以上観測
     sent --> timed_out: now >= ack_deadline_at かつ ack 未観測<br/>(ack_deadline_at < effective_expires_at のとき)
@@ -443,7 +533,7 @@ stateDiagram-v2
     timed_out --> acked: ack key を 1 件以上観測 (late ack)
     timed_out --> expired: now >= effective_expires_at
 
-    expired --> acked: ack key を 1 件以上観測 (late ack)<br/>※ack key が sweep される前に限る
+    expired --> acked: ack key を 1 件以上観測 (late ack)<br/>※6.1 の観測窓の内側に限る
     failed --> acked: ack key を 1 件以上観測<br/>(ambiguous failure。6.1 参照)
 
     acked --> [*]
@@ -467,14 +557,16 @@ stateDiagram-v2
   （retry を `sent -> queued` と描くと、put 成功後にもう一度 put する経路があるように読める）。
 - 同じ理由で `sent` から `failed` への遷移も無い（put が成功した以上、transport は成功している）。
 - `requires_ack = false` の message は ack 待ちをしない（7 節の項目 7）。この場合
-  `sent` が quiescent であり、`timed_out` / `expired` / `acked` へは遷移しない。
+  `sent` が quiescent であり（6.1 の quiescent 定義に含まれる）、
+  `timed_out` / `expired` / `acked` へは遷移しない。図中の `sent` から出ている 3 本の辺は
+  すべて `requires_ack = true` の場合のものである。
 
 ### 6.3 state 一覧
 
 | state | 種別 | 意味 | 入る条件 | 出る先 |
 |---|---|---|---|---|
 | `queued` | 進行中 | outbox に入ったが Zenoh に載っていない | 初期状態、または retryable put 失敗後 | `queued` / `sent` / `failed` / `expired` |
-| `sent` | 進行中<br/>(`requires_ack=false` なら quiescent) | `session.put()` が 1 回以上成功した | put 成功 | `acked` / `timed_out` / `expired` |
+| `sent` | `requires_ack=true`: 進行中<br/>`requires_ack=false`: **quiescent**（6.1） | `session.put()` が 1 回以上成功した | put 成功 | `requires_ack=true`: `acked` / `timed_out` / `expired`<br/>`requires_ack=false`: — |
 | `timed_out` | quiescent | `now >= ack_deadline_at` かつ ack 未観測。まだ `effective_expires_at` 前なので受信の可能性は残る | deadline 到達 | `acked` / `expired` |
 | `expired` | quiescent | 配送は放棄された。**error ではない** (`0185:229`) | `termination_reason = expired`、または `now >= effective_expires_at` かつ ack 未観測 | `acked`（late ack のみ） |
 | `failed` | quiescent | 非 retryable 失敗、または総試行 6 回到達。message は Zenoh に載っていない可能性が高い。**error である** | `termination_reason` が `nonretryable` / `attempts_exhausted` | `acked`（ambiguous failure のみ、6.1） |
@@ -517,12 +609,20 @@ ack も deadline も見ないので、put が成功した行は `sent` のまま
 決める順序である。2. が生の `attempt_count` / `now` ではなく `termination_reason` を読むことで、
 両者は必ず同じ結論に到達する（3 節末尾参照）。
 
-**outbox 行の保持上限:** quiescent または terminal に入った行は、その時刻から wall clock で
-**24 時間**保持し、以後 GC する。GC 後の `get_message_status(msg_id)` は `unknown` を返す。
-24 時間の根拠は (i) late ack を拾う窓としては ack key 側（sweep 依存、6.1）の方が先に閉じるので、
-outbox 側がボトルネックにならない長さであれば足りる、(ii) 人間が翌日に「あの依頼どうなったか」を
-確認できる長さ、の 2 点。**これもチューニング値**であり、不変条件は「outbox 行が無限に貯まらない
-こと」だけである。この上限があるため、**どの state からも「無期限に待ち続ける」経路は存在しない**
+**outbox 行の保持上限:** quiescent または terminal に入った行は、その時刻 (`quiesced_at`) から
+wall clock で **24 時間**保持し、以後 GC する。GC 後の `get_message_status(msg_id)` は
+`unknown` を返す。`requires_ack = false` の行は put 成功時点で quiescent なので (6.1)、
+`quiesced_at` はその put が成功した時刻であり、以後 ack を待たずに 24 時間で GC される。
+
+この 24 時間が **observable receipt window の上限そのもの**である（6.1 (b)）。
+ack key 側の retention (6.1 (a)) は手動 sweep 依存で保証が無いため、**どちらが先に閉じるかを
+根拠にはできない**。24 時間はあくまで「outbox 側が単独で保証できる上限」として決めた値で、
+根拠は (i) 人間が翌日に「あの依頼どうなったか」を確認できる長さであること、
+(ii) quiescent 行が無限に貯まらないこと、の 2 点である。
+**初期値は決定事項であり、運用計測後に変更可能なチューニングパラメータでもある**
+（12 節「チューニングパラメータ」参照）。設計上の不変条件は「有限の上限が存在すること」だけである。
+
+この上限があるため、**どの state からも「無期限に待ち続ける」経路は存在しない**
 （無期限 message の `sent` も、24 時間後に GC されて `unknown` になる）。
 
 **明示的に state に含めないもの:**
@@ -645,8 +745,14 @@ inbox と分けるのは、purge の対象・寿命・所有者が違うため�
   分離されている。本メモは後者と同じ層に属する。
 
 **ADR 化する条件:** 本提案（特に「自動再送しない」という否定形の決定と、6 節の state machine）が
-レビューで accept されたら、`docs/adr/0031-messaging-delivery-receipt-policy.md` として
+レビューで accept されたら、`docs/adr/NNNN-messaging-delivery-receipt-policy.md` として
 ADR 化する。ADR-0022 の Related に追加し、本メモを設計根拠として参照する形にする。
+
+**番号は accept 時に採番する（本メモでは確定させない）。** 初版は `0031` を予約していたが、
+**`0031` は PR #303 で別内容（CHANGELOG 競合回避のための batched merge window 方式）に
+既に使われている**。ADR 番号は先に merge された側が勝つため、本メモの ADR 化に着手する時点で
+`docs/adr/` の最大番号 + 1 を採り直すこと（PR #303 が採った採番規則と同じ）。
+`0031` を参照している箇所は本節のみなので、振り直しても他節への影響は無い。
 
 ## 11. 実装時の注意（Phase 1.5 引継ぎ）
 
@@ -656,22 +762,55 @@ ADR 化する。ADR-0022 の Related に追加し、本メモを設計根拠と�
 - `purge_expired_messages` (`mcp_server.py:1061`) は `msg/**` 全体を掃く (`purge.py:44`) ので、
   他 agent の未読 message も消える。outbox の state 判定がこの sweep と競合しないよう、
   「key が消えている」ことを `failed` の根拠にしてはならない（`expired` と区別できないため）。
-- 1.3 / 1.7 で挙げた memo と実装の食い違い（`requires_ack` の default、`ttl_sec` の必須性）は
-  Phase 1.5 で必ずどちらかに寄せる。放置すると receipt の対象範囲が実装依存になる（12 節 U1）。
+- 1.3 で挙げた memo と実装の食い違い（`requires_ack` の default）は Phase 1.5 で必ずどちらかに
+  寄せる。放置すると receipt の対象範囲が実装依存になる（12.1 の U1 — 未決事項）。
+- `ttl_sec` を schema 上 required にするか（1.7 / `0185:147` の食い違い）は本メモの決定事項では
+  なく、0185 側の schema 規定に従う。**ただし「両方未指定 = 無期限を本メモが拒否しない」ことは
+  決定事項である**（2 節、12.3 の旧 U2）。required 化を選んだ場合も本メモの
+  `effective_expires_at` 畳み込み規則は変わらず、無期限の枝が到達不能になるだけである。
 
-## 12. 未決事項
+## 12. 未決事項とチューニングパラメータ
 
-本メモが**決めていない**ことを明示する。ここに挙げた項目は断定調で書いていないので、
-実装時に「文書がこう決めている」と読まないこと。それ以外の記述はすべて決定事項である。
+**この 2 つは別物なので分けて書く。**
 
-| id | 未決の内容 | 決めるのに必要なもの | 決定者 |
+- **未決事項 (12.1)** = 本メモが決めていないこと。実装に入る前に、表の「決定 gate」を通して
+  誰かが決める必要がある。**未決事項の記述は本文中でも断定調にしない。**
+- **チューニングパラメータ (12.2)** = 本メモが**初期実装値として決定した**こと。
+  実装はこの値をそのまま書けばよい。運用計測の結果として後から値を変えられるが、
+  値を変えても設計（state machine・不変条件）は変わらない。**「後で変えられる」ことは
+  「まだ決まっていない」ことを意味しない。**
+
+12.1 に挙げた項目以外の記述は、本文・12.2 を含めてすべて決定事項である。
+
+### 12.1 未決事項（実装前に決定 gate が必要）
+
+| id | 未決の内容 | 決めるのに必要なもの | 決定 gate（誰が・いつ・何を根拠に） |
 |---|---|---|---|
-| U1 | `requires_ack` の default を `True`（memo `0185:153` 側）に寄せるか、`False`（実装 `models.py:76` 側）に寄せるか。本メモの**推奨**は `True`（送信者が意識せず送った message が receipt 対象外になるのは驚き最小則に反するため）だが、決定ではない | 送信経路 (7 節の項目 1) が出来た後の実利用パターン。ack を要求しない「通知だけ」の用途がどれくらいの割合を占めるか | Phase 1.5 の実装判断として運用者 + 実装者 |
-| U2 | `ttl_sec` を必須にするか（memo `0185:147`）、現行実装どおり省略可（= 無期限）のままにするか | 無期限 message が実際に作られるか、作られた場合に outbox 保持上限 24h (6.4) だけで運用が回るかの観測 | 同上 |
-| U3 | 総試行 6 回・遅延 5 段階 (`1,2,4,8,16s`) という具体値の妥当性。**有限であること自体は決定事項**で、未決なのは値のみ | 実運用での Zenoh put 失敗率と、失敗が回復するまでの実測時間分布。少なくとも「6 回目で成功した割合」を計測できるログが要る | 計測後に実装者が調整（設計変更を伴わない） |
-| U4 | outbox 行の保持 24 時間 (6.4) という具体値。**上限を置くこと自体は決定事項** | 状態照会がどれくらい後に行われるかの実績。`unknown` を返した回数を数えれば足りる | 同上 |
-| U5 | late ack（`expired` → `acked`）を観測できる窓の長さ。ack key は `purge_expired_messages` の手動 sweep (`purge.py:44`) で消えるため、窓の長さは運用依存で**保証できるのは「有限」までである** | sweep を定期実行にするか否かの運用方針。定期化するならその間隔 | 運用者。定期化を選ぶ場合は別 Issue（本メモのスコープ外） |
-| U6 | `no_recipient_present` / `unacked`（5 節）を receipt でどう提示するか（文言・UX） | delivery receipt の提示面 (7 節の項目 6) の UI 設計 | Phase 1.5 の実装時 |
+| U1 | `requires_ack` の default を `True`（memo `0185:153` 側）に寄せるか、`False`（実装 `models.py:76` 側）に寄せるか。本メモの**推奨**は `True`（送信者が意識せず送った message が receipt 対象外になるのは驚き最小則に反するため）だが、決定ではない | 送信経路 (7 節の項目 1) が出来た後の実利用パターン。ack を要求しない「通知だけ」の用途がどれくらいの割合を占めるか | 運用者 + 実装者が、**7 節の項目 7（`requires_ack` を実際に読む）の実装に着手する時点**で決める。根拠は送信経路 (7 節の項目 1) を数週間動かした実利用ログ。それまでは実装側 default (`False`) を変更しない |
+| U5 | **ack-key retention** (6.1 (a)) を設計上の保証にするか。ack key は `purge_expired_messages` の手動 sweep (`purge.py:44`) で消えるため、現状は保持期間に上限も下限も保証が無い。保証したければ sweep を定期実行にして間隔を決定事項にする必要がある。※**observable receipt window の上限 24h (6.1 (b), 6.4) は決定事項であり、これとは別物** | sweep を定期実行にするか否かの運用方針。定期化するならその間隔 | 運用者が、**sweep の定期実行を導入する別 Issue を起票する時点**で決める（本メモのスコープ外）。それまで本メモは「ack-key retention に保証は無い」を前提に読むこと |
+| U6 | `no_recipient_present` / `unacked`（5 節）を receipt でどう提示するか（文言・UX） | delivery receipt の提示面 (7 節の項目 6) の UI 設計 | 実装者が、**7 節の項目 6 の実装時**に決める。state と診断ラベルの集合自体は決定済みなので、決めるのは表示のみ |
+
+### 12.2 決定済みだが運用計測で見直しうるチューニングパラメータ
+
+以下は**初期実装値として決定済み**である。実装はこの値で書く。
+「値」だけがチューニング対象で、その右の**不変条件は変更してはならない**。
+
+| 項目 | 決定した初期値 | 変更してよい根拠（計測） | 変えてはいけない不変条件 |
+|---|---|---|---|
+| transport retry の総試行回数と遅延列 (3 節) | 合計 6 回（initial attempt 1 + retry 5）、遅延 `1,2,4,8,16s`、±20% jitter | Zenoh put 失敗率と、失敗が回復するまでの実測時間分布。少なくとも「6 回目で成功した割合」を計測できるログ | 上限が**有限**であること。遅延列が有限列であること（クランプを導入しないこと、3 節） |
+| outbox 行の保持上限 = observable receipt window (6.4, 6.1 (b)) | `quiesced_at` から 24 時間 | 状態照会が quiesce の何時間後に行われるかの実績。`unknown` を返した回数を数えれば足りる | 有限の上限が存在すること。GC 後は `unknown` を返すこと |
+| ack reader の get timeout (3 節) | 3.0 秒（`mcp_server.py:907` / `purge.py:80` に揃える） | 実測の ack get レイテンシ分布 | 有限であること。常駐ポーリングスレッドを持たないこと |
+
+### 12.3 明示的に決定事項へ移した項目（旧 U2 / U3 / U4）
+
+初版では以下を「未決」として挙げていたが、本文が既に断定的な実装契約として指定しており
+矛盾していた。**いずれも決定事項に移した**。id は旧版とのレビュー追跡のため欠番として残す。
+
+| 旧 id | 内容 | 決定 |
+|---|---|---|
+| U2 | expiry 無し（`ttl_sec` / `expires_at` の両方が未指定）の message を許すか | **許す**（2 節「実効期限の定義」の表のとおり、拒否しない）。無期限 message は `timed_out` には遷移しうるが `expired` には遷移せず、outbox 行の 24h 保持上限 (6.4) で必ず終端する。なお `ttl_sec` を schema 上 required にするかは `0185:147` 側の規定の話であり本メモの決定事項ではない（11 節）。required 化しても本メモの畳み込み規則は変わらない（無期限の枝が到達不能になるだけ） |
+| U3 | 総試行 6 回・遅延 5 段階の具体値 | **決定**（12.2 の 1 行目。実装契約は 3 節） |
+| U4 | outbox 行の保持 24 時間 | **決定**（12.2 の 2 行目。実装契約は 6.4） |
 
 ## Related
 
