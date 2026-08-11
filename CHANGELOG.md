@@ -85,6 +85,21 @@ ADR-0030.
   what the production one-shot CLI shape (lazy-open -> put -> close, as in
   `kioku-mesh save`) delivers to an already-established peer: both its live
   subscriber and the router's storage receive the sample.
+
+- tests: the same fixed-sleep pattern is gone from the rest of the router-backed
+  suite. `tests/test_gc.py` (42 sleeps), `tests/conftest.py`'s inter-test purge
+  and `tests/test_e2e_sync.py` now wait on the condition each site depends on —
+  obs readable / obs gone / tomb key stored / purge absorbed — with the waiting
+  helpers extracted to `tests/wait_helpers.py` and shared with
+  `test_replication_subscriber.py`. Assertions that something must *not* have
+  been purged use a sentinel barrier instead of a sleep, and every store-session
+  re-point in the E2E tests handshakes before publishing. The cross-router waits
+  additionally check *which* router answered (replies queried with consolidation
+  disabled, then matched on the replier zid), so "B holds a local replica" is
+  verified rather than assumed from a reply A could have served. Measured over
+  30 consecutive runs of the two files: 0 failures before and after,
+  36.6s → 8.0s per run.
+
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node

@@ -39,6 +39,9 @@ from kioku_mesh import identity
 from kioku_mesh import store
 from kioku_mesh.backend import reset_backend
 
+from .wait_helpers import storage_missing
+from .wait_helpers import wait_until
+
 
 @pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
@@ -67,16 +70,18 @@ def _purge_mem_keys() -> None:
     Enumerate-then-delete rather than wildcard-delete: storage-backend support
     for wildcard delete varies by Zenoh version, per-key delete is portable.
     """
-    import time as _time
-
     sess = store.get_session()
-    for prefix in ('mem/**/obs/**', 'mem/**/tomb/**'):
+    prefixes = ('mem/**/obs/**', 'mem/**/tomb/**')
+    for prefix in prefixes:
         keys = [str(r.ok.key_expr) for r in sess.get(prefix, timeout=2.0) if r.ok]
         for k in keys:
             sess.delete(k)
-    # Storage absorbs deletes asynchronously — give it a beat before the
-    # next test reads.
-    _time.sleep(0.15)
+    # Storage absorbs deletes asynchronously. Wait for the keys to actually be
+    # gone rather than for a duration: the next test's assertions are written
+    # against an empty keyspace, and a fixed sleep that is occasionally too
+    # short leaks a previous test's rows into them.
+    for prefix in prefixes:
+        wait_until(lambda p=prefix: storage_missing(sess, p), f'purge of {prefix} to be absorbed by storage')
 
 
 @pytest.fixture(autouse=True)
