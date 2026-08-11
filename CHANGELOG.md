@@ -61,6 +61,27 @@ ADR-0030.
   the message together. There is deliberately no bulk delete and no age-based
   cleanup. This is the first of three units; the `check_messages` suppression
   path itself changes in the next one (N4).
+- Messaging: `check_messages` no longer drops a message without saying so, and
+  expiry purge no longer manufactures the ack rows that made it happen (N4,
+  unit 2 of 3). Three changes: `is_acked` now believes an acknowledgement only
+  while its message row still exists, so a stray ack can no longer suppress a
+  live arrival carrying the same `(msg_id, recipient_session_id)`;
+  `purge_expired` writes a `message_tombstones` row and removes the pair's ack
+  in the same transaction as the message, so an expired id is retired rather
+  than left half-deleted; and every arrival goes through one
+  `register_or_classify` transaction that decides between a new message, a
+  duplicate of a live one, a retired id, a retired id reused for a different
+  message, a quarantined (legacy-unknown) pair, and an acknowledgement that
+  arrived before its message. Acks observed ahead of their message are held in
+  `pending_acks` — never read as authoritative — and promoted when the message
+  lands. Anything withheld from the inbox is reported in a new `diagnostics`
+  array on the `check_messages` response, carrying the withheld envelope, the
+  ack metadata behind the decision and the exact-pair command that resolves
+  it; `messages`, `count` and `truncated` are unchanged. Retiring an id means
+  a resend needs a new `msg_id`: re-putting a purged id is reported as
+  `duplicate_retired`, or as `protocol_violation` when the envelope changed.
+  The inbox schema is v3 (two nullable columns on `message_tombstones`
+  recording the retired envelope, added in place on existing databases).
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

@@ -38,6 +38,7 @@ from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
 from .messaging.local_index import ack_message as _ack_message_internal
+from .messaging.local_index import IngressResult
 from .messaging.local_index import LocalMessageIndex
 from .messaging.models import is_expired
 from .messaging.models import Message
@@ -185,6 +186,34 @@ def _get_messaging_index() -> LocalMessageIndex:
 
 
 _VALID_VISIBILITIES = frozenset({'', 'user', 'team', 'mesh'})
+
+
+def _message_diagnostic(msg: Message, verdict: IngressResult) -> dict[str, object]:
+    """Describe a message that was withheld, including enough to act on it.
+
+    The envelope travels with the diagnostic on purpose: the caller needs to see
+    what it did not receive in order to decide whether the withheld payload
+    matters, and a bare "count=0" is exactly the silent failure this replaces.
+    """
+    sender = msg.sender if isinstance(msg.sender, dict) else {}
+    return {
+        'code': verdict.code,
+        'msg_id': verdict.msg_id,
+        'recipient_session_id': verdict.recipient_session_id,
+        'message': {
+            'subject': msg._extras.get('subject', ''),  # noqa: SLF001
+            'body': msg.body if msg.body else msg.payload,
+            'created_at': msg.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.created_at else '',
+            'expires_at': msg.expires_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.expires_at else None,
+            'scope': msg.scope,
+            'sender': {
+                'agent_id': sender.get('agent_id', msg.sender_id),
+                'session_id': sender.get('session_id', ''),
+            },
+        },
+        'ack': dict(verdict.detail),
+        'remedy': verdict.remedy or '',
+    }
 
 
 def _messaging_scopes(visibility: str) -> list[str]:
@@ -993,7 +1022,16 @@ def check_messages(
         since_iso: optional ISO 8601 lower bound for ``created_at``.
 
     Returns:
-        JSON string with shape ``{"messages": [...], "count": N, "truncated": bool}``.
+        JSON string with shape
+        ``{"messages": [...], "count": N, "truncated": bool, "diagnostics": [...]}``.
+
+        ``diagnostics`` lists arrivals that were withheld from ``messages`` and
+        why: an id retired by expiry purge (``duplicate_retired``), a retired id
+        reused for a different message (``protocol_violation``), or a pair whose
+        acknowledgement is quarantined so it is unknown whether the message was
+        already read (``legacy_ack_conflict``). Each entry carries the withheld
+        envelope, the ack metadata behind the decision, and the command that
+        resolves it. A withheld message is never reported as ``count: 0`` alone.
     """
     limit = max(1, min(100, limit))
     try:
@@ -1015,6 +1053,7 @@ def check_messages(
 
     messages: list[Message] = []
     seen_ids: set[str] = set()
+    classifications: dict[str, IngressResult] = {}
 
     try:
         session = _get_zenoh_session()
@@ -1055,7 +1094,7 @@ def check_messages(
                     # Override scope from key context if not set on message
                     if not msg.scope:
                         msg.scope = scope
-                    index.register(msg, session_id)
+                    classifications[msg.msg_id] = index.register_or_classify(msg, session_id)
                     messages.append(msg)
             except Exception:  # noqa: BLE001
                 pass
@@ -1069,8 +1108,15 @@ def check_messages(
 
     # Apply filters
     filtered: list[Message] = []
+    diagnostics: list[dict[str, object]] = []
     for msg in messages:
         if not include_expired and is_expired(msg):
+            continue
+        verdict = classifications.get(msg.msg_id)
+        if verdict is not None and verdict.is_diagnostic:
+            # Withheld from normal mail, but never without saying so: an arrival
+            # on a retired or quarantined pair is the case that used to vanish.
+            diagnostics.append(_message_diagnostic(msg, verdict))
             continue
         if not include_acked and index.is_acked(msg.msg_id, session_id):
             continue
@@ -1120,7 +1166,7 @@ def check_messages(
             }
         )
 
-    return json.dumps({'messages': items, 'count': len(items), 'truncated': truncated})
+    return json.dumps({'messages': items, 'count': len(items), 'truncated': truncated, 'diagnostics': diagnostics})
 
 
 @mcp.tool()
