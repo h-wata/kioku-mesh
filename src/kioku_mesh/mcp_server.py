@@ -38,6 +38,8 @@ from .memory.metadata import validate_required_metadata
 from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
 from .messaging.local_index import ack_message as _ack_message_internal
+from .messaging.local_index import INGRESS_EXPIRED_ON_ARRIVAL
+from .messaging.local_index import IngressResult
 from .messaging.local_index import LocalMessageIndex
 from .messaging.models import is_expired
 from .messaging.models import Message
@@ -185,6 +187,83 @@ def _get_messaging_index() -> LocalMessageIndex:
 
 
 _VALID_VISIBILITIES = frozenset({'', 'user', 'team', 'mesh'})
+
+
+def _message_diagnostic(msg: Message, verdict: IngressResult) -> dict[str, object]:
+    """Describe a message that was withheld, including enough to act on it.
+
+    The envelope travels with the diagnostic on purpose: the caller needs to see
+    what it did not receive in order to decide whether the withheld payload
+    matters, and a bare "count=0" is exactly the silent failure this replaces.
+    """
+    sender = msg.sender if isinstance(msg.sender, dict) else {}
+    return {
+        'code': verdict.code,
+        'msg_id': verdict.msg_id,
+        'recipient_session_id': verdict.recipient_session_id,
+        'message': {
+            'subject': msg._extras.get('subject', ''),  # noqa: SLF001
+            'body': msg.body if msg.body else msg.payload,
+            'created_at': msg.created_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.created_at else '',
+            'expires_at': msg.expires_at.strftime('%Y-%m-%dT%H:%M:%S.%fZ') if msg.expires_at else None,
+            'scope': msg.scope,
+            'sender': {
+                'agent_id': sender.get('agent_id', msg.sender_id),
+                'session_id': sender.get('session_id', ''),
+            },
+        },
+        'ack': dict(verdict.detail),
+        'remedy': verdict.remedy or '',
+    }
+
+
+def _acked_flag(
+    verdict: IngressResult | None,
+    index: LocalMessageIndex,
+    msg_id: str,
+    session_id: str,
+) -> bool:
+    """Report the ack state the delivery decision was actually made on.
+
+    Reading it back from the index would let the reported flag disagree with the
+    filtering above, which is the kind of gap that makes a suppression bug hard
+    to see from the outside.
+    """
+    return verdict.acked if verdict is not None else index.is_acked(msg_id, session_id)
+
+
+def _reply_error_text(reply: object) -> str:
+    """Best-effort description of a Zenoh error reply.
+
+    The error payload is whatever the queryable put there, so reading it is
+    itself allowed to fail; the reply is reported either way.
+    """
+    try:
+        return reply.err.payload.to_bytes().decode('utf-8', 'replace')  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return 'query replied with an error carrying no readable payload'
+
+
+def _ingress_error_diagnostic(code: str, source: str, error: BaseException | str) -> dict[str, object]:
+    """Describe an ingress failure that never produced a message to describe.
+
+    Same shape as :func:`_message_diagnostic` with an empty envelope, so a
+    caller reads one list rather than having to know which failures come with a
+    message attached and which do not.
+    """
+    detail = error if isinstance(error, str) else f'{type(error).__name__}: {error}'
+    return {
+        'code': code,
+        'msg_id': '',
+        'recipient_session_id': '',
+        'message': None,
+        'source': source,
+        'ack': {'error': detail},
+        'remedy': (
+            'This inbox listing is incomplete: an arrival could not be read. Poll again, and check the '
+            'Zenoh session if it keeps happening.'
+        ),
+    }
 
 
 def _messaging_scopes(visibility: str) -> list[str]:
@@ -993,7 +1072,29 @@ def check_messages(
         since_iso: optional ISO 8601 lower bound for ``created_at``.
 
     Returns:
-        JSON string with shape ``{"messages": [...], "count": N, "truncated": bool}``.
+        JSON string with shape
+        ``{"messages": [...], "count": N, "truncated": bool, "diagnostics": [...]}``.
+
+        ``diagnostics`` lists everything that did not make it into ``messages``
+        and why, so a withheld arrival is never reported as ``count: 0`` alone:
+
+        * ``duplicate_retired`` — an id retired by expiry purge, arriving again.
+        * ``protocol_violation`` — a retired id carrying a different message.
+        * ``legacy_ack_conflict`` — the pair has a quarantined acknowledgement,
+          so whether the message was already read is unknown.
+        * ``ack_first_promoted`` — an acknowledgement for this pair was seen
+          before the message; it counts as already read.
+        * ``expired_on_arrival`` — the message was past its TTL the first time
+          it was seen, so it is retired instead of delivered.
+        * ``classification_failed`` — the local index could not judge the
+          arrival; it is retried on the next poll.
+        * ``arrival_undecodable`` / ``reply_error`` / ``selector_failed`` — an
+          arrival could not be parsed, a queryable answered with an error, or a
+          query failed, so this listing is incomplete.
+
+        Entries carry the withheld envelope (``null`` for the last two, which
+        have no readable message), the metadata behind the decision, and the
+        command or action that resolves it.
     """
     limit = max(1, min(100, limit))
     try:
@@ -1015,6 +1116,10 @@ def check_messages(
 
     messages: list[Message] = []
     seen_ids: set[str] = set()
+    classifications: dict[str, IngressResult] = {}
+    # Failures that have no message behind them (an unparseable payload, a
+    # selector that raised), reported alongside the per-message diagnostics.
+    ingress_errors: list[dict[str, object]] = []
 
     try:
         session = _get_zenoh_session()
@@ -1030,35 +1135,72 @@ def check_messages(
             try:
                 for reply in session.get(selector, timeout=3.0):
                     if not reply.ok:
+                        # The queryable answered with an error. Same class of
+                        # gap as an unreadable payload: whatever it was holding
+                        # is not in this listing, so the listing is incomplete
+                        # rather than empty.
+                        log.warning('check_messages: error reply for %s: %s', selector, _reply_error_text(reply))
+                        ingress_errors.append(
+                            _ingress_error_diagnostic('reply_error', selector, _reply_error_text(reply))
+                        )
                         continue
                     msg_key = str(reply.ok.key_expr)
                     try:
                         json_str = reply.ok.payload.to_bytes().decode('utf-8')
                         msg = Message.from_json(json_str)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # An arrival that will not parse is still an arrival: it
+                        # is addressed to this session and is not being
+                        # delivered, so it is reported rather than dropped.
+                        log.warning('check_messages: undecodable arrival at %s: %s', msg_key, e)
+                        ingress_errors.append(_ingress_error_diagnostic('arrival_undecodable', msg_key, e))
                         continue
                     # Dedup by msg_id across multiple selectors before any action.
                     if msg.msg_id in seen_ids:
                         continue
                     seen_ids.add(msg.msg_id)
-                    # Storage-level TTL purge (Issue #215): delete expired entries
-                    # from Zenoh so they do not accumulate indefinitely.
-                    # include_expired=True is read-only — skip delete so debug
-                    # inspection does not destroy storage.
-                    if is_expired(msg):
-                        if not include_expired:
+                    # Override scope from key context if not set on message
+                    if not msg.scope:
+                        msg.scope = scope
+                    # Expired arrivals go through the classifier too. Skipping
+                    # them here is how an id that expired while this session was
+                    # offline stayed reusable: nothing registered it, so the
+                    # purge below had nothing to retire and no tombstone existed
+                    # to reject a second, different message on the same id.
+                    try:
+                        verdict = index.register_or_classify(msg, session_id)
+                    except Exception as e:  # noqa: BLE001
+                        # Whatever went wrong — a locked index, a disk error —
+                        # the one outcome that is not acceptable is an empty
+                        # inbox with no reason. The arrival is not registered,
+                        # so the next poll tries it again.
+                        log.warning('check_messages: classification failed for %s: %s', msg.msg_id, e)
+                        classifications[msg.msg_id] = IngressResult.classification_failed(msg.msg_id, session_id, e)
+                    else:
+                        classifications[msg.msg_id] = verdict
+                        # Storage-level TTL purge (Issue #215): delete expired
+                        # entries from Zenoh so they do not accumulate
+                        # indefinitely. Deliberately after the classification
+                        # has committed — the mirror of retiring an expired
+                        # arrival inside the classifier transaction rather than
+                        # leaving it to a later purge. Deleting first meant a
+                        # classification that then failed took the only copy of
+                        # the arrival with it: no tombstone was written, so the
+                        # id stayed reusable, and the "it is retried on the next
+                        # poll" remedy was untrue because nothing would arrive
+                        # again. include_expired=True is read-only, so debug
+                        # inspection never destroys storage.
+                        if is_expired(msg) and not include_expired:
                             try:
                                 session.delete(msg_key)
                             except Exception:  # noqa: BLE001 — best-effort; non-fatal
                                 pass
-                            continue
-                    # Override scope from key context if not set on message
-                    if not msg.scope:
-                        msg.scope = scope
-                    index.register(msg, session_id)
                     messages.append(msg)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                # A failed selector means this listing is incomplete, which is a
+                # different statement from "there is no mail".
+                log.warning('check_messages: selector %s failed: %s', selector, e)
+                ingress_errors.append(_ingress_error_diagnostic('selector_failed', selector, e))
 
     # Purge expired entries from the local SQLite index in sync with the
     # Zenoh deletes issued above.
@@ -1069,10 +1211,25 @@ def check_messages(
 
     # Apply filters
     filtered: list[Message] = []
+    diagnostics: list[dict[str, object]] = list(ingress_errors)
     for msg in messages:
+        verdict = classifications.get(msg.msg_id)
+        # ``include_expired`` is the debug view, so an arrival withheld *for*
+        # being expired is shown rather than filed under diagnostics. Every
+        # other withholding reason still applies.
+        asked_to_see_it = include_expired and verdict is not None and verdict.code == INGRESS_EXPIRED_ON_ARRIVAL
+        if verdict is not None and verdict.is_diagnostic and not asked_to_see_it:
+            # Withheld from normal mail, but never without saying so: an arrival
+            # on a retired or quarantined pair is the case that used to vanish.
+            diagnostics.append(_message_diagnostic(msg, verdict))
+            continue
         if not include_expired and is_expired(msg):
             continue
-        if not include_acked and index.is_acked(msg.msg_id, session_id):
+        # The classifier decided this inside the transaction that registered the
+        # arrival; asking the index again here would answer from whatever state
+        # exists now, which is a second, weaker judgement of the same question.
+        acked = verdict.acked if verdict is not None else index.is_acked(msg.msg_id, session_id)
+        if not include_acked and acked:
             continue
         if since_dt is not None:
             created = msg.created_at
@@ -1115,12 +1272,12 @@ def check_messages(
                     'kind': recipient.get('kind', 'session'),
                     'session_id': recipient.get('session_id', ''),
                 },
-                'acked': index.is_acked(msg.msg_id, session_id),
+                'acked': _acked_flag(classifications.get(msg.msg_id), index, msg.msg_id, session_id),
                 'delivery_adapters': msg.delivery_adapters,
             }
         )
 
-    return json.dumps({'messages': items, 'count': len(items), 'truncated': truncated})
+    return json.dumps({'messages': items, 'count': len(items), 'truncated': truncated, 'diagnostics': diagnostics})
 
 
 @mcp.tool()

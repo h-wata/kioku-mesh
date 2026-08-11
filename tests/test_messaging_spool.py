@@ -233,11 +233,13 @@ class TestLocalMessageIndex:
 
     def test_purge_expired(self, tmp_path: Path) -> None:
         idx = LocalMessageIndex(tmp_path / 'inbox.db')
-        active = _make_msg(expires_at=_future(), ttl_sec=None)
-        expired = _make_msg(expires_at=_past(), ttl_sec=None)
+        # Both are registered while still live: an arrival that is already
+        # expired is retired by the classifier and never becomes a row at all.
+        active = _make_msg(expires_at=_future(3600), ttl_sec=None)
+        expired = _make_msg(expires_at=_future(60), ttl_sec=None)
         idx.register(active, 'test-session')
         idx.register(expired, 'test-session')
-        count = idx.purge_expired()
+        count = idx.purge_expired(now=_future(120))
         assert count == 1
         remaining = idx.list_unacked('test-session')
         assert active.msg_id in remaining

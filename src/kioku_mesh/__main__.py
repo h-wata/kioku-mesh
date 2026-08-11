@@ -1936,6 +1936,10 @@ def _cmd_orphan_acks_list(args: argparse.Namespace) -> int:
             flags.append('LIVE-MESSAGE')
         if entry.has_tombstone:
             flags.append('tombstoned')
+        if entry.provenance != 'migration':
+            # Where the row came from changes how it should be judged, so it is
+            # shown next to the state rather than only in the JSON form.
+            flags.append(entry.provenance)
         suffix = f'  [{", ".join(flags)}]' if flags else ''
         print(f'{entry.msg_id}  {entry.recipient_session_id}  acked={entry.acked_at} ({age})  {entry.state}{suffix}')
     if page.next_cursor:

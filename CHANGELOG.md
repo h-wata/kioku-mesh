@@ -61,6 +61,69 @@ ADR-0030.
   the message together. There is deliberately no bulk delete and no age-based
   cleanup. This is the first of three units; the `check_messages` suppression
   path itself changes in the next one (N4).
+- Messaging: `check_messages` no longer drops a message without saying so, and
+  expiry purge no longer manufactures the ack rows that made it happen (N4,
+  unit 2 of 3). Three changes: `is_acked` now believes an acknowledgement only
+  while its message row still exists, so a stray ack can no longer suppress a
+  live arrival carrying the same `(msg_id, recipient_session_id)`;
+  `purge_expired` writes a `message_tombstones` row and removes the pair's ack
+  in the same transaction as the message, so an expired id is retired rather
+  than left half-deleted; and every arrival goes through one
+  `register_or_classify` transaction that decides between a new message, a
+  duplicate of a live one, a retired id, a retired id reused for a different
+  message, a quarantined (legacy-unknown) pair, and an acknowledgement that
+  arrived before its message. Acks observed ahead of their message are held in
+  `pending_acks` — never read as authoritative — and promoted when the message
+  lands. Anything withheld from the inbox is reported in a new `diagnostics`
+  array on the `check_messages` response, carrying the withheld envelope, the
+  ack metadata behind the decision and the exact-pair command that resolves
+  it; `messages`, `count` and `truncated` are unchanged. Retiring an id means
+  a resend needs a new `msg_id`: re-putting a purged id is reported as
+  `duplicate_retired`, or as `protocol_violation` when the envelope changed.
+  The inbox schema is v3 (two nullable columns on `message_tombstones`
+  recording the retired envelope, added in place on existing databases).
+- Messaging: closed the three ways an arrival could still be withheld without
+  a word (cross-review of the above). An ack row written *after* the upgrade
+  pass — what an old writer leaves behind during a rolling upgrade — was not
+  covered by the one-time migration, so it became authoritative as soon as its
+  message was registered and reproduced the original symptom; the classifier
+  now quarantines any ack that has no message, one exact pair at a time, on the
+  ingress path itself, and an unresolved quarantine keeps its message withheld
+  on every poll instead of only the first. An arrival that was already expired
+  skipped the classifier entirely, so its id was never retired and could carry
+  a different message later; expired arrivals are now tombstoned inside the
+  classifying transaction rather than by the purge that follows the poll, which
+  means one failed purge can no longer make a retired id reusable. And a
+  classifier failure (a locked index, a disk error), an unreadable payload, or
+  a failed inbox query were swallowed by a broad `except`, leaving `count: 0`
+  with no diagnostics; each is now reported as `classification_failed`,
+  `arrival_undecodable`, `reply_error` or `selector_failed`, carrying the
+  affected message where there is one. Two further withholding reasons became visible in the
+  same pass — `ack_first_promoted` and `expired_on_arrival` — and the delivery
+  filter now takes ack state from the transaction that classified the arrival
+  instead of asking the index a second time. The inbox schema is v4:
+  quarantined acks record a `provenance` (`migration` or
+  `post_migration_ack`), added in place on existing databases and shown by
+  `orphan-acks list`.
+- Messaging: three narrower gaps from the second cross-review of the above. An
+  expired arrival was deleted from Zenoh storage *before* it was classified, so
+  a classification that then failed took the last copy of the message with it —
+  no tombstone was written, the id quietly became reusable, and the
+  "it is retried on the next poll" remedy was untrue because nothing would
+  arrive again; the delete now happens only after the classifying transaction
+  has committed. `record_ack` checked that the message was registered outside a
+  transaction and wrote the acknowledgement in a second one, leaving a window in
+  which `purge_expired` could retire the pair in between and turn the write into
+  exactly the unmatched ack this release exists to stop creating; the check and
+  the write now share one `BEGIN IMMEDIATE`, as every other writer here already
+  did. And `IngressResult` no longer carries a `suppressed` flag: whether an
+  arrival reaches the message list depends on the caller's `include_acked` /
+  `include_expired` request as well as on the verdict, which the index never
+  sees, so a single boolean decided inside the index could not answer it — an
+  acked duplicate would have come back flagged as withheld even from a caller
+  that asked for acked mail, and with no diagnostic attached. Callers read
+  `acked` (decided inside the classifying transaction) and the code's
+  `is_diagnostic` instead.
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with
