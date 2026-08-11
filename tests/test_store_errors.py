@@ -62,6 +62,19 @@ def _err_reply(message: str = 'fake error') -> SimpleNamespace:
     return SimpleNamespace(ok=None, err=err)
 
 
+def _tomb_reply(observation_id: str) -> SimpleNamespace:
+    """Build a fake tombstone reply (mesh-namespace key) for ``observation_id``.
+
+    Only ``ok.key_expr`` is inspected by the tombstone-collection loop in
+    ``_search_via_zenoh``, so the payload content is irrelevant.
+    """
+    ok = SimpleNamespace(
+        key_expr=f'mem/mesh/tomb/fake/k/p/s/{observation_id}',
+        payload=SimpleNamespace(to_string=lambda: ''),
+    )
+    return SimpleNamespace(ok=ok, err=None)
+
+
 class _FakeSession:
     """Return a canned sequence of replies per call to ``get``."""
 
@@ -801,6 +814,102 @@ def test_search_via_zenoh_and_unchanged_by_refactor(monkeypatch: pytest.MonkeyPa
     ids = {o.observation_id for o in results}
     assert match_obs.observation_id in ids, 'and-mode: full substring match must be included'
     assert no_match_obs.observation_id not in ids, 'and-mode: non-substring obs must be excluded'
+
+
+# ---------------------------------------------------------------------------
+# Issue #230: base filters (tombstone / since-until / cursor) are applied in
+# the base-filter scan pass, before query-term matching. These parametrized
+# tests pin that a base-filter-excluded observation is never resurrected by
+# the ``or`` / ``and_or`` query-term matching paths, even when it would
+# otherwise match every query term.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize('search_mode', ['or', 'and_or'])
+class TestSearchViaZenohBaseFilterSurvivesFallbackQueryMatch:
+    """Base filters must win over query-term matching in the or/and_or fallback (#230)."""
+
+    def test_tombstone_excludes_query_matching_obs(self, monkeypatch: pytest.MonkeyPatch, search_mode: str) -> None:
+        kept = Observation(content='alpha beta', project='base-filter-tomb')
+        tombstoned = Observation(content='alpha beta', project='base-filter-tomb')
+        fake = _FakeSession(
+            [
+                [_tomb_reply(tombstoned.observation_id)],  # tombstones: only the excluded obs
+                [_ok_reply(kept), _ok_reply(tombstoned)],
+            ]
+        )
+        _install_fake_session(monkeypatch, fake)
+
+        results = store.search_observations(query='alpha beta', project='base-filter-tomb', search_mode=search_mode)
+
+        ids = {o.observation_id for o in results}
+        assert kept.observation_id in ids, 'non-tombstoned query match must survive the base filter'
+        assert (
+            tombstoned.observation_id not in ids
+        ), f'tombstoned obs must not resurface even though it matches the query in {search_mode!r} mode'
+
+    def test_since_until_excludes_out_of_range_query_matching_obs(
+        self, monkeypatch: pytest.MonkeyPatch, search_mode: str
+    ) -> None:
+        in_range = Observation(content='alpha beta', project='base-filter-date')
+        in_range.created_at = '2025-06-15T00:00:00.000000Z'
+        out_of_range = Observation(content='alpha beta', project='base-filter-date')
+        out_of_range.created_at = '2024-01-01T00:00:00.000000Z'  # before since_iso
+        fake = _FakeSession(
+            [
+                [],  # tombstones empty
+                [_ok_reply(in_range), _ok_reply(out_of_range)],
+            ]
+        )
+        _install_fake_session(monkeypatch, fake)
+
+        results = store.search_observations(
+            query='alpha beta',
+            project='base-filter-date',
+            search_mode=search_mode,
+            since_iso='2025-01-01T00:00:00.000000Z',
+        )
+
+        ids = {o.observation_id for o in results}
+        assert in_range.observation_id in ids, 'in-range query match must survive the base filter'
+        assert (
+            out_of_range.observation_id not in ids
+        ), f'out-of-range obs must not resurface even though it matches the query in {search_mode!r} mode'
+
+    def test_cursor_excludes_boundary_query_matching_obs(
+        self, monkeypatch: pytest.MonkeyPatch, search_mode: str
+    ) -> None:
+        ts = '2025-06-01T00:00:00.000000Z'
+        rows = []
+        for _ in range(3):
+            obs = Observation(content='alpha beta', project='base-filter-cursor')
+            obs.created_at = ts
+            rows.append(obs)
+        rows.sort(key=lambda o: o.observation_id, reverse=True)
+        cursor_row = rows[0]  # boundary row: observation_id >= cursor must be excluded
+        surviving = rows[1]
+
+        fake = _FakeSession(
+            [
+                [],  # tombstones empty
+                [_ok_reply(o) for o in rows],
+            ]
+        )
+        _install_fake_session(monkeypatch, fake)
+
+        results = store.search_observations(
+            query='alpha beta',
+            project='base-filter-cursor',
+            search_mode=search_mode,
+            until_iso=ts,
+            cursor_observation_id=cursor_row.observation_id,
+        )
+
+        ids = {o.observation_id for o in results}
+        assert surviving.observation_id in ids, 'row past the cursor boundary must survive the base filter'
+        assert (
+            cursor_row.observation_id not in ids
+        ), f'cursor-boundary obs must not resurface even though it matches the query in {search_mode!r} mode'
 
 
 # ---------------------------------------------------------------------------

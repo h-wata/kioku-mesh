@@ -73,6 +73,16 @@ ADR-0030.
   before the fix (5 real mis-splits, 1 correct sentence end) and 2 after
   (0 mis-splits — both are correct first sentences whose content continues).
 
+### Added
+
+- Regression tests: parameterized `tests/test_store_errors.py` coverage
+  verifying the Zenoh fallback's tombstone / since-until / cursor base
+  filters are never overridden by a matching query term in the `or` and
+  `and_or` search modes (#230). Sabotage testing confirmed the tombstone
+  and since/until cases had no prior coverage against `or`/`and_or`; the
+  cursor case was already caught by an existing `and`-mode test but not
+  against `or`/`and_or`.
+
 ### Changed
 
 - Superseded ADR-0029's semver clause with ADR-0030, which documents a
