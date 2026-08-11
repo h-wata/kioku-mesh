@@ -1024,3 +1024,51 @@ def test_a_failed_purge_cannot_make_a_retired_id_reusable(
 
     assert result['count'] == 0
     assert [d['code'] for d in result['diagnostics']] == ['protocol_violation']
+
+
+def test_an_error_reply_is_reported_instead_of_swallowed(tmp_path: Path) -> None:
+    """A queryable that answers with an error is holding mail this poll cannot see."""
+    mcp_module._messaging_index = None
+    bad = MagicMock()
+    bad.ok = None
+    bad.err.payload.to_bytes.return_value = b'storage unavailable'
+    mock_session = MagicMock()
+    mock_session.get.return_value = [bad]
+
+    async def _go() -> dict:
+        async with Client(mcp) as client:
+            return json.loads((await client.call_tool('check_messages', {})).data)
+
+    with (
+        patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+        patch('kioku_mesh.mcp_server.get_session_id', return_value='err-reply-sess'),
+        patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+    ):
+        result = asyncio.run(_go())
+
+    assert result['count'] == 0
+    assert {d['code'] for d in result['diagnostics']} == {'reply_error'}
+    assert 'storage unavailable' in result['diagnostics'][0]['ack']['error']
+
+
+def test_an_error_reply_with_an_unreadable_payload_is_still_reported(tmp_path: Path) -> None:
+    """Reading the error must not become a second way to lose the report."""
+    mcp_module._messaging_index = None
+    bad = MagicMock()
+    bad.ok = None
+    bad.err.payload.to_bytes.side_effect = RuntimeError('no payload')
+    mock_session = MagicMock()
+    mock_session.get.return_value = [bad]
+
+    async def _go() -> dict:
+        async with Client(mcp) as client:
+            return json.loads((await client.call_tool('check_messages', {})).data)
+
+    with (
+        patch('kioku_mesh.mcp_server._get_zenoh_session', return_value=mock_session),
+        patch('kioku_mesh.mcp_server.get_session_id', return_value='err-reply-sess'),
+        patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path),
+    ):
+        result = asyncio.run(_go())
+
+    assert {d['code'] for d in result['diagnostics']} == {'reply_error'}

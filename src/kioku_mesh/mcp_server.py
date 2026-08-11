@@ -232,20 +232,33 @@ def _acked_flag(
     return verdict.acked if verdict is not None else index.is_acked(msg_id, session_id)
 
 
-def _ingress_error_diagnostic(code: str, source: str, error: BaseException) -> dict[str, object]:
+def _reply_error_text(reply: object) -> str:
+    """Best-effort description of a Zenoh error reply.
+
+    The error payload is whatever the queryable put there, so reading it is
+    itself allowed to fail; the reply is reported either way.
+    """
+    try:
+        return reply.err.payload.to_bytes().decode('utf-8', 'replace')  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return 'query replied with an error carrying no readable payload'
+
+
+def _ingress_error_diagnostic(code: str, source: str, error: BaseException | str) -> dict[str, object]:
     """Describe an ingress failure that never produced a message to describe.
 
     Same shape as :func:`_message_diagnostic` with an empty envelope, so a
     caller reads one list rather than having to know which failures come with a
     message attached and which do not.
     """
+    detail = error if isinstance(error, str) else f'{type(error).__name__}: {error}'
     return {
         'code': code,
         'msg_id': '',
         'recipient_session_id': '',
         'message': None,
         'source': source,
-        'ack': {'error': f'{type(error).__name__}: {error}'},
+        'ack': {'error': detail},
         'remedy': (
             'This inbox listing is incomplete: an arrival could not be read. Poll again, and check the '
             'Zenoh session if it keeps happening.'
@@ -1075,8 +1088,9 @@ def check_messages(
           it was seen, so it is retired instead of delivered.
         * ``classification_failed`` — the local index could not judge the
           arrival; it is retried on the next poll.
-        * ``arrival_undecodable`` / ``selector_failed`` — an arrival could not be
-          parsed, or a query failed, so this listing is incomplete.
+        * ``arrival_undecodable`` / ``reply_error`` / ``selector_failed`` — an
+          arrival could not be parsed, a queryable answered with an error, or a
+          query failed, so this listing is incomplete.
 
         Entries carry the withheld envelope (``null`` for the last two, which
         have no readable message), the metadata behind the decision, and the
@@ -1121,6 +1135,14 @@ def check_messages(
             try:
                 for reply in session.get(selector, timeout=3.0):
                     if not reply.ok:
+                        # The queryable answered with an error. Same class of
+                        # gap as an unreadable payload: whatever it was holding
+                        # is not in this listing, so the listing is incomplete
+                        # rather than empty.
+                        log.warning('check_messages: error reply for %s: %s', selector, _reply_error_text(reply))
+                        ingress_errors.append(
+                            _ingress_error_diagnostic('reply_error', selector, _reply_error_text(reply))
+                        )
                         continue
                     msg_key = str(reply.ok.key_expr)
                     try:

@@ -97,8 +97,8 @@ ADR-0030.
   classifier failure (a locked index, a disk error), an unreadable payload, or
   a failed inbox query were swallowed by a broad `except`, leaving `count: 0`
   with no diagnostics; each is now reported as `classification_failed`,
-  `arrival_undecodable` or `selector_failed`, carrying the affected message
-  where there is one. Two further withholding reasons became visible in the
+  `arrival_undecodable`, `reply_error` or `selector_failed`, carrying the
+  affected message where there is one. Two further withholding reasons became visible in the
   same pass — `ack_first_promoted` and `expired_on_arrival` — and the delivery
   filter now takes ack state from the transaction that classified the arrival
   instead of asking the index a second time. The inbox schema is v4:
