@@ -447,6 +447,13 @@ def search_memory(
     'or': any query term matching is sufficient; base filters remain AND.
     'and_or': AND hits first, then OR hits fill remaining limit slots (recall mode).
     Unknown values return an error message.
+    When ``search_mode`` is left at its default 'and' and that AND search comes
+    back empty, a second search with ``search_mode='or'`` is run automatically
+    (Issue #276) so agents searching with natural-language queries are not
+    penalized for AND's low recall. The fallback is reported by prefixing the
+    result with ``(no AND match; fell back to OR)``. This does not change the
+    default itself — only 'and' auto-retries; explicit 'or'/'and_or' calls and
+    the ``recall_context`` tool are unaffected.
     """
     try:
         from .memory.local_index import _validate_search_mode  # noqa: PLC0415
@@ -466,9 +473,26 @@ def search_memory(
         include_superseded=include_superseded,
         search_mode=search_mode,
     )
+    fell_back_to_or = False
+    if not results and search_mode == 'and':
+        results = get_backend().search_observations(
+            query=query,
+            agent_family=agent_family,
+            client_id=client_id,
+            pc_id=pc_id,
+            session_id=session_id,
+            project=project,
+            since_iso=since_iso,
+            limit=limit,
+            include_superseded=include_superseded,
+            search_mode='or',
+        )
+        fell_back_to_or = bool(results)
     if not results:
         return 'No matching memories.'
     lines = []
+    if fell_back_to_or:
+        lines.append('(no AND match; fell back to OR)')
     for obs in results:
         body = obs.summary if obs.summary else obs.content[:80]
         subject_part = f' {obs.subject}' if obs.subject else ''

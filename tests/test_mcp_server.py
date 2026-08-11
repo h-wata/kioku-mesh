@@ -739,6 +739,65 @@ def test_search_memory_with_search_mode_and_or(single_zenohd: Any) -> None:  # n
     assert obs.observation_id in text
 
 
+def test_search_memory_default_and_falls_back_to_or_when_empty(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Issue #276: default 'and' search that misses falls back to 'or' and says so."""
+    obs = _mk_obs('deduplicate search results content', project='mcp-and-or-fallback')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                # 'FTS5' never appears in the saved content, so AND (all terms
+                # required) misses while OR (any term) still finds 'deduplicate'.
+                {'query': 'deduplicate FTS5', 'project': 'mcp-and-or-fallback'},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert '(no AND match; fell back to OR)' in text
+    assert obs.observation_id in text
+
+
+def test_search_memory_and_hit_has_no_fallback_marker(single_zenohd: Any) -> None:  # noqa: ARG001
+    """When AND already hits, no fallback marker is added (no false-positive fallback)."""
+    obs = _mk_obs('deduplicate search results FTS5 content', project='mcp-and-no-fallback')
+    store.put_observation(obs)
+    time.sleep(_INGEST_SETTLE)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'deduplicate FTS5', 'project': 'mcp-and-no-fallback'},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert '(no AND match; fell back to OR)' not in text
+    assert obs.observation_id in text
+
+
+def test_search_memory_and_or_both_empty_reports_none_without_marker(single_zenohd: Any) -> None:  # noqa: ARG001
+    """When both AND and OR miss, the plain 'no matches' message is returned unmarked."""
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'nonexistent-term-xyz', 'project': 'mcp-and-or-both-empty'},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert text == 'No matching memories.'
+    assert '(no AND match; fell back to OR)' not in text
+
+
 def test_search_memory_unknown_search_mode_returns_error(single_zenohd: Any) -> None:  # noqa: ARG001
     """search_memory with an unknown search_mode returns a user-visible error string."""
 

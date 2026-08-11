@@ -25,6 +25,14 @@ ADR-0030.
   (`caplog.records` came back empty even though the warning was logged to
   stderr), unrelated to any code under test. GitHub Actions never sees this
   since its runners don't have ROS2 sourced. See #289.
+- `search_memory`: when `search_mode` is left at its default `'and'` and that
+  AND search returns zero results, the tool now automatically retries with
+  `search_mode='or'` and prefixes the result with `(no AND match; fell back
+  to OR)` when the retry finds hits. `recall_context`'s `and_or` default was
+  already resilient to this; `search_memory` previously returned `"No
+  matching memories."` for any natural-language query missing one term.
+  Explicit `search_mode='or'`/`'and_or'` calls and the default value itself
+  are unchanged (#276).
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
