@@ -42,6 +42,14 @@ acceptance criteria と照合する）を通し、GitHub Actions の CI（`lint-
   記録する。レビューで生成した cache / index / 一時展開も含めて worktree を clean に戻す。
 - サボタージュが green のままだった場合、それ自体が「テストが有効でない」ことの証拠として
   扱う。逆に red になれば、そのテストが当該契約を押さえていることの確認になる。
+- **production diff が無い PR（docs-only の ADR/design doc 追加、設定ファイルのみの変更等）は
+  本手順の対象外（not applicable）とする。** 壊す対象の契約が存在しない以上、サボタージュ
+  0 件は「検証をスキップした」のではなく「適用不能」であり、両者を区別せずに記録すると
+  vacuous pass（何も壊していないのに green を根拠に安全と主張する状態）と見分けが付かなく
+  なる。review YAML の `verification` 節には `production_diff_files` の実測件数を記録し、
+  0 件の場合は `source_changes: not_performed` / `github_writes: not_performed` のように
+  適用不能である旨を明示する（本 PR #303 自身の review 正本
+  `worker4_review_TASK-303-review.yaml` の `verification` 節がこの記録形式の実例）。
 
 ## Consequences
 
@@ -64,7 +72,9 @@ acceptance criteria と照合する）を通し、GitHub Actions の CI（`lint-
   カバレッジは後者を測れない。
 - **レビュアの目視だけで判断する。** #292 は「fixture の返り値が定数と同値」という一致で
   あり、diff を読むだけでは気づけない。目視主体だと巡回数も増える（#287 は 3 巡、#291 は
-  初回 blocking 9 件）。
+  初回 blocking 4 件〔`worker4_review_TASK-291-review.yaml` の `blocking_findings`
+  B1-B4。観点別の findings 節に同じ 4 件が再掲されているが、独立した finding としては
+  4 件〕）。
 - **author 自身にサボタージュさせて済ませる。** 自己採点になる。author は自分のテストが
   何を押さえている「つもり」かを知っているため、押さえていない側の mutation を思いつき
   にくい。実際 PR #295 では author のサボタージュ 4 件中 3 件が green のままで、層が互いを

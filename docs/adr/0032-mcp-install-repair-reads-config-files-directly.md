@@ -16,7 +16,9 @@
 初期実装は Claude Code の `claude mcp get` のテキスト出力を parse して既存エントリを
 復元していた。この方式は cross-review を 3 巡しても収束しなかった:
 
-1. 1 巡目: Args / Scope を復元しない、rollback 無し、TOML 全再生成 — blocking 6 件
+1. 1 巡目: Args / Scope を復元しない、rollback 無し、TOML 全再生成 — blocking 3 件
+   （`worker4_review_TASK-287-review.yaml` の `blocking_findings` B1-B3。観点別の
+   findings 節に同じ 3 件が再掲されているが、独立した finding としては 3 件）
 2. 2 巡目: 「`Environment` 内で最初の env key の後にインデント付きの未知フィールドが
    来ると継続行と誤認する」で partial
 3. 3 巡目: インデント付き drift は fail-closed できたが、今度は「桁 0 の non-KEY 行
