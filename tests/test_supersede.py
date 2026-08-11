@@ -337,3 +337,48 @@ def test_conflicting_latest_injected_list_never_truncated(monkeypatch: pytest.Mo
     result = check_conflicting_latest(observations=[_mk('only', subject='db')])
     assert result.status is CheckStatus.PASS
     assert result.details['truncated'] is False
+
+
+def test_c2_cmd_save_logs_suppressed_renderer_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The swallowed renderer exception leaves a debug breadcrumb (#236 C2-3)."""
+    import argparse
+    from unittest.mock import MagicMock
+
+    import kioku_mesh.__main__ as cli_module
+
+    args = argparse.Namespace(
+        tags='',
+        source_files=None,
+        references=None,
+        supersedes=None,
+        visibility='',
+        content='use PostgreSQL',
+        project='demo',
+        memory_type='decision',
+        importance=3,
+        subject='db',
+        summary='switching primary datastore to PostgreSQL',
+    )
+
+    mock_backend = MagicMock()
+    mock_backend.find_supersede_candidates.return_value = [_mk('old decision', subject='db')]
+    monkeypatch.setattr(cli_module, 'get_backend', lambda: mock_backend)
+    monkeypatch.setattr(cli_module, 'resolve_write_visibility', lambda _: ('', ''))
+    monkeypatch.setattr(cli_module, 'format_visibility', lambda v, s: 'local')
+
+    def _raiser(_: object) -> NoReturn:
+        raise RuntimeError('render boom')
+
+    monkeypatch.setattr(cli_module, '_format_supersede_hint', _raiser)
+
+    debug_calls: list[str] = []
+    monkeypatch.setattr(
+        cli_module.log,
+        'debug',
+        lambda msg, *args, **kw: debug_calls.append(msg % args if args else msg),
+    )
+
+    result = cli_module._cmd_save(args)
+
+    assert result == 0
+    assert any('supersede suggestion failed' in m for m in debug_calls)
