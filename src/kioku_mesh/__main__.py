@@ -1884,6 +1884,98 @@ def _cmd_tls_info(args: argparse.Namespace) -> int:  # noqa: ARG001
     return 0
 
 
+def _messaging_db_path(args: argparse.Namespace) -> Path:
+    """Resolve the inbox database the messaging commands operate on."""
+    from .core.identity import state_dir
+
+    if getattr(args, 'db', None):
+        return Path(args.db)
+    return state_dir() / 'messaging' / 'inbox.db'
+
+
+def _cmd_orphan_acks_list(args: argparse.Namespace) -> int:
+    from .messaging import orphan_acks
+
+    db_path = _messaging_db_path(args)
+    if not db_path.exists():
+        print(f'error: no messaging index at {db_path}', file=sys.stderr)
+        return 2
+    try:
+        page = orphan_acks.list_legacy_unknown_acks(db_path, limit=args.limit, cursor=args.cursor)
+    except ValueError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+
+    if args.format == 'json':
+        print(
+            json.dumps(
+                {
+                    'migrated': page.migrated,
+                    'entries': [e.as_dict() for e in page.entries],
+                    'next_cursor': page.next_cursor,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    if not page.migrated:
+        print(f'{db_path} predates messaging schema v2; open it once with kioku-mesh to migrate it.')
+        return 0
+    if not page.entries:
+        print('no legacy-unknown acks.')
+        return 0
+    for entry in page.entries:
+        age = f'{entry.age_days:.0f}d' if entry.age_days is not None else '?'
+        flags = []
+        if entry.has_live_message:
+            flags.append('LIVE-MESSAGE')
+        if entry.has_tombstone:
+            flags.append('tombstoned')
+        suffix = f'  [{", ".join(flags)}]' if flags else ''
+        print(f'{entry.msg_id}  {entry.recipient_session_id}  acked={entry.acked_at} ({age})  {entry.state}{suffix}')
+    if page.next_cursor:
+        print(f'\nnext page: --cursor {page.next_cursor}')
+    return 0
+
+
+def _cmd_orphan_acks_recover(args: argparse.Namespace) -> int:
+    from .messaging import orphan_acks
+
+    db_path = _messaging_db_path(args)
+    if not db_path.exists():
+        print(f'error: no messaging index at {db_path}', file=sys.stderr)
+        return 2
+    try:
+        result = orphan_acks.recover(
+            db_path,
+            msg_id=args.msg_id,
+            recipient_session_id=args.session_id,
+            action=args.action,
+            backup_path=args.backup,
+            execute=args.execute,
+            operator=args.operator,
+        )
+    except (ValueError, OSError) as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+
+    if result.before is None:
+        print(f'no legacy-unknown ack for ({result.msg_id}, {result.recipient_session_id}); nothing to do.')
+        return 0
+    if not result.executed:
+        print(f'dry run — would {result.action} ({result.msg_id}, {result.recipient_session_id}):')
+        print(json.dumps(result.before, ensure_ascii=False, indent=2))
+        print('\nre-run with --backup <new path> --execute to apply.')
+        return 0
+    print(
+        f'{result.action}d ({result.msg_id}, {result.recipient_session_id}); '
+        f'pre-recovery database backed up to {result.backup_path}'
+    )
+    return 0
+
+
 def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
     from datetime import timezone
 
@@ -2427,6 +2519,66 @@ def _build_parser() -> argparse.ArgumentParser:
         help='print the command / config block instead of executing the registration',
     )
     p_mcp_install.set_defaults(func=_cmd_mcp_install)
+
+    p_messaging = sub.add_parser(
+        'messaging',
+        help='Inspect and repair local messaging (inbox) state',
+    )
+    p_messaging_sub = p_messaging.add_subparsers(dest='messaging_command', required=True)
+    p_orphan = p_messaging_sub.add_parser(
+        'orphan-acks',
+        help='Inspect / recover acknowledgements that have no matching message',
+        description=(
+            'An ack row with no messages row cannot be classified from the database alone:\n'
+            'it may be residue from the old purge bug, or an acknowledgement that arrived\n'
+            'before its message. Such rows are quarantined as legacy-unknown and are never\n'
+            'read as acknowledgements. These commands list them (read-only) and resolve one\n'
+            'exact pair at a time. There is deliberately no bulk delete and no age-based\n'
+            'cleanup: age is not evidence, and deleting a legitimate early ack loses it.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_orphan_sub = p_orphan.add_subparsers(dest='orphan_command', required=True)
+
+    p_orphan_list = p_orphan_sub.add_parser(
+        'list',
+        help='List quarantined (msg_id, session) pairs. Read-only.',
+    )
+    p_orphan_list.add_argument('--db', help='inbox database path (default: the local state dir)')
+    p_orphan_list.add_argument('--limit', type=int, default=50, help='rows per page (default: 50)')
+    p_orphan_list.add_argument('--cursor', help='continue from a previous page')
+    p_orphan_list.add_argument('--format', choices=['text', 'json'], default='text', help='output format')
+    p_orphan_list.set_defaults(func=_cmd_orphan_acks_list)
+
+    p_orphan_recover = p_orphan_sub.add_parser(
+        'recover',
+        help='Release or promote ONE quarantined pair (requires --backup and --execute)',
+        description=(
+            'release: record that the pair is not an acknowledgement, so the message may be\n'
+            '         presented again.\n'
+            'promote: record that it really was an acknowledgement observed before its\n'
+            '         message, and make it authoritative. Requires the message to exist.\n\n'
+            'Without --execute this is a dry run. --msg-id and --session-id must each name\n'
+            'one exact value; wildcards, ranges and "all" are refused.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_orphan_recover.add_argument('--db', help='inbox database path (default: the local state dir)')
+    p_orphan_recover.add_argument('--msg-id', required=True, help='exact msg_id (no wildcards)')
+    p_orphan_recover.add_argument('--session-id', required=True, help='exact recipient_session_id (no wildcards)')
+    p_orphan_recover.add_argument('--action', required=True, choices=['release', 'promote'])
+    p_orphan_recover.add_argument(
+        '--backup',
+        help='absolute path for a fresh pre-recovery database backup. Required with --execute; '
+        'must not already exist.',
+    )
+    p_orphan_recover.add_argument('--operator', help='who is running this, recorded in the audit log')
+    p_orphan_recover.add_argument(
+        '--execute',
+        action='store_true',
+        help='apply the change. Without it, the command only reports what it would do.',
+    )
+    p_orphan_recover.set_defaults(func=_cmd_orphan_acks_recover)
 
     p_mesh = sub.add_parser(
         'mesh',

@@ -26,6 +26,12 @@ def _iso(dt: datetime) -> str:
     return dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
 
 
+# Bumped when the messaging inbox schema changes. v1 is the original
+# messages/acks pair; v2 adds the ack-state tables described in the N4 design
+# (immutable msg_id + tombstone + pending ack-first + legacy isolation) and
+# runs the one-time classification of pre-existing acks.
+MESSAGING_SCHEMA_VERSION = 2
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS messages (
     msg_id               TEXT NOT NULL,
@@ -42,7 +48,95 @@ CREATE TABLE IF NOT EXISTS acks (
     acked_at             TEXT NOT NULL,
     PRIMARY KEY (msg_id, recipient_session_id)
 );
+CREATE TABLE IF NOT EXISTS messaging_schema_version (
+    version INTEGER PRIMARY KEY
+);
+-- An acknowledgement observed before its message. Deliberately NOT read by
+-- is_acked: it becomes authoritative only when the message arrives and unit 2
+-- promotes it inside the same transaction.
+CREATE TABLE IF NOT EXISTS pending_acks (
+    msg_id               TEXT NOT NULL,
+    recipient_session_id TEXT NOT NULL,
+    acked_at             TEXT NOT NULL,
+    source_key           TEXT,
+    first_seen_at        TEXT NOT NULL,
+    PRIMARY KEY (msg_id, recipient_session_id)
+);
+-- Ids retired by expiry purge. Kept forever on purpose: a tombstone that is
+-- garbage-collected stops the receiver from rejecting reuse of that id, which
+-- is the enforcement unit 2 relies on.
+CREATE TABLE IF NOT EXISTS message_tombstones (
+    msg_id               TEXT NOT NULL,
+    recipient_session_id TEXT NOT NULL,
+    tombstoned_at        TEXT NOT NULL,
+    reason               TEXT,
+    PRIMARY KEY (msg_id, recipient_session_id)
+);
+-- Acks that had no message at upgrade time. Whether each one is purge residue
+-- or a legitimate ack observed before its message cannot be decided from the
+-- stored columns, so the ambiguity is recorded rather than guessed away.
+CREATE TABLE IF NOT EXISTS legacy_unknown_acks (
+    msg_id               TEXT NOT NULL,
+    recipient_session_id TEXT NOT NULL,
+    acked_at             TEXT NOT NULL,
+    migrated_at          TEXT NOT NULL,
+    state                TEXT NOT NULL DEFAULT 'unresolved',
+    resolved_at          TEXT,
+    resolution_note      TEXT,
+    PRIMARY KEY (msg_id, recipient_session_id)
+);
+-- Append-only. Every recovery writes its before image here with the backup it
+-- was taken against, so an operator can reconstruct what was changed and why.
+CREATE TABLE IF NOT EXISTS recovery_audit (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    msg_id               TEXT NOT NULL,
+    recipient_session_id TEXT NOT NULL,
+    action               TEXT NOT NULL,
+    before_json          TEXT NOT NULL,
+    operator             TEXT,
+    performed_at         TEXT NOT NULL,
+    backup_path          TEXT NOT NULL
+);
 """
+
+
+def _stored_schema_version(conn: sqlite3.Connection) -> int:
+    """Return the version recorded in the database, or 1 for a pre-versioning file.
+
+    A v1 database has no version row at all, so "no row" and "version 1" are the
+    same statement — the tables the old code created are exactly the v1 schema.
+    """
+    row = conn.execute('SELECT version FROM messaging_schema_version').fetchone()
+    return int(row[0]) if row is not None else 1
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing inbox database up to :data:`MESSAGING_SCHEMA_VERSION`.
+
+    The DDL above is additive and already applied, so the only work left is the
+    one-time classification of acks that predate the new state model, plus
+    stamping the version. Everything runs in a single transaction: an
+    interrupted upgrade leaves the original ``acks`` table exactly as it was.
+
+    Idempotent twice over — the version check skips the pass on reopen, and
+    :func:`~.orphan_acks.classify_unmatched_acks` converges if it is run again
+    anyway (which a rolling upgrade can cause, because an old writer that is
+    still running can create new unmatched rows after the upgrade).
+    """
+    from . import orphan_acks  # noqa: PLC0415 - avoids an import cycle at module load
+
+    if _stored_schema_version(conn) >= MESSAGING_SCHEMA_VERSION:
+        return
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        moved = orphan_acks.classify_unmatched_acks(conn)
+        orphan_acks.verify_classification(conn, moved)
+        conn.execute('DELETE FROM messaging_schema_version')
+        conn.execute('INSERT INTO messaging_schema_version (version) VALUES (?)', (MESSAGING_SCHEMA_VERSION,))
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 class LocalMessageIndex:
@@ -54,6 +148,7 @@ class LocalMessageIndex:
         with self._connect() as conn:
             conn.executescript(_DDL)
             conn.commit()
+            _migrate(conn)
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
