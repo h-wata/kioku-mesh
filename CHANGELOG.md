@@ -109,7 +109,14 @@ ADR-0030.
     regular file. The file is compared against the bytes `--repair` read both
     before the backup and immediately before the replace, so an update another
     process (Claude Code itself rewrites this file) made in between is never
-    silently dropped — the repair aborts with nothing written. The previous
+    silently dropped — the repair aborts with nothing written. That comparison
+    covers the file's metadata as well as its bytes: the replacement carries the
+    identity, mode, owning group and extended attributes read at the start, so a
+    permission change or an xattr (an ACL included) added while the replacement
+    was being staged would be reverted by the rename. Both are re-read
+    immediately before the replace and any difference fails the repair closed. A
+    filesystem with no extended attributes at all reports none on both reads, so
+    the check stays inert there rather than refusing. The previous
     file is copied to `<file>.bak-<UTC timestamp>` (timestamped so a hand-made
     `.bak` is never clobbered), created exclusively (`O_EXCL`) at no wider than
     `0600` so a `0600` config's secrets are not copied into a umask-wide

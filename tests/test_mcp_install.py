@@ -1431,6 +1431,63 @@ def test_repair_claude_code_accepts_an_unsettable_xattr_the_staged_file_already_
     assert 'KIOKU_MESH_AGENT_FAMILY' in config.read_text()
 
 
+def test_repair_claude_code_fails_closed_when_an_xattr_appears_while_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The metadata half of the compare-and-swap (Codex re-review 4 on #287).
+
+    Copying the xattrs takes a snapshot of them; another writer adding one after
+    that snapshot means ``os.replace`` would carry the *stale* set onto the live
+    file and drop the addition, with --repair reporting success.
+    """
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    _require_user_xattrs(config)
+    os.setxattr(config, 'user.before', b'already-there')
+    before = config.read_text()
+    real_copy_xattrs = mcp_install._copy_xattrs
+
+    def copy_then_let_another_writer_add_one(source: Path, target_fd: int, *, destination: Path) -> None:
+        real_copy_xattrs(source, target_fd, destination=destination)
+        os.setxattr(source, 'user.added_during_staging', b'must-not-be-lost')
+
+    monkeypatch.setattr(mcp_install, '_copy_xattrs', copy_then_let_another_writer_add_one)
+
+    with pytest.raises(RuntimeError, match='its metadata changed on disk'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+    assert os.getxattr(config, 'user.before') == b'already-there'
+    assert os.getxattr(config, 'user.added_during_staging') == b'must-not-be-lost'
+    assert not list(tmp_path.glob('.claude.json.bak-*'))
+    assert not list(tmp_path.glob('.claude.json.*.tmp'))
+
+
+def test_repair_claude_code_fails_closed_when_the_mode_changes_while_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The staged file wears the mode read at the start, so a chmod mid-repair would be undone too."""
+    config = tmp_path / '.claude.json'
+    _user_scope_config(config)
+    config.chmod(0o600)
+    before = config.read_text()
+    real_copy_xattrs = mcp_install._copy_xattrs
+
+    def copy_then_let_another_writer_widen_it(source: Path, target_fd: int, *, destination: Path) -> None:
+        real_copy_xattrs(source, target_fd, destination=destination)
+        source.chmod(0o640)
+
+    monkeypatch.setattr(mcp_install, '_copy_xattrs', copy_then_let_another_writer_widen_it)
+
+    with pytest.raises(RuntimeError, match='its metadata changed on disk'):
+        repair_claude_code(config_path=config, project_dir=tmp_path / 'proj')
+
+    assert config.read_text() == before
+    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert not list(tmp_path.glob('.claude.json.bak-*'))
+    assert not list(tmp_path.glob('.claude.json.*.tmp'))
+
+
 def test_repair_claude_code_survives_a_filesystem_without_xattrs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

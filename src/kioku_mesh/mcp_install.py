@@ -974,6 +974,57 @@ def _assert_config_unchanged(path: Path, original_text: str, *, stage: str) -> N
         )
 
 
+def _config_metadata_snapshot(path: Path, *, stage: str) -> tuple[Any, ...]:
+    """Capture everything :func:`os.replace` would carry over from ``path`` besides its bytes.
+
+    The staged replacement wears the identity, mode and extended attributes read
+    at the start of the repair, so anything another writer changes afterwards is
+    silently reverted by the replace — the metadata twin of the body race
+    :func:`_assert_config_unchanged` already guards (Codex re-review 4 on #287).
+
+    Compared here rather than ``st_ctime``: whether a bare ``setxattr`` bumps
+    ctime is filesystem-dependent, while the attribute values themselves are
+    exactly what would be lost. A filesystem with no extended attributes at all
+    yields ``None`` for that slot on both reads, so the check is inert there
+    instead of refusing — the same hybrid boundary :func:`_copy_xattrs` draws.
+    """
+    try:
+        st = os.stat(path)
+        xattrs: tuple[tuple[str, bytes], ...] | None
+        try:
+            names = os.listxattr(path)
+        except AttributeError:  # pragma: no cover - platform without xattr support
+            xattrs = None
+        except OSError as e:
+            if e.errno not in _XATTR_UNSUPPORTED:
+                raise
+            xattrs = None
+        else:
+            values = []
+            for name in sorted(names):
+                try:
+                    values.append((name, os.getxattr(path, name)))
+                except OSError as e:
+                    if e.errno != errno.ENODATA:  # pragma: no cover - removed mid-repair
+                        raise
+            xattrs = tuple(values)
+    except OSError as e:
+        raise RuntimeError(
+            f'refusing to write {path}: its metadata could not be re-read {stage} ({e}); nothing was written.'
+        ) from e
+    return (st.st_dev, st.st_ino, stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid, xattrs)
+
+
+def _assert_config_metadata_unchanged(path: Path, original: tuple[Any, ...], *, stage: str) -> None:
+    """Fail closed when ``path``'s metadata is no longer what the replacement carries."""
+    if _config_metadata_snapshot(path, stage=stage) != original:
+        raise RuntimeError(
+            f'refusing to write {path}: its metadata changed on disk {stage}, so writing would drop that '
+            'change — the replacement still carries the permissions and extended attributes read '
+            'beforehand. Nothing was written — re-run --repair.'
+        )
+
+
 def _write_backup(backup: Path, text: str, *, mode: int) -> None:
     """Create ``backup`` exclusively at ``mode`` and fsync it.
 
@@ -1102,6 +1153,7 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
     _assert_config_unchanged(path, original_text, stage='after --repair read it')
     st = os.stat(path)
     original_mode = stat.S_IMODE(st.st_mode)
+    original_metadata = _config_metadata_snapshot(path, stage='after --repair read it')
 
     backup = _new_backup_path(path)
     _write_backup(backup, original_text, mode=original_mode & 0o600)
@@ -1127,6 +1179,7 @@ def _write_json_atomically(path: Path, new_text: str, *, original_text: str, exp
             _copy_xattrs(path, handle.fileno(), destination=path)
         _validate_pending_write(tmp_path, new_text, expected, destination=path)
         _assert_config_unchanged(path, original_text, stage='while --repair was staging the new file')
+        _assert_config_metadata_unchanged(path, original_metadata, stage='while --repair was staging the new file')
         os.replace(tmp_path, path)
         tmp_path = None
         replaced = True
