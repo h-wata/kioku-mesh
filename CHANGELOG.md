@@ -76,6 +76,78 @@ ADR-0030.
   boundary, so `get_memory` / `delete_memory` stay callable on a partially
   displayed result. The `showing N of M` counts observations only; a prefix
   banner (e.g. an AND->OR fallback marker) is never counted as a result.
+- `kioku-mesh mcp install --client <client> --repair`: overwrites only the
+  retired `MESH_MEM_*` identity env vars (`MESH_MEM_AGENT_FAMILY` /
+  `MESH_MEM_CLIENT_ID`) on an already-registered Claude Code or Codex CLI
+  entry to the current `KIOKU_MESH_*` prefix. Command, args, every other env
+  var and any field this version knows nothing about are left untouched —
+  unlike `--force`, which resets the whole entry. Each client is edited
+  through its own config file rather than through its CLI. (#279)
+
+  "Everything else untouched" is enforced rather than assumed:
+
+  - Claude Code: the registration is read from, and written back to, the file
+    Claude Code itself stores it in — `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json`
+    for the `user` and `local` scopes, `<cwd>/.mcp.json` for `project`. Only
+    the two identity key *tokens* are rewritten, directly in the file's raw
+    text; every other byte is copied through. Args (including arguments
+    containing spaces), unknown fields, key order, indentation, colon/comma
+    spacing, compact containers, `\/` and `\uXXXX` escapes and number spelling
+    therefore survive by construction — including a valid `1e400`, which a
+    re-serializing rewrite turned into the non-standard `Infinity` token that
+    Claude Code rejects the whole file for. A config that already contains such
+    a token, or a duplicate key, fails closed instead of being edited.
+  - Claude Code: this deliberately replaces the earlier `claude mcp get` +
+    `remove` + `add` route. That route was lossy and could not be made
+    lossless: `Args:` is printed space-joined, so `["--flag", "two words"]`
+    came back as three arguments, and a multi-line env value's continuation
+    lines print at column 0 byte-identically to an unknown field. Editing the
+    JSON also removes the window in which the entry was deleted but not yet
+    re-added, so no rollback path is needed.
+  - Claude Code: the write protocol is fail-closed at every step. A symlinked
+    config is written through to its referent, so the link is not replaced by a
+    regular file. The file is compared against the bytes `--repair` read both
+    before the backup and immediately before the replace, so an update another
+    process (Claude Code itself rewrites this file) made in between is never
+    silently dropped — the repair aborts with nothing written. That comparison
+    covers the file's metadata as well as its bytes: the replacement carries the
+    identity, mode, owning group and extended attributes read at the start, so a
+    permission change or an xattr (an ACL included) added while the replacement
+    was being staged would be reverted by the rename. Both are re-read
+    immediately before the replace and any difference fails the repair closed. A
+    filesystem with no extended attributes at all reports none on both reads, so
+    the check stays inert there rather than refusing. The previous
+    file is copied to `<file>.bak-<UTC timestamp>` (timestamped so a hand-made
+    `.bak` is never clobbered), created exclusively (`O_EXCL`) at no wider than
+    `0600` so a `0600` config's secrets are not copied into a umask-wide
+    backup. The new text is validated as strict JSON equal to the intended
+    document *while it is still the temp file*, so nothing unverified is ever
+    live, and the replacement keeps the original's mode, group and extended
+    attributes. Because `os.replace` hands the destination the *staged* file's
+    metadata, every xattr — POSIX ACLs and SELinux labels included — is copied
+    across before the rename; an attribute that can neither be set nor is
+    already present with the same value on the staged file fails the repair
+    closed rather than disappearing silently. The rename is followed by a
+    directory `fsync`. Once the replace has landed the backup is kept whatever
+    fails next: a directory-`fsync` error reports that the config is live but
+    not durably confirmed and names the retained pre-repair copy, instead of
+    deleting the only file that could undo the repair. The result is finally
+    read back: a mismatch restores the backup, unless the file changed again
+    after the replace, in which case that newer file is left alone and the
+    backup path is reported rather than overwriting another writer's update.
+  - Claude Code: a name registered in more than one scope fails closed. The
+    error lists every scope and file it was found in and how to resolve the
+    ambiguity; nothing is written.
+  - Codex CLI: only the identity key tokens inside the target entry's env are
+    rewritten, so that entry's own `args` / `enabled` / `startup_timeout_sec`,
+    its comments and its value quoting survive verbatim. The rewritten file is
+    re-parsed and compared against the intended document before it is written;
+    a layout the editor cannot handle fails closed with the file untouched. A
+    quoted identity key keeps its quote style, so the rename changes the key
+    name and nothing else.
+  - `mcp install --client codex-cli` now escapes values per TOML 1.0, so a
+    command path or env value containing `"` or `\` no longer produces a
+    config that fails to parse.
 
 ### Fixed
 
@@ -186,6 +258,16 @@ ADR-0030.
   `_cap_search_output` via `prefix=` instead: its bytes still count toward
   the cap and it always survives truncation, but it is excluded from the
   `N`/`M` entry count.
+- `mcp install --repair`: a `chmod` / `chgrp` landing on the config while
+  `--repair` was preparing its replacement could be silently reverted. The
+  mode and group stamped onto the staged file came from their own `os.stat`,
+  taken just before the metadata snapshot that the pre-replace
+  compare-and-swap uses as "the original". A concurrent permission change in
+  between was therefore already inside the snapshot — the re-check saw nothing
+  changed and let the replace through, while the staged file still wore the
+  values read a syscall earlier. `--repair` reported success and the change
+  was gone. Both values are now derived from that single snapshot, so the
+  staged file and the compare-and-swap baseline can no longer disagree (#279).
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with

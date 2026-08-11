@@ -1329,6 +1329,26 @@ def _cmd_mcp_install(args: argparse.Namespace) -> int:
     except ValueError:
         print(f'error: unknown client {args.client!r}', file=sys.stderr)
         return 2
+
+    if args.repair:
+        # --repair edits an existing registration in place (env only); it
+        # does not need kioku-mesh-mcp on PATH or --force/--env/--dry-run,
+        # so it is handled as its own branch rather than folded into the
+        # fresh-install path below.
+        try:
+            message = mcp_install_module.repair(client, name=args.name)
+        except FileNotFoundError as e:
+            print(f'error: {e}', file=sys.stderr)
+            return 2
+        except RuntimeError as e:
+            print(f'error: {e}', file=sys.stderr)
+            return 1
+        if message.startswith('error:'):
+            print(message, file=sys.stderr)
+            return 1
+        print(message)
+        return 0
+
     try:
         extra_env = mcp_install_module.parse_env_pairs(args.env or [])
     except ValueError as e:
@@ -2581,6 +2601,15 @@ def _build_parser() -> argparse.ArgumentParser:
         '--dry-run',
         action='store_true',
         help='print the command / config block instead of executing the registration',
+    )
+    p_mcp_install.add_argument(
+        '--repair',
+        action='store_true',
+        help=(
+            'overwrite only retired MESH_MEM_* identity env vars on an already-registered '
+            'entry to the current KIOKU_MESH_* prefix, leaving command and all other env '
+            'untouched. Ignores --force/--env/--dry-run.'
+        ),
     )
     p_mcp_install.set_defaults(func=_cmd_mcp_install)
 
