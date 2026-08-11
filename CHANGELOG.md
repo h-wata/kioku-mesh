@@ -57,6 +57,16 @@ ADR-0030.
   `TypeError` になり、status 出力全体が `failed to read shared memory` に落ちて
   いた）、欠損・解析不能な値は1件ずつスキップ、窓は `[now-7d, now]` として未来
   日時を除外し、スキップ件数を出力に明示するようにした。
+- tests: `tests/test_replication_subscriber.py` is no longer flaky. The suite
+  published from a just-opened Zenoh session and then waited a fixed 0.4s for
+  asynchronous delivery. A sample published before that session's declarations
+  have propagated to the router is dropped rather than queued, so the wait
+  could never succeed — measured: the local index still had not seen such a
+  sample 10s later. Every fixed sleep in the file is now a wait on the
+  condition the test actually cares about (row indexed / row gone / storage
+  holds the key / both callbacks logged), and opening a remote session now
+  re-publishes a canary until it is observed, so nothing under test is
+  published before the path is known to deliver.
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
