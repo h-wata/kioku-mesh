@@ -383,6 +383,162 @@ def test_get_memory_status_last_7d_excludes_tombstoned(single_zenohd: Any) -> No
     assert 'family_7d' not in text
 
 
+# --- last-7d contract tests against a mock backend + frozen clock -----------
+#
+# The store-backed tests above cannot pin the exact `now - 7d` boundary (real
+# wall-clock jitter between test setup and the tool's own `now` flips it) and
+# cannot afford MAX_SEARCH observations. These use a mock backend returning
+# lightweight rows plus a frozen `_utcnow`, so the boundary operator and the
+# search-limit behaviour are fixed exactly (Issue #280 cross-review B1/B2/B3).
+
+_FROZEN_NOW = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _row(created_at: str, agent_family: str = 'claude') -> SimpleNamespace:
+    """Build a minimal stand-in for the Observation fields get_memory_status reads."""
+    return SimpleNamespace(agent_family=agent_family, pc_id='mock-pc', created_at=created_at)
+
+
+def _status_text(
+    monkeypatch: pytest.MonkeyPatch,
+    rows: list[SimpleNamespace],
+    *,
+    now: datetime = _FROZEN_NOW,
+) -> str:
+    from kioku_mesh import backend as backend_module
+    from kioku_mesh.backend import BackendStatus
+
+    mock_status = BackendStatus(
+        mode='local',
+        live=len(rows),
+        tombstoned=0,
+        shadowed=0,
+        zenoh_session='n/a',
+        last_put_at_iso=None,
+        last_put_status='ok',
+        pending_puts=0,
+    )
+
+    class _MockBackend:
+        def search_observations(self, **kwargs):  # noqa: ANN003, ANN202, ARG002
+            return list(rows)
+
+        def get_status(self) -> BackendStatus:
+            return mock_status
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(backend_module, '_backend_cache', _MockBackend())
+    # Per-session counts re-query the real store; stub it out so these stay
+    # hermetic and fast.
+    monkeypatch.setattr(mcp_server_module, 'search_observations', lambda **kwargs: [])  # noqa: ARG005
+    monkeypatch.setattr(mcp_server_module, '_utcnow', lambda: now)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('get_memory_status', {})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert 'failed to read shared memory' not in text
+    return text
+
+
+def test_get_memory_status_last_7d_includes_exact_cutoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``created_at == now - 7d`` is INCLUDED; one microsecond older is not.
+
+    With the clock frozen this pins the boundary operator: flipping the
+    implementation from ``>=`` to ``>`` turns the claude count into 0 and
+    fails this test.
+    """
+    cutoff = _FROZEN_NOW - timedelta(days=7)
+    text = _status_text(
+        monkeypatch,
+        [
+            _row(cutoff.isoformat(), 'claude'),
+            _row((cutoff - timedelta(microseconds=1)).isoformat(), 'codex'),
+        ],
+    )
+    assert 'family (last 7d):' in text
+    assert '  family_7d claude: 1' in text
+    assert 'family_7d codex' not in text
+
+
+def test_get_memory_status_last_7d_is_partial_when_search_limit_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAX_SEARCH rows all inside the window ⇒ counts are lower bounds, not exact.
+
+    The true population here is MAX_SEARCH + 1; the backend can only return
+    MAX_SEARCH, so the 7d section must say so instead of printing a
+    confident-looking exact number.
+    """
+    one_day_ago = (_FROZEN_NOW - timedelta(days=1)).isoformat()
+    rows = [_row(one_day_ago, 'claude') for _ in range(store.MAX_SEARCH)]
+    text = _status_text(monkeypatch, rows)
+    assert f'family (last 7d) [PARTIAL: search limit {store.MAX_SEARCH} reached' in text
+    assert f'  family_7d claude: >={store.MAX_SEARCH}' in text
+    assert f'  family_7d claude: {store.MAX_SEARCH}' not in text
+
+
+def test_get_memory_status_last_7d_is_exact_when_limit_reached_outside_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hitting MAX_SEARCH is not partial if the returned rows already reach past the cutoff."""
+    rows = [_row((_FROZEN_NOW - timedelta(days=1)).isoformat(), 'claude')]
+    rows += [_row((_FROZEN_NOW - timedelta(days=30)).isoformat(), 'codex') for _ in range(store.MAX_SEARCH - 1)]
+    text = _status_text(monkeypatch, rows)
+    assert 'family (last 7d):' in text
+    assert 'PARTIAL' not in text
+    assert '  family_7d claude: 1' in text
+
+
+def test_get_memory_status_survives_naive_created_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An offset-less timestamp must not TypeError the whole status; it is read as UTC."""
+    naive = (_FROZEN_NOW - timedelta(days=1)).replace(tzinfo=None).isoformat()
+    text = _status_text(
+        monkeypatch,
+        [
+            _row(naive, 'claude'),
+            _row((_FROZEN_NOW - timedelta(days=2)).isoformat(), 'claude'),
+        ],
+    )
+    assert '  family_7d claude: 2' in text
+
+
+def test_get_memory_status_last_7d_excludes_future_created_at(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window is [now-7d, now]: a future-dated row is excluded and reported."""
+    text = _status_text(
+        monkeypatch,
+        [
+            _row((_FROZEN_NOW + timedelta(days=1)).isoformat(), 'codex'),
+            _row((_FROZEN_NOW - timedelta(days=1)).isoformat(), 'claude'),
+        ],
+    )
+    assert '  family_7d claude: 1' in text
+    assert 'family_7d codex' not in text
+    assert '  family_7d skipped (created_at in the future): 1' in text
+
+
+def test_get_memory_status_skips_invalid_and_missing_created_at(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unparsable / empty created_at values are skipped individually, not fatal."""
+    text = _status_text(
+        monkeypatch,
+        [
+            _row('not-a-timestamp', 'codex'),
+            _row('', 'codex'),
+            _row((_FROZEN_NOW - timedelta(days=1)).isoformat(), 'claude'),
+        ],
+    )
+    assert '  family_7d claude: 1' in text
+    assert 'family_7d codex' not in text
+    assert '  family_7d skipped (missing/unparsable created_at): 2' in text
+
+
 def test_get_memory_status_reports_disconnected_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     from kioku_mesh import backend as backend_module
     from kioku_mesh.backend import BackendStatus

@@ -735,6 +735,34 @@ def _parse_iso(ts: str) -> datetime | None:
         return None
 
 
+def _utcnow() -> datetime:
+    """Return the current UTC time.
+
+    Indirection over ``datetime.now(timezone.utc)`` so tests can freeze the
+    clock and pin time-window boundaries exactly.
+    """
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso_utc(ts: str) -> datetime | None:
+    """Parse an ISO8601 ``created_at`` into a UTC-aware datetime, or ``None``.
+
+    ``Observation`` does not validate ``created_at`` on construction and the
+    local index tolerates legacy bad writes, so a stored value may be
+    offset-less ("naive"). kioku-mesh always writes UTC, so a naive value is
+    interpreted as UTC rather than dropped; comparing it against an aware
+    ``now`` would otherwise raise ``TypeError`` and take down the whole
+    diagnostic output. Missing / unparsable values still return ``None`` and
+    are skipped by callers.
+    """
+    dt = _parse_iso(ts)
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _parse_session_started_at(session_id: str) -> datetime | None:
     """Recover the session start time from the ``YYYYMMDDTHHMMSSZ-...`` prefix.
 
@@ -806,7 +834,13 @@ def get_memory_status() -> str:
     all-time ``family <name>: N`` breakdown, a separate last-7-days
     ``family_7d <name>: N`` breakdown is included so a recent drop in save
     activity is visible even though it is masked in the all-time counts
-    (Issue #280).
+    (Issue #280). That window is ``[now-7d, now]`` inclusive on both ends:
+    future-dated rows are excluded, rows with a missing / unparsable
+    ``created_at`` are skipped individually (never failing the whole output),
+    and offset-less ("naive") timestamps are read as UTC. If the underlying
+    search hit its ``MAX_SEARCH`` limit while still inside the 7-day window,
+    the section is labelled ``PARTIAL`` and each count is prefixed with
+    ``>=`` to mark it as a lower bound.
     """
     try:
         backend = get_backend()
@@ -817,15 +851,37 @@ def get_memory_status() -> str:
         # search_observations() excludes tombstoned/shadowed rows by default
         # (include_deleted=False), so no extra filtering is needed here to
         # keep deleted observations out of the 7-day window count.
-        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        now = _utcnow()
+        seven_days_ago = now - timedelta(days=7)
         by_family_7d: dict[str, int] = {}
+        oldest_created_at: datetime | None = None
+        unparsable_created_at = 0
+        future_created_at = 0
         for obs in recent:
             by_family[obs.agent_family] = by_family.get(obs.agent_family, 0) + 1
             by_pc[obs.pc_id] = by_pc.get(obs.pc_id, 0) + 1
-            obs_created_at = _parse_iso(obs.created_at)
-            if obs_created_at is not None and obs_created_at >= seven_days_ago:
+            obs_created_at = _parse_iso_utc(obs.created_at)
+            if obs_created_at is None:
+                # Missing / unparsable created_at: skipped individually so one
+                # bad row cannot fail the whole status output.
+                unparsable_created_at += 1
+                continue
+            if oldest_created_at is None or obs_created_at < oldest_created_at:
+                oldest_created_at = obs_created_at
+            if obs_created_at > now:
+                # The window is [now-7d, now]; a future-dated row (clock skew /
+                # bad write) must not inflate the recent-activity signal.
+                future_created_at += 1
+                continue
+            if obs_created_at >= seven_days_ago:
                 by_family_7d[obs.agent_family] = by_family_7d.get(obs.agent_family, 0) + 1
         truncated = len(recent) >= MAX_SEARCH
+        # If the search hit MAX_SEARCH and even the oldest row we got back is
+        # still inside the 7-day window, then rows within that window were cut
+        # off: the 7d counts are lower bounds, not exact values (Issue #280
+        # cross-review B1). Results come back newest-first, so "oldest returned
+        # row is older than the cutoff" is what proves full coverage.
+        seven_d_partial = truncated and (oldest_created_at is None or oldest_created_at >= seven_days_ago)
         last_save_at = recent[0].created_at if recent else '-'
         session_id = get_session_id()
         # Per-session save count is sourced from the store, not process-local
@@ -835,8 +891,7 @@ def get_memory_status() -> str:
         except Exception:  # noqa: BLE001 — diagnostics must not break get_memory_status
             session_obs = []
         this_session_saves = len(session_obs)
-        now = datetime.now(timezone.utc)
-        last_save_dt = _parse_iso(session_obs[0].created_at) if session_obs else None
+        last_save_dt = _parse_iso_utc(session_obs[0].created_at) if session_obs else None
         last_save_age_s = (now - last_save_dt).total_seconds() if last_save_dt else None
         session_started_at = _parse_session_started_at(session_id)
         session_age_s = (now - session_started_at).total_seconds() if session_started_at else None
@@ -865,11 +920,24 @@ def get_memory_status() -> str:
             lines.append(f'  family {family}: {count}')
         # Separate section: last-7-days family counts, sourced from the same
         # `recent` population as the all-time breakdown above (no extra
-        # query), so it is subject to the same MAX_SEARCH truncation. Shown
-        # even when empty — "0 saves in the last 7 days" is itself signal.
-        lines.append('family (last 7d):')
+        # query), so it is subject to the same MAX_SEARCH truncation. When
+        # that truncation actually cuts into the 7-day window the counts are
+        # rendered as explicit `>=` lower bounds instead of looking exact.
+        # Shown even when empty — "0 saves in the last 7 days" is itself signal.
+        if seven_d_partial:
+            lines.append(
+                f'family (last 7d) [PARTIAL: search limit {MAX_SEARCH} reached; '
+                'counts below are lower bounds, true counts may be higher]:'
+            )
+        else:
+            lines.append('family (last 7d):')
+        bound = '>=' if seven_d_partial else ''
         for family, count in sorted(by_family_7d.items()):
-            lines.append(f'  family_7d {family}: {count}')
+            lines.append(f'  family_7d {family}: {bound}{count}')
+        if unparsable_created_at:
+            lines.append(f'  family_7d skipped (missing/unparsable created_at): {unparsable_created_at}')
+        if future_created_at:
+            lines.append(f'  family_7d skipped (created_at in the future): {future_created_at}')
         for pc, count in sorted(by_pc.items()):
             lines.append(f'  pc {pc[:8]}: {count}')
         return '\n'.join(lines)
