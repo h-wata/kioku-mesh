@@ -29,6 +29,7 @@ from .config import get_team_id
 from .config import get_user_id
 from .config import resolve_write_visibility
 from .core.identity import state_dir
+from .core.project_alias import resolve_project_alias
 from .core.transport import get_session as _get_zenoh_session
 from .identity import get_pc_id
 from .identity import get_session_id
@@ -468,7 +469,7 @@ def search_memory(
         client_id=client_id,
         pc_id=pc_id,
         session_id=session_id,
-        project=project,
+        project=resolve_project_alias(project),
         since_iso=since_iso,
         limit=limit,
         include_superseded=include_superseded,
@@ -667,7 +668,7 @@ def recall_context(
     limit = _clamp_recall_limit(limit)
     hits_obs = idx.search(
         query=query,
-        project=project,
+        project=resolve_project_alias(project),
         since_iso=since_iso,
         limit=limit,
         search_mode=search_mode,

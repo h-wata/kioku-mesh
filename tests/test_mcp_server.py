@@ -183,6 +183,94 @@ def test_search_memory_empty_reports_none(single_zenohd: Any) -> None:  # noqa: 
     assert 'No matching memories' in text
 
 
+# Issue #278: project alias read-side resolution (mesh-mem -> kioku-mesh).
+def test_search_memory_alias_resolves_to_canonical_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Querying the legacy alias hits observations stored under the canonical name."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('canonical project content', project='kioku-mesh')
+    backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'canonical', 'project': 'mesh-mem', 'limit': 20},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+
+
+def test_search_memory_canonical_project_unaffected_by_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Searching with the canonical name behaves exactly as before alias resolution existed."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('canonical-only content', project='kioku-mesh')
+    backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'query': 'canonical-only', 'project': 'kioku-mesh', 'limit': 20},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+
+
+def test_save_observation_with_legacy_project_is_not_rewritten(single_zenohd: Any) -> None:  # noqa: ARG001
+    """Alias resolution is read-side only: save_observation still persists the literal project value given."""
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'save_observation',
+                {
+                    'content': 'legacy project write path',
+                    'project': 'mesh-mem',
+                    'subject': 'legacy project write path',
+                    'summary': 'write side must not resolve aliases',
+                },
+            )
+            assert not result.is_error
+            return result.data
+
+    msg = _run(_go())
+    obs_id = _saved_id(msg)
+    time.sleep(_INGEST_SETTLE)
+    stored = store.find_observation_by_id(obs_id)
+    assert stored is not None
+    assert stored.project == 'mesh-mem'
+
+
+def test_search_memory_unknown_project_still_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A project name with neither an alias entry nor stored data still returns nothing."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('unrelated content', project='kioku-mesh')
+    backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'search_memory',
+                {'project': 'totally-unknown-project'},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert 'No matching memories' in text
+
+
 def test_delete_memory_emits_tombstone(single_zenohd: Any) -> None:  # noqa: ARG001
     obs = _mk_obs('soon to be tombstoned via mcp', project='mcp-delete')
     store.put_observation(obs)
@@ -1313,6 +1401,42 @@ def test_recall_context_memory_types_filter(
 
     invalid_out = _run(_go_invalid())
     assert 'invalid' in invalid_out.lower() or 'memory_types' in invalid_out
+
+
+# Issue #278: project alias read-side resolution (mesh-mem -> kioku-mesh).
+def test_recall_context_alias_resolves_to_canonical_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recall_context with the legacy alias surfaces observations saved under the canonical name."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('recall alias content', project='kioku-mesh')
+    backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'mesh-mem'})
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id in text
+
+
+def test_recall_context_unknown_project_still_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recall_context with an unknown project name (no alias, no stored data) returns nothing."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('unrelated recall content', project='kioku-mesh')
+    backend.put_observation(obs)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'totally-unknown-project'})
+            return result.data
+
+    text = _run(_go())
+    assert obs.observation_id not in text
 
 
 # Case 4: source_files exact-match filter

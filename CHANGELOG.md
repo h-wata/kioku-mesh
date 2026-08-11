@@ -17,6 +17,12 @@ ADR-0030.
 ### Added
 
 - `get_memory_status` に直近7日の family 別 save 数を追加 (#280)
+- `search_memory` / `recall_context`: read-side project alias resolution
+  (`mesh-mem` → `kioku-mesh`), so a query for the legacy project name also
+  matches observations saved under the current canonical name. The mapping
+  lives in a small hardcoded table (`core/project_alias.py`) and is applied
+  only to the incoming search filter; `save_observation` still persists the
+  literal `project` value it was given (#278).
 
 ### Fixed
 
