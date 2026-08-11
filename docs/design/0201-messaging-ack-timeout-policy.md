@@ -89,8 +89,11 @@ MCP tool は `save_observation` / `search_memory` / `get_memory` / `recall_conte
   明示指定しない message は**永久に期限切れにならない**。memo の「`ttl_sec` required / default 900」
   (`0185-messaging-mvp-design.md:147`) とはここも食い違う。
 - `check_messages` は読み取りついでに期限切れ key を Zenoh から削除する (`mcp_server.py:924-930`)。
-- `purge_expired_msgs()` (`messaging/purge.py:47-110`) は `msg/**` 全体を走査して削除する
-  (`purge.py:44`, `purge.py:97-101`)。自分宛に限定されない。
+- `purge_expired_msgs()` (`messaging/purge.py:47-110`) は `msg/**` 全体を**走査**する
+  (`purge.py:44`)。自分宛に限定されない。ただし**削除するのは `Message.from_json` に成功し、
+  かつ期限切れの entry だけ**で、parse に失敗した entry は「skipping malformed payload」として
+  読み飛ばす (`purge.py:83-89`, `purge.py:97-101`)。したがって走査範囲と削除範囲は一致しない
+  — この差が ack key の扱いに効く（6.1 (a)）。
 - ローカル側 purge は `messages` テーブルのみを削除し (`local_index.py:150-156`)、
   **`acks` テーブルは決して purge されない**。
 
@@ -280,24 +283,30 @@ message 自身に載っているべきだからである。A1 単独を却下す
 
   1. `session.put()` の呼び出しが戻る（成功・例外のいずれでも）。
   2. `attempt_count += 1` する（成功・失敗のどちらでも加算する）。
-  3. **`now` を 1 度だけ読み、`candidate_next_attempt_at` を計算する。**
-     ここで読んだ `now` は 4. の打ち切り判定でもそのまま使う（判定の途中で時計を読み直さない。
-     読み直すと候補値の計算基準と判定基準がずれる）。`attempt_count < 6` のとき、
-     公称遅延 `2^(attempt_count - 1)` 秒に jitter を掛けた実効遅延を求め、
-     `candidate_next_attempt_at = now + 実効遅延`（wall clock）とする。
-     **jitter はこの時点で 1 度だけ引き、以降の判定と永続化で同じ値を使う**
-     （判定用と永続化用で別々に引くと、判定した時刻と実際に待つ時刻がずれる）。
-     `attempt_count >= 6`（次の試行が存在しない）のときは
-     **`candidate_next_attempt_at` は未定義**とし、後述の打ち切り条件 1. の
-     「次の試行予定時刻」節は評価しない（回数上限が先に効く）。
-  4. **打ち切り判定を 1 回だけ実行する**（後述）。条件 1. の期限比較には、
+     成功したか例外だったかを `last_put_succeeded`（bool）として保持する。
+  3. **`now` を 1 度だけ読む。** ここで読んだ `now` は 4. の打ち切り判定でもそのまま使う
+     （判定の途中で時計を読み直さない。読み直すと候補値の計算基準と判定基準がずれる）。
+     続いて `candidate_next_attempt_at` を計算するが、**計算するのは
+     「put が失敗し、かつ `attempt_count < 6`」のときだけ**である:
+     - **put が成功した場合は `candidate_next_attempt_at` を計算しない（未定義とする）。**
+       成功した put の後に次の試行は存在しないので、候補時刻という概念自体が存在しない。
+       存在しない試行の時刻を期限と比較してはならない。
+     - put が失敗し `attempt_count < 6` のとき、公称遅延 `2^(attempt_count - 1)` 秒に
+       jitter を掛けた実効遅延を求め、`candidate_next_attempt_at = now + 実効遅延`
+       （wall clock）とする。**jitter はこの時点で 1 度だけ引き、以降の判定と永続化で
+       同じ値を使う**（判定用と永続化用で別々に引くと、判定した時刻と実際に待つ時刻がずれる）。
+     - put が失敗し `attempt_count >= 6`（次の試行が存在しない）のときは
+       **`candidate_next_attempt_at` は未定義**とする。
+
+     いずれの未定義ケースでも、後述の打ち切り条件 2. の「次の試行予定時刻」節は評価しない。
+  4. **打ち切り判定を 1 回だけ実行する**（後述）。条件 2. の期限比較には、
      行に永続化されている `next_attempt_at`（= 前回値）ではなく、
      **必ず 3. で計算した `candidate_next_attempt_at` を使う**。
   5. 続行が確定した場合に**限り**、`candidate_next_attempt_at` を
-     `next_attempt_at` として outbox 行に永続化する。打ち切った場合は
+     `next_attempt_at` として outbox 行に永続化する。打ち切った場合と put が成功した場合は
      `next_attempt_at` を書き換えない（`NULL` のまま、または前回値のまま残す。
-     どちらであっても `termination_reason` が記録済みなので 6.4 の reducer は
-     `next_attempt_at` を読まない）。
+     打ち切った場合は `termination_reason` が、put 成功の場合は `last_put_succeeded` が
+     記録済みなので、6.4 の reducer はどちらの場合も `next_attempt_at` を読まない）。
 
   `attempt_count` は完了回数（初期値 0）であって「今の試行番号」ではない、という点だけ
   取り違えないこと（今まさに実行している試行の番号は `attempt_count + 1`）。
@@ -327,11 +336,13 @@ message 自身に載っているべきだからである。A1 単独を却下す
 - 各遅延に **±20% の jitter** を掛ける（複数 worker が同時に切断復帰したときの同期を崩すため）。
   実効遅延 = 公称遅延 × `uniform(0.8, 1.2)`。**jitter は打ち切り条件の構造を変えない**
   （打ち切り条件の集合は回数と `effective_expires_at` だけで決まり、jitter が新しい条件を
-  足すことはない）。ただし jitter 済みの `candidate_next_attempt_at` が条件 1. の比較対象なので、
-  **期限直前では jitter の引き値によって「あと 1 回試すか、ここで `expired` にするか」が
-  分岐しうる**。これは意図した挙動である（期限を跨ぐ待ちを挟まないことが条件 1. の目的で、
-  跨ぐか否かは実際に待つ長さで判定するのが正しい）。上の実装契約 3. で jitter を 1 度だけ引き、
-  判定と永続化で同じ値を使うと定めているのは、この分岐を決定論的にするためである。
+  足すことはない）。ただし jitter 済みの `candidate_next_attempt_at` が条件 2. の比較対象なので、
+  **put が失敗したときに限り、期限直前では jitter の引き値によって「あと 1 回試すか、
+  ここで `expired` にするか」が分岐しうる**。これは意図した挙動である（期限を跨ぐ待ちを
+  挟まないことが条件 2. の目的で、跨ぐか否かは実際に待つ長さで判定するのが正しい）。
+  上の実装契約 3. で jitter を 1 度だけ引き、判定と永続化で同じ値を使うと定めているのは、
+  この分岐を決定論的にするためである。**put が成功した場合は jitter を引かない**
+  （候補時刻を計算しないため）ので、成功経路の結果が jitter で揺れることはない。
 - **計時源**: 待ちのスケジューリングは monotonic clock、永続化する `next_attempt_at` は wall clock
   （2 節「計時源」と同じ理由）。プロセスが再起動した場合は `now >= next_attempt_at` で再開判定する。
 - **打ち切り判定**は、各 put が戻って `attempt_count` を加算し、
@@ -340,7 +351,16 @@ message 自身に載っているべきだからである。A1 単独を却下す
   （条件ごとに時計を読み直さない。6.4 の reducer と同じ理由）。上から評価し、**最初に真になったものを
   `termination_reason` として outbox 行に 1 つだけ記録する**
   （複数は記録しない。これが state の一意性の根拠になる）:
-  1. `effective_expires_at` が定義されていて、次のいずれかが成り立つ
+  1. **`last_put_succeeded` が真（今回の put が成功した）→ 終了理由は記録せず `sent` へ。**
+     以降の条件は評価しない。**この条件が expiry より先に評価される**のは、
+     成功した put は「配送を放棄した」ことではないからである。put が成功した時点で
+     message は storage に載っており、`expired`（6.3 の定義: 配送は放棄された）を
+     記録するのは事実に反する。期限に達した後にその行をどう報告するかは
+     6.4 の reducer が `now >= effective_expires_at` から導出する（`requires_ack = true` の
+     場合のみ。`requires_ack = false` の `sent` は quiescent なので遷移しない、6.1 / 6.2）。
+     なお実装契約 3. により、put 成功時は `candidate_next_attempt_at` が
+     そもそも未定義なので、2. の 2 つ目の節は評価対象にならない。
+  2. `effective_expires_at` が定義されていて、次のいずれかが成り立つ
      → `termination_reason = expired`。
      - `now >= effective_expires_at`（既に期限に達している）
      - `candidate_next_attempt_at` が定義されていて
@@ -349,26 +369,37 @@ message 自身に載っているべきだからである。A1 単独を却下す
        行に残っている前回の `next_attempt_at` ではない**）
 
      **この条件が回数上限より優先する**（期限切れ message を storage に載せても誰も読めないため。
-     また、結果が確定している待ちを挟まないため）。
-  2. 直前の例外が非 retryable → `termination_reason = nonretryable`。
-  3. `attempt_count >= 6` → `termination_reason = attempts_exhausted`
-     （このとき `candidate_next_attempt_at` は未定義なので、1. の 2 つ目の節は評価されていない）。
-  4. put が成功していた → 終了理由は記録せず `sent` へ。
+     また、結果が確定している待ちを挟まないため）。**ただし 1. には劣後する** — ここに
+     到達している時点で今回の put は失敗している。
+  3. 直前の例外が非 retryable → `termination_reason = nonretryable`。
+  4. `attempt_count >= 6` → `termination_reason = attempts_exhausted`
+     （このとき `candidate_next_attempt_at` は未定義なので、2. の 2 つ目の節は評価されていない）。
   5. いずれでもない → 終了理由を記録せず、`candidate_next_attempt_at` を
      `next_attempt_at` として永続化し（実装契約 5.）、その時刻まで待って次の試行を実行する。
 - **1 回の put で複数条件が同時に真になっても、記録されるのは最初の 1 つだけ**である。
   例: 「6 回目の put が失敗し、その put の実行中に `effective_expires_at` を跨いだ」場合は
-  1. が先に真になるので `expired` が記録され、`attempts_exhausted` は記録されない。
+  2. が先に真になるので `expired` が記録され、`attempts_exhausted` は記録されない。
   この一意性が無いと、同じ行を `expired` とも `failed` とも読める状態が生まれる。
+- **put 成功と expiry が同時に成り立つ場合も同様に 1 つだけ**である。
+  例: 「`effective_expires_at` の 0.5 秒前に put が成功した」場合、1. で `sent` が確定し、
+  `termination_reason` は記録されない。次の試行が存在しない以上
+  「次の試行が期限以降になる」という比較には意味が無いためである。この行は
+  `requires_ack = false` なら `sent` のまま quiescent、`requires_ack = true` なら
+  6.4 の reducer が期限到達後に `expired` を導出する。
 - **この評価順は 6.4 の state 判定順とは意図的に異なる。** ここは「次に何をするか」を決める順序で、
-  期限切れ後に無駄な put を積まないために expiry を先に見る。6.4 は「記録済みの事実に
-  どの名前を付けるか」を決める順序である。**両者が食い違わないのは、6.4 が生の `attempt_count` や
+  失敗が続いているときに期限切れ後の無駄な put を積まないために expiry を早い段階で見る。
+  6.4 は「記録済みの事実にどの名前を付けるか」を決める順序である。
+  **両者が食い違わないのは、6.4 が生の `attempt_count` や
   `now` ではなく、ここで記録した `termination_reason` を読むから**である。
   たとえば `candidate_next_attempt_at >= effective_expires_at` で打ち切った行は、まだ
   `now < effective_expires_at` の時点でも `termination_reason = expired` を根拠に `expired` と
   報告される（`now` を見て `queued` に戻ることはない）。
-- `effective_expires_at` が無期限の message では条件 1. が決して真にならず、打ち切りは回数上限
-  (3.) だけで決まる。**待ちが無限になる経路は存在しない**（最長でも 6 回・公称 31 秒で確定する）。
+  なお put 成功を最優先に置いたことで、**この評価順と 6.4 の評価順は「成功した配送を
+  失敗として記録しない」という点では一致する**（6.4 も条件 1. で `acked` を、
+  `requires_ack = false` では条件 2. の `termination_reason` を見るが、成功した put の行には
+  `termination_reason` が無いので `sent` に落ち着く）。
+- `effective_expires_at` が無期限の message では条件 2. が決して真にならず、打ち切りは回数上限
+  (4.) だけで決まる。**待ちが無限になる経路は存在しない**（最長でも 6 回・公称 31 秒で確定する）。
 - 個々の `session.put()` 呼び出し自体の時間上限は Zenoh 側の既定 timeout に委ねる。
 
 **ack 観測（timeout 検知）のパラメータ:**
@@ -487,16 +518,43 @@ late ack（`timed_out` / `expired` / `failed` から `acked` への遷移。`req
 
 **(a) ack-key retention — ack key 自体が Zenoh 上に残る期間**
 
-- ack key は `msg/{scope}/ack/...` すなわち `msg/**` 配下なので、`purge_expired_messages` の
-  sweep (`purge.py:44`) が走ったときに消える。
-- **この sweep は手動実行である**（定期実行の機構は無い。`purge.py:15-18` が periodic background GC を
-  却下している）。したがって:
-  - sweep が一度も走らなければ ack key は**消えない**。上限は保証されない。
-  - sweep がいつ走るかも保証されない。送信直後に走れば ack key はすぐ消える。下限も保証されない。
-- すなわち **ack-key retention には設計上の保証が無く、完全に運用依存である**。
-  「ack key 側が先に閉じる」とも「後に閉じる」とも仮定してはならない。
-  これを保証したい場合は sweep を定期実行にして間隔を決定事項にする必要がある（12.1 の U5。
-  **これは未決事項**であり、決めずに実装へ進んでよい前提が「保証は無い」である）。
+ここは実装を読んで確定させた。結論は **「ack key の retention は、そもそも `msg/**` を持つ
+storage が構成されているかどうかで 2 通りに割れ、どちらの場合も現行実装に ack key を
+削除する経路は無い」** である。以下の 2 点はいずれも実測で確認した（TASK-344）。
+
+- **(a-1) 現行の同梱 config には `msg/**` を受け持つ storage が無い。**
+  `config/zenohd_home.json5:40` / `zenohd_office.json5:40` / `zenohd.docker.json5:48` /
+  `zenohd_repro_{a,b}.json5:32`、および `tests/conftest.py:108` の storage はすべて
+  `key_expr: "mem/**"` だけを宣言している。`msg/**` を宣言した storage はリポジトリ内に存在しない。
+  同梱 config と同じ storage 構成（`mem/**` のみ）で router を立てて `msg/{scope}/ack/...` を
+  put し、**別セッションから get し直すと 0 件**である（`msg/**` での走査も 0 件）。
+  `msg/**` を受け持つ storage を足した構成では同じ手順で 1 件返る。
+  すなわちこの構成では ack key は購読中の subscriber に配送されるだけで retain されず、
+  **後から get する sender には最初から見えない**（retention は実質 0）。
+  これは ack key に限らず message body 側も同じなので、store-and-forward を前提にした
+  観測（`get_message_status` の late ack 報告を含む）は `msg/**` storage の構成を前提とする。
+- **(a-2) `msg/**` storage を構成した場合、ack key は誰にも削除されない。**
+  `purge_expired_msgs` は `msg/**` を get したあと各 entry に対して
+  `Message.from_json(payload)` を実行し、失敗した entry は
+  「skipping malformed payload」として `continue` する (`purge.py:83-89`)。
+  ack key の payload は `put_ack` (`zenoh_bridge.py:95-101`) と `mcp_server.py:1172-1175` が書く
+  `{"msg_id":..., "recipient_session_id":..., "status":"acknowledged"}` であり、
+  `Message` が必須とする `sender_id` / `scope` / `payload` を持たない。実際に
+  `Message.from_json` に通すと `TypeError: Message.__init__() missing 3 required positional
+  arguments: 'sender_id', 'scope', and 'payload'` になる。したがって
+  **ack key は必ず malformed 扱いで skip され、sweep は ack key を 1 件も削除しない**。
+  もう一方の delete 経路（`mcp_server.py:1051` の `check_messages` 内 lazy delete）も
+  同じ `Message.from_json` の成功を前提とし、かつ selector が inbox 側なので ack key に届かない。
+  production 側で `session.delete` を呼ぶ箇所は messaging 層ではこの 2 つだけである。
+- **帰結（本メモが依拠してよい事実）**:
+  - **「sweep が走れば ack key が消える」は成り立たない。** したがって
+    「送信直後に sweep が走れば ack key はすぐ消えるので下限が無い」という以前の説明は誤りである。
+  - `msg/**` storage が無い構成では retention は実質 0、ある構成では**無制限**（GC 経路が無い）。
+    どちらであっても **ack-key retention は設計上の保証にならない**。「ack key 側が先に閉じる」とも
+    「後に閉じる」とも仮定してはならない、という結論だけが (a) から引き出せる。
+  - `msg/**` storage を構成した場合、ack key は削除されないまま増え続ける。これは本メモの
+    スコープ外だが、Phase 1.5 で ack reader を実装する前提として認識しておく必要がある
+    （12.1 の U5 で未決事項として立てている）。
 
 **(b) observable receipt window — `get_message_status` が late ack を報告できる期間**
 
@@ -505,10 +563,15 @@ late ack（`timed_out` / `expired` / `failed` から `acked` への遷移。`req
   Zenoh 上に残っていても late ack は報告されない。
 - したがって **現在の実装契約における observable late-ack window は、行が quiescent に入った
   時刻 (`quiesced_at`) から最大 24 時間**である。これは決定事項であり、運用に依存しない。
-- 24 時間はあくまで**上限**である。(a) の ack key がそれより早く sweep されていれば、
-  実際に観測できる窓はそこで閉じる。すなわち
-  **実効窓 = min(24h, ack key が sweep されるまでの時間)** であり、後者に保証が無いため
-  **下限は保証されない**（0 でありうる）。
+- 24 時間はあくまで**上限**である。ack key 側が先に閉じれば、実際に観測できる窓はそこで閉じる。
+  すなわち **実効窓 = min(24h, ack key が読める期間)** である。(a) で確定させたとおり
+  第 2 項は sweep では決まらず、**`msg/**` を受け持つ storage が構成されているか否か**で決まる:
+  - `msg/**` storage が無い構成（同梱 config はすべてこれ）: ack key は retain されないので
+    第 2 項は実質 0 であり、**実効窓も実質 0**。late ack は原理的に観測できない。
+  - `msg/**` storage がある構成: 第 2 項は ∞（削除経路が無い）なので **実効窓は 24h 側で決まる**。
+- したがって **下限は保証されない**（構成次第で 0 でありうる）。これは以前の版が書いていた
+  「sweep がいつ走るか分からないから下限が無い」とは別の理由である。**上限が 24 時間である
+  という決定事項だけは、どちらの構成でも変わらない。**
 
 **設計上の保証はこの 1 文に集約される: late ack が観測される保証は無く、
 観測されうる期間の上限だけが 24 時間として決まっている。** ack key が先に消えたか、
@@ -522,9 +585,9 @@ stateDiagram-v2
     [*] --> queued: outbox 行を作成
 
     queued --> queued: put 失敗(retryable) かつ 終了理由が記録されない<br/>(attempt_count += 1, candidate_next_attempt_at を<br/>next_attempt_at として永続化)
-    queued --> sent: put 成功
-    queued --> failed: termination_reason = nonretryable / attempts_exhausted
-    queued --> expired: termination_reason = expired<br/>(put 成功前に期限到達 or<br/>candidate_next_attempt_at >= effective_expires_at)
+    queued --> sent: put 成功【最優先】
+    queued --> failed: put 失敗 かつ<br/>termination_reason = nonretryable / attempts_exhausted
+    queued --> expired: put 失敗 かつ termination_reason = expired<br/>(now >= effective_expires_at or<br/>candidate_next_attempt_at >= effective_expires_at)
 
     sent --> acked: ack key を 1 件以上観測
     sent --> timed_out: now >= ack_deadline_at かつ ack 未観測<br/>(ack_deadline_at < effective_expires_at のとき)
@@ -548,7 +611,19 @@ stateDiagram-v2
     note right of failed
         quiescent（同上）
     end note
+    note left of queued
+        queued からの 3 本は §3 の打ち切り判定の
+        条件順（1. put 成功 → 2. expired →
+        3. nonretryable → 4. attempts_exhausted）に従う。
+        put が成功した put では他の 2 本は評価されない。
+    end note
 ```
+
+**`queued` から出る 3 本の優先関係**（図だけを見る実装者のために、§3 を読まなくても
+一意に決まるようにここに再掲する）: **put が成功したら常に `sent`** であり、
+`expired` / `failed` は**その put が失敗した場合にのみ**到達しうる。
+`expired` と `failed` が同時に成り立つ場合は `expired` が優先する（§3 の条件 2. が 3./4. より上）。
+この優先関係は §3 の打ち切り判定の条件順そのものであり、両者が食い違うことはない。
 
 図に無い遷移は存在しない。特に:
 
@@ -604,10 +679,14 @@ ack も deadline も見ないので、put が成功した行は `sent` のまま
 3. が先に真になるので、**`timed_out` は観測されずに直接 `expired` になる**。
 6.2 の図で `sent --> expired` を別の辺として描いてあるのはこのケースである。
 
-**この順序は 3 節の「打ち切り判定」の評価順（expiry → 非 retryable → 回数）とは意図的に異なる。**
-3 節は「次に put するか否か」を決める順序、ここは「確定済みの事実にどの名前を付けるか」を
-決める順序である。2. が生の `attempt_count` / `now` ではなく `termination_reason` を読むことで、
-両者は必ず同じ結論に到達する（3 節末尾参照）。
+**この順序は 3 節の「打ち切り判定」の評価順（put 成功 → expiry → 非 retryable → 回数）とは
+意図的に異なる。** 3 節は「次に put するか否か」を決める順序、ここは「確定済みの事実に
+どの名前を付けるか」を決める順序である。2. が生の `attempt_count` / `now` ではなく
+`termination_reason` を読むことで、両者は必ず同じ結論に到達する（3 節末尾参照）。
+両者に共通する不変条件は **「成功した put の行に `termination_reason` は記録されない」**
+（3 節の条件 1.）であり、これがあるために「put は成功したのに `expired` と報告される」行は
+生じない。`requires_ack = true` の行が期限到達後に `expired` と報告されるのは、
+ここの 3. が `now` から導出する場合**だけ**である。
 
 **outbox 行の保持上限:** quiescent または terminal に入った行は、その時刻 (`quiesced_at`) から
 wall clock で **24 時間**保持し、以後 GC する。GC 後の `get_message_status(msg_id)` は
@@ -615,8 +694,9 @@ wall clock で **24 時間**保持し、以後 GC する。GC 後の `get_messag
 `quiesced_at` はその put が成功した時刻であり、以後 ack を待たずに 24 時間で GC される。
 
 この 24 時間が **observable receipt window の上限そのもの**である（6.1 (b)）。
-ack key 側の retention (6.1 (a)) は手動 sweep 依存で保証が無いため、**どちらが先に閉じるかを
-根拠にはできない**。24 時間はあくまで「outbox 側が単独で保証できる上限」として決めた値で、
+ack key 側の retention (6.1 (a)) は `msg/**` storage の構成に依存し、無い構成では実質 0、
+ある構成では削除経路が無いため無制限であって、いずれにせよ設計上の保証が無いため、
+**どちらが先に閉じるかを根拠にはできない**。24 時間はあくまで「outbox 側が単独で保証できる上限」として決めた値で、
 根拠は (i) 人間が翌日に「あの依頼どうなったか」を確認できる長さであること、
 (ii) quiescent 行が無限に貯まらないこと、の 2 点である。
 **初期値は決定事項であり、運用計測後に変更可能なチューニングパラメータでもある**
@@ -660,9 +740,10 @@ inbox と分けるのは、purge の対象・寿命・所有者が違うため�
    GC 済み (6.4) の `msg_id` には `unknown` を返す。
 7. **`requires_ack` を実際に読む**。`False` の message は ack 待ちをせず、put 成功時点で
    `sent` を quiescent 扱いにする（`timed_out` / `expired` / `acked` へは遷移しない。6.2 参照）。
-   併せて default を memo (`0185:153`) に合わせて `True` にするか、memo 側を実装に合わせるかを
-   ここで確定する（本メモの推奨は **実装を memo に合わせて `True` にする**。
-   `requires_ack` を送信者が意識せず送った message が receipt 対象外になるのは驚き最小則に反する）。
+   **default は実装側の `False` で確定している**（12.3 の旧 U1）ので、`models.py:76` は変更しない。
+   receipt が欲しい送信者が `requires_ack=True` を明示する形になる。
+   食い違っている `0185:153`（「MVP は default `true`」）の記述を実装に合わせて訂正するのは
+   0185 側の修正であり、本メモのスコープ外（11 節）。
 8. **`acks` テーブルの purge** (4.2) と ack payload への `acked_at` 追加 (1.8)。
 
 ### 明示的に含めない
@@ -760,10 +841,13 @@ ADR 化する。ADR-0022 の Related に追加し、本メモを設計根拠と�
   `core.transport` の retry は `core` 経由なので利用可 (`memory/purge.py:53` と同じ形)。
 - `outbox.db` は `inbox.db` (`mcp_server.py:180`) と別ファイルにする。
 - `purge_expired_messages` (`mcp_server.py:1061`) は `msg/**` 全体を掃く (`purge.py:44`) ので、
-  他 agent の未読 message も消える。outbox の state 判定がこの sweep と競合しないよう、
+  他 agent の未読 message も消える（ただし削除対象は `Message` として parse できた期限切れ entry
+  だけで、ack key は含まれない。6.1 (a)）。outbox の state 判定がこの sweep と競合しないよう、
   「key が消えている」ことを `failed` の根拠にしてはならない（`expired` と区別できないため）。
-- 1.3 で挙げた memo と実装の食い違い（`requires_ack` の default）は Phase 1.5 で必ずどちらかに
-  寄せる。放置すると receipt の対象範囲が実装依存になる（12.1 の U1 — 未決事項）。
+- 1.3 で挙げた memo と実装の食い違い（`requires_ack` の default）は **実装側の `False` に寄せると
+  決定した**（12.3 の旧 U1）。したがって Phase 1.5 では `models.py:76` を変更せず、
+  `0185:153` の「MVP は default `true`」という記述を実装に合わせて訂正する。
+  訂正そのものは 0185 側の修正なので本メモの変更範囲には含まれない（別途行う）。
 - `ttl_sec` を schema 上 required にするか（1.7 / `0185:147` の食い違い）は本メモの決定事項では
   なく、0185 側の schema 規定に従う。**ただし「両方未指定 = 無期限を本メモが拒否しない」ことは
   決定事項である**（2 節、12.3 の旧 U2）。required 化を選んだ場合も本メモの
@@ -786,8 +870,7 @@ ADR 化する。ADR-0022 の Related に追加し、本メモを設計根拠と�
 
 | id | 未決の内容 | 決めるのに必要なもの | 決定 gate（誰が・いつ・何を根拠に） |
 |---|---|---|---|
-| U1 | `requires_ack` の default を `True`（memo `0185:153` 側）に寄せるか、`False`（実装 `models.py:76` 側）に寄せるか。本メモの**推奨**は `True`（送信者が意識せず送った message が receipt 対象外になるのは驚き最小則に反するため）だが、決定ではない | 送信経路 (7 節の項目 1) が出来た後の実利用パターン。ack を要求しない「通知だけ」の用途がどれくらいの割合を占めるか | 運用者 + 実装者が、**7 節の項目 7（`requires_ack` を実際に読む）の実装に着手する時点**で決める。根拠は送信経路 (7 節の項目 1) を数週間動かした実利用ログ。それまでは実装側 default (`False`) を変更しない |
-| U5 | **ack-key retention** (6.1 (a)) を設計上の保証にするか。ack key は `purge_expired_messages` の手動 sweep (`purge.py:44`) で消えるため、現状は保持期間に上限も下限も保証が無い。保証したければ sweep を定期実行にして間隔を決定事項にする必要がある。※**observable receipt window の上限 24h (6.1 (b), 6.4) は決定事項であり、これとは別物** | sweep を定期実行にするか否かの運用方針。定期化するならその間隔 | 運用者が、**sweep の定期実行を導入する別 Issue を起票する時点**で決める（本メモのスコープ外）。それまで本メモは「ack-key retention に保証は無い」を前提に読むこと |
+| U5 | **ack-key retention** (6.1 (a)) を設計上の保証にするか。6.1 (a) で確定させたとおり、現状は (i) 同梱 config に `msg/**` storage が無いため ack key はそもそも retain されず、(ii) storage を足しても `purge_expired_msgs` は ack payload を `Message` として parse できず skip するため削除経路が無い。保証するには **`msg/**` storage を前提条件として明文化すること**と、**purge 側に ack key を扱う削除経路を追加すること**の両方が要る（sweep の定期化だけでは解決しない）。※**observable receipt window の上限 24h (6.1 (b), 6.4) は決定事項であり、これとは別物** | (1) messaging が `msg/**` storage を前提とするかの構成方針、(2) ack key の削除条件（何をもって不要とみなすか。message body と違い ack には expiry が無い） | 実装者が、**7 節の項目 4（ack reader）の実装に着手する時点**で、その時点の storage 構成を確認して決める。ack reader は ack key を読む唯一の機能なので、ここが決定に必要な情報が揃う最初の地点である。それまで本メモは「ack-key retention に保証は無い」を前提に読むこと（この前提は上記 (i)(ii) のどちらの構成でも成り立つ） |
 | U6 | `no_recipient_present` / `unacked`（5 節）を receipt でどう提示するか（文言・UX） | delivery receipt の提示面 (7 節の項目 6) の UI 設計 | 実装者が、**7 節の項目 6 の実装時**に決める。state と診断ラベルの集合自体は決定済みなので、決めるのは表示のみ |
 
 ### 12.2 決定済みだが運用計測で見直しうるチューニングパラメータ
@@ -801,13 +884,16 @@ ADR 化する。ADR-0022 の Related に追加し、本メモを設計根拠と�
 | outbox 行の保持上限 = observable receipt window (6.4, 6.1 (b)) | `quiesced_at` から 24 時間 | 状態照会が quiesce の何時間後に行われるかの実績。`unknown` を返した回数を数えれば足りる | 有限の上限が存在すること。GC 後は `unknown` を返すこと |
 | ack reader の get timeout (3 節) | 3.0 秒（`mcp_server.py:907` / `purge.py:80` に揃える） | 実測の ack get レイテンシ分布 | 有限であること。常駐ポーリングスレッドを持たないこと |
 
-### 12.3 明示的に決定事項へ移した項目（旧 U2 / U3 / U4）
+### 12.3 明示的に決定事項へ移した項目（旧 U1 / U2 / U3 / U4）
 
-初版では以下を「未決」として挙げていたが、本文が既に断定的な実装契約として指定しており
-矛盾していた。**いずれも決定事項に移した**。id は旧版とのレビュー追跡のため欠番として残す。
+初版では以下を「未決」として挙げていたが、本文が既に断定的な実装契約として指定していたか
+（旧 U2-U4）、決定 gate が機能しない形になっていた（旧 U1）ため矛盾していた。
+**いずれも決定事項に移した**。id は旧版とのレビュー追跡のため欠番として残す。
+したがって **12.1 に残る未決事項は U5 / U6 の 2 件**である。
 
 | 旧 id | 内容 | 決定 |
 |---|---|---|
+| U1 | `requires_ack` の default を `True`（memo `0185:153` 側）に寄せるか、`False`（実装 `models.py:76` 側）に寄せるか | **`False`（実装側）に確定し、`0185:153` の記述を実装に合わせて訂正する**。初版は「送信者が意識せず送った message が receipt 対象外になるのは驚き最小則に反する」として `True` を推奨していたが、**ack は受信側の明示的な opt-in である**という実装事実（ack を書くのは受信 agent が `ack_message` を呼んだときだけ。`mcp_server.py:1127` / `tmux_adapter.py:62` が「自分で `ack_message` を呼ぶ責務がある」と明記）を踏まえて反転させた。default を `True` にすると、ack を呼ばない受信者宛の message が軒並み `timed_out` になり、`timed_out`（= 受信者が確認していない、5 節の `unacked`）という診断が「既定でほぼ全件に付く」ラベルに退化して価値を失う。receipt が欲しい送信者が `requires_ack=True` を明示する形なら、`timed_out` は常に「明示的に確認を求めたのに返ってこなかった」を意味する。なお default 値は state machine にも不変条件にも影響しない（12.2 と同じ性質のチューニング値）ため、実利用ログを見てから反転させることは将来も可能である。**この決定により、初版の U1 の決定 gate（7 節の項目 7 の着手時点で、項目 1 の数週間の実利用ログを根拠に決める）は撤回する** — 項目 1 と項目 7 はどちらも Phase 1.5 に含まれるため、gate が Phase 1.5 の内部で循環していた |
 | U2 | expiry 無し（`ttl_sec` / `expires_at` の両方が未指定）の message を許すか | **許す**（2 節「実効期限の定義」の表のとおり、拒否しない）。無期限 message は `timed_out` には遷移しうるが `expired` には遷移せず、outbox 行の 24h 保持上限 (6.4) で必ず終端する。なお `ttl_sec` を schema 上 required にするかは `0185:147` 側の規定の話であり本メモの決定事項ではない（11 節）。required 化しても本メモの畳み込み規則は変わらない（無期限の枝が到達不能になるだけ） |
 | U3 | 総試行 6 回・遅延 5 段階の具体値 | **決定**（12.2 の 1 行目。実装契約は 3 節） |
 | U4 | outbox 行の保持 24 時間 | **決定**（12.2 の 2 行目。実装契約は 6.4） |
