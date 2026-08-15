@@ -2160,6 +2160,217 @@ def test_recall_context_index_disabled_message(
     assert 'KIOKU_MESH_DISABLE_INDEX' in text
 
 
+# Issue #356/A1: recall_context byte cap (reuses search_memory's _cap_search_output).
+def test_recall_context_output_capped_at_max_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large set of big observations never exceeds RECALL_OUTPUT_MAX_BYTES."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 4_000)
+    for i in range(10):
+        backend.put_observation(_mk_obs_full('x' * 2_000, project='recall-bytecap', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-bytecap', 'limit': 10},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert len(text.encode('utf-8')) <= 4_000
+    assert 'truncated: showing' in text
+
+
+def test_recall_context_truncation_notice_visible_to_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When truncated, the caller sees a 'showing N of M' notice, not silently-dropped data."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    for i in range(8):
+        backend.put_observation(_mk_obs_full('y' * 1_500, project='recall-notice', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-notice', 'limit': 8},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert 'recall_context: 8 result(s)' in text  # total reflects the real hit count
+    assert 'truncated: showing' in text
+    assert 'result(s); output capped at 3000 bytes' in text
+
+
+def test_recall_context_truncation_drops_whole_entries_not_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With multiple observations, truncation falls on boundaries: a shown entry is never cut mid-way.
+
+    (This guarantee holds when more than one observation is in play, so a
+    whole one can be dropped from the tail. See
+    test_recall_context_single_oversized_observation_returns_partial for the
+    single-observation exception, PR #308 review B1.)
+    """
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    n = 6
+    for i in range(n):
+        content = f'STARTMARK{i}_' + 'z' * 780 + f'_ENDMARK{i}'
+        backend.put_observation(_mk_obs_full(content, project='recall-boundary', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-boundary', 'limit': n},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert 'truncated: showing' in text
+    # Every entry is either wholly present (both its start and end marker show up)
+    # or wholly dropped (neither does) — a mismatch means a half-written entry
+    # slipped through the tail-truncation boundary.
+    presence = [(f'STARTMARK{i}_' in text, f'_ENDMARK{i}' in text) for i in range(n)]
+    for start_present, end_present in presence:
+        assert start_present == end_present
+    assert any(start_present for start_present, _ in presence)  # at least one full entry survived
+    assert not all(start_present for start_present, _ in presence)  # and at least one was dropped
+
+
+def test_recall_context_single_oversized_observation_returns_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single observation that alone exceeds the budget is shown truncated, not dropped to zero results.
+
+    PR #308 review B1: recall entries lack search_memory's ``<id=...>`` suffix,
+    so ``_shrink_entry`` can't preserve entry identity the way it does for
+    search_memory — it falls back to a plain byte cut of the one entry. This
+    is a deliberate exception to the whole-observation-boundary rule: a
+    partial result is more useful than an empty one, and the truncated notice
+    still tells the caller data was cut.
+    """
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    head_marker = 'CONTENT_HEAD_MARKER'
+    backend.put_observation(_mk_obs_full(head_marker + 'w' * 30_000, project='recall-oversized', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-oversized', 'limit': 1},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert 'No matching current context.' not in text
+    assert 'recall_context: 1 result(s)' in text  # not dropped to zero results
+    # The observation's own content — not just some incidental character that
+    # happens to also appear in the truncation notice's wording — survived the cut.
+    assert head_marker in text
+    assert 'truncated: showing' in text
+    assert len(text.encode('utf-8')) <= 3_000
+
+
+def test_recall_context_single_oversized_observation_utf8_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The partial cut of a single oversized observation never splits a multibyte character."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    backend.put_observation(_mk_obs_full('あ' * 30_000, project='recall-oversized-mb', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-oversized-mb', 'limit': 1},
+            )
+            return result.data
+
+    text = _run(_go())
+    encoded = text.encode('utf-8')  # must not raise UnicodeEncodeError on a split code point
+    assert '�' not in text  # no replacement character from a mis-cut code point
+    assert encoded.decode('utf-8') == text  # round-trip is lossless
+    assert 'truncated: showing' in text
+
+    # Directly pin the boundary-cut contract for both a 3-byte (Japanese) and
+    # a 4-byte (surrogate-pair emoji) code point, at a byte offset that lands
+    # squarely inside the character — not just "whatever offset the full
+    # recall_context pipeline happens to produce".
+    ja_text = 'あ' * 10  # each 'あ' is 3 UTF-8 bytes
+    ja_cut = mcp_server_module._cut_utf8(ja_text, 3 * 3 + 1)  # 1 byte into the 4th char
+    assert '�' not in ja_cut
+    assert ja_cut.encode('utf-8').decode('utf-8') == ja_cut
+    assert ja_cut == 'あ' * 3  # the partial 4th character is dropped whole, not mangled
+
+    emoji_text = '\U0001f600' * 10  # each emoji is 4 UTF-8 bytes, a surrogate pair in UTF-16
+    emoji_cut = mcp_server_module._cut_utf8(emoji_text, 4 * 3 + 2)  # 2 bytes into the 4th char
+    assert '�' not in emoji_cut
+    assert emoji_cut.encode('utf-8').decode('utf-8') == emoji_cut
+    assert emoji_cut == '\U0001f600' * 3
+
+
+def test_recall_context_under_cap_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal-sized results are byte-identical to the pre-cap grouped markdown (no truncation)."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_d = _mk_obs_full('small decision content', project='recall-nocap', memory_type='decision')
+    obs_b = _mk_obs_full('small bug content', project='recall-nocap', memory_type='bug')
+    backend.put_observation(obs_d)
+    backend.put_observation(obs_b)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'recall-nocap'})
+            return result.data
+
+    text = _run(_go())
+    assert 'truncated' not in text
+    assert 'recall_context: 2 result(s)' in text
+    assert 'memory_type=decision' in text
+    assert 'memory_type=bug' in text
+    assert obs_d.observation_id in text
+    assert obs_b.observation_id in text
+    assert 'small decision content' in text
+    assert 'small bug content' in text
+
+
+def test_format_recall_entries_groups_non_contiguous_hits() -> None:
+    """A group heading appears exactly once even when hits alternate between groups.
+
+    ``idx.search`` does not guarantee hits are sorted by (project, memory_type),
+    so two hits from the same group can be non-adjacent in ``hits``. The old
+    dict-based grouping collected all hits per key before rendering; a naive
+    prev-key comparison would instead emit the same heading twice.
+    """
+    obs_d1 = _mk_obs_full('decision one', project='p', memory_type='decision')
+    obs_b1 = _mk_obs_full('bug one', project='p', memory_type='bug')
+    obs_d2 = _mk_obs_full('decision two', project='p', memory_type='decision')
+    hits = [
+        {'obs': obs_d1, 'state': 'live'},
+        {'obs': obs_b1, 'state': 'live'},
+        {'obs': obs_d2, 'state': 'live'},
+    ]
+
+    entries = mcp_server_module._format_recall_entries(hits)  # noqa: SLF001
+
+    joined = '\n---\n'.join(entries)
+    assert joined.count('### project=p / memory_type=decision') == 1
+    assert joined.count('### project=p / memory_type=bug') == 1
+    assert obs_d1.observation_id in joined
+    assert obs_b1.observation_id in joined
+    assert obs_d2.observation_id in joined
+
+
 # ---------------------------------------------------------------------------
 # ADR-0028 Phase5: save-lint warn-only guardrails
 # ---------------------------------------------------------------------------

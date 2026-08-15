@@ -799,24 +799,46 @@ def _clamp_recall_limit(limit: int) -> int:
     return max(1, min(limit, 100))
 
 
-def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str:
-    if not hits:
-        return 'No matching current context.'
-    lines = [f'recall_context: {total} result(s)', filters_summary, '']
-    # Group by (project or "-", memory_type) in first-hit order.
+# Issue #356/A1: recall_context used to join every hit's full ``content`` with
+# no cap, unlike search_memory (Issue #277). Measured median 25KB / p90 46KB,
+# 22.9% of calls overflowing the MCP tool-result limit. Reuse the same
+# _cap_search_output machinery search_memory already has, one entry per
+# observation, so truncation normally drops whole observations at the tail
+# rather than cutting one mid-content. Exception (PR #308 review B1): recall
+# entries don't carry search_memory's trailing ``<id=...>`` suffix, so when a
+# *single* observation alone exceeds the budget, ``_shrink_entry`` falls back
+# to a plain UTF-8-safe byte cut of that one entry instead of dropping it.
+# Returning a truncated partial beats returning zero results — the caller
+# still gets a usable answer, and the truncated notice tells it that
+# happened.
+RECALL_OUTPUT_MAX_BYTES = SEARCH_OUTPUT_MAX_BYTES
+
+
+def _format_recall_entries(hits: list) -> list[str]:
+    """Render one formatted block per observation, grouped by (project, memory_type).
+
+    Groups are collected in first-hit order (same as the pre-cap
+    implementation) rather than by adjacency, so hits from the same group
+    that are not contiguous in ``hits`` still end up under a single heading.
+    A ``### project=.../memory_type=...`` heading is prefixed onto the first
+    entry of each group, so group boundaries survive tail-truncation by
+    ``_cap_search_output`` intact.
+    """
     groups: dict[tuple[str, str], list] = {}
     for item in hits:
         obs = item['obs']
         key = (obs.project or '-', obs.memory_type)
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(item)
-    for (proj, mtype), items in groups.items():
-        lines.append(f'### project={proj} / memory_type={mtype}')
-        lines.append('')
-        for item in items:
+        groups.setdefault(key, []).append(item)
+
+    entries = []
+    for key, items in groups.items():
+        for i, item in enumerate(items):
             obs = item['obs']
             state = item.get('state', 'live')
+            lines = []
+            if i == 0:
+                lines.append(f'### project={key[0]} / memory_type={key[1]}')
+                lines.append('')
             lines.append(f'id: {obs.observation_id}')
             lines.append(f'state: {state}')
             lines.append(f'importance: {obs.importance}')
@@ -834,8 +856,16 @@ def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str
                 lines.append(f'superseded_by: {superseded_by}')
             lines.append('content:')
             lines.append(obs.content)
-            lines.append('')
-    return '\n'.join(lines)
+            entries.append('\n'.join(lines))
+    return entries
+
+
+def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str:
+    if not hits:
+        return 'No matching current context.'
+    prefix = f'recall_context: {total} result(s)\n{filters_summary}'
+    entries = _format_recall_entries(hits)
+    return _cap_search_output(entries, RECALL_OUTPUT_MAX_BYTES, prefix=prefix)
 
 
 @mcp.tool()
@@ -864,6 +894,13 @@ def recall_context(
         since_iso: optional lower created_at bound (ISO 8601).
         limit: maximum results (clamped to 1..100).
         search_mode: 'and' | 'or' | 'and_or' (default and_or).
+
+    The returned text is capped at ``RECALL_OUTPUT_MAX_BYTES`` (Issue #356/A1);
+    if the cap is hit, whole observations are dropped from the tail, except
+    that a single observation too large to fit on its own is shown as a
+    truncated partial instead of being dropped entirely (PR #308 review B1).
+    Either way a trailing ``[truncated: showing N of M result(s); ...]`` line
+    is appended.
     """
     if search_mode not in ('and', 'or', 'and_or'):
         return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"
