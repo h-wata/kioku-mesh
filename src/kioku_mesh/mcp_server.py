@@ -799,43 +799,60 @@ def _clamp_recall_limit(limit: int) -> int:
     return max(1, min(limit, 100))
 
 
+# Issue #356/A1: recall_context used to join every hit's full ``content`` with
+# no cap, unlike search_memory (Issue #277). Measured median 25KB / p90 46KB,
+# 22.9% of calls overflowing the MCP tool-result limit. Reuse the same
+# _cap_search_output machinery search_memory already has, one entry per
+# observation, so truncation always drops whole observations (never splits
+# one mid-content) and the caller sees a truncated notice.
+RECALL_OUTPUT_MAX_BYTES = SEARCH_OUTPUT_MAX_BYTES
+
+
+def _format_recall_entries(hits: list) -> list[str]:
+    """Render one formatted block per observation, in first-hit (grouped) order.
+
+    A ``### project=.../memory_type=...`` heading is prefixed onto the first
+    entry of each new (project, memory_type) group, so group boundaries
+    survive tail-truncation by ``_cap_search_output`` intact.
+    """
+    entries = []
+    prev_key: tuple[str, str] | None = None
+    for item in hits:
+        obs = item['obs']
+        state = item.get('state', 'live')
+        key = (obs.project or '-', obs.memory_type)
+        lines = []
+        if key != prev_key:
+            lines.append(f'### project={key[0]} / memory_type={key[1]}')
+            lines.append('')
+            prev_key = key
+        lines.append(f'id: {obs.observation_id}')
+        lines.append(f'state: {state}')
+        lines.append(f'importance: {obs.importance}')
+        lines.append(f'created_at: {obs.created_at}')
+        lines.append(f'origin: {obs.client_id or "-"} ({_origin_note(obs)})')
+        lines.append(f'subject: {obs.subject or "-"}')
+        lines.append(f'summary: {obs.summary or "-"}')
+        lines.append(f'tags: {", ".join(obs.tags) if obs.tags else "-"}')
+        lines.append(f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}')
+        lines.append(f'references: {", ".join(obs.references) if obs.references else "-"}')
+        if obs.supersedes:
+            lines.append(f'supersedes: {", ".join(obs.supersedes)}')
+        superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
+        if superseded_by:
+            lines.append(f'superseded_by: {superseded_by}')
+        lines.append('content:')
+        lines.append(obs.content)
+        entries.append('\n'.join(lines))
+    return entries
+
+
 def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str:
     if not hits:
         return 'No matching current context.'
-    lines = [f'recall_context: {total} result(s)', filters_summary, '']
-    # Group by (project or "-", memory_type) in first-hit order.
-    groups: dict[tuple[str, str], list] = {}
-    for item in hits:
-        obs = item['obs']
-        key = (obs.project or '-', obs.memory_type)
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(item)
-    for (proj, mtype), items in groups.items():
-        lines.append(f'### project={proj} / memory_type={mtype}')
-        lines.append('')
-        for item in items:
-            obs = item['obs']
-            state = item.get('state', 'live')
-            lines.append(f'id: {obs.observation_id}')
-            lines.append(f'state: {state}')
-            lines.append(f'importance: {obs.importance}')
-            lines.append(f'created_at: {obs.created_at}')
-            lines.append(f'origin: {obs.client_id or "-"} ({_origin_note(obs)})')
-            lines.append(f'subject: {obs.subject or "-"}')
-            lines.append(f'summary: {obs.summary or "-"}')
-            lines.append(f'tags: {", ".join(obs.tags) if obs.tags else "-"}')
-            lines.append(f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}')
-            lines.append(f'references: {", ".join(obs.references) if obs.references else "-"}')
-            if obs.supersedes:
-                lines.append(f'supersedes: {", ".join(obs.supersedes)}')
-            superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
-            if superseded_by:
-                lines.append(f'superseded_by: {superseded_by}')
-            lines.append('content:')
-            lines.append(obs.content)
-            lines.append('')
-    return '\n'.join(lines)
+    prefix = f'recall_context: {total} result(s)\n{filters_summary}'
+    entries = _format_recall_entries(hits)
+    return _cap_search_output(entries, RECALL_OUTPUT_MAX_BYTES, prefix=prefix)
 
 
 @mcp.tool()
@@ -864,6 +881,11 @@ def recall_context(
         since_iso: optional lower created_at bound (ISO 8601).
         limit: maximum results (clamped to 1..100).
         search_mode: 'and' | 'or' | 'and_or' (default and_or).
+
+    The returned text is capped at ``RECALL_OUTPUT_MAX_BYTES`` (Issue #356/A1);
+    if the cap is hit, whole observations are dropped from the tail (never
+    split mid-content) and a trailing ``[truncated: showing N of M
+    result(s); ...]`` line is appended.
     """
     if search_mode not in ('and', 'or', 'and_or'):
         return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"

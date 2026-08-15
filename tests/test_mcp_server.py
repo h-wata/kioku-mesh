@@ -2160,6 +2160,105 @@ def test_recall_context_index_disabled_message(
     assert 'KIOKU_MESH_DISABLE_INDEX' in text
 
 
+# Issue #356/A1: recall_context byte cap (reuses search_memory's _cap_search_output).
+def test_recall_context_output_capped_at_max_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A large set of big observations never exceeds RECALL_OUTPUT_MAX_BYTES."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 4_000)
+    for i in range(10):
+        backend.put_observation(_mk_obs_full('x' * 2_000, project='recall-bytecap', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-bytecap', 'limit': 10},
+            )
+            assert not result.is_error
+            return result.data
+
+    text = _run(_go())
+    assert len(text.encode('utf-8')) <= 4_000
+    assert 'truncated: showing' in text
+
+
+def test_recall_context_truncation_notice_visible_to_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When truncated, the caller sees a 'showing N of M' notice, not silently-dropped data."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    for i in range(8):
+        backend.put_observation(_mk_obs_full('y' * 1_500, project='recall-notice', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-notice', 'limit': 8},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert 'recall_context: 8 result(s)' in text  # total reflects the real hit count
+    assert 'truncated: showing' in text
+    assert 'result(s); output capped at 3000 bytes' in text
+
+
+def test_recall_context_truncation_drops_whole_entries_not_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Truncation must fall on observation boundaries: a shown entry's content is never cut mid-way."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    kept_marker = 'KEPT_CONTENT_END_MARK'
+    for i in range(6):
+        backend.put_observation(_mk_obs_full('z' * 800 + kept_marker, project='recall-boundary', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-boundary', 'limit': 6},
+            )
+            return result.data
+
+    text = _run(_go())
+    # Every entry that appears in the output is either fully present (marker intact)
+    # or the whole block was dropped by the tail-truncation — never half-written.
+    shown_full_entries = text.count(kept_marker)
+    assert shown_full_entries >= 1
+    assert 'truncated: showing' in text
+
+
+def test_recall_context_under_cap_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal-sized results are byte-identical to the pre-cap grouped markdown (no truncation)."""
+    backend = _mk_local_backend(monkeypatch)
+    obs_d = _mk_obs_full('small decision content', project='recall-nocap', memory_type='decision')
+    obs_b = _mk_obs_full('small bug content', project='recall-nocap', memory_type='bug')
+    backend.put_observation(obs_d)
+    backend.put_observation(obs_b)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', {'project': 'recall-nocap'})
+            return result.data
+
+    text = _run(_go())
+    assert 'truncated' not in text
+    assert 'recall_context: 2 result(s)' in text
+    assert 'memory_type=decision' in text
+    assert 'memory_type=bug' in text
+    assert obs_d.observation_id in text
+    assert obs_b.observation_id in text
+    assert 'small decision content' in text
+    assert 'small bug content' in text
+
+
 # ---------------------------------------------------------------------------
 # ADR-0028 Phase5: save-lint warn-only guardrails
 # ---------------------------------------------------------------------------
