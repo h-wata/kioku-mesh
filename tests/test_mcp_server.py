@@ -1962,7 +1962,7 @@ def test_recall_context_canonical_project_finds_legacy_rows(
     text = _run(_go())
     assert obs.observation_id in text
     # Observability: the filters line names what the project filter expanded to.
-    assert "project='kioku-mesh' (also matching 'mesh-mem')" in text
+    assert "project='kioku-mesh' (also matching '/home/gisen/work/mesh-mem', 'mesh-mem')" in text
 
 
 def test_recall_context_canonical_project_merges_legacy_and_canonical_without_duplicates(

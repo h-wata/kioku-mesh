@@ -24,6 +24,15 @@ from collections.abc import Sequence
 # already persisted under the legacy key are never rewritten.
 PROJECT_ALIASES: dict[str, str] = {
     'mesh-mem': 'kioku-mesh',
+    # Accidental absolute-path project value from an early save (Issue TASK-361
+    # investigation): a client passed its cwd instead of a project name.
+    '/home/gisen/work/mesh-mem': 'kioku-mesh',
+    # underscore/hyphen spelling variants observed for the same repo (content
+    # confirmed identical topic: portable scanning pipeline / handyscanner).
+    'portable_colorized_scanner': 'portable-scanner',
+    # 'rmf_ws' (workspace dir name) is the more common spelling for the same
+    # RMF core repo; 'rmf' is an older, sparser alias for it.
+    'rmf': 'rmf_ws',
 }
 
 
