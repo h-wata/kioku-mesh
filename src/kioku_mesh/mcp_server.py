@@ -803,8 +803,14 @@ def _clamp_recall_limit(limit: int) -> int:
 # no cap, unlike search_memory (Issue #277). Measured median 25KB / p90 46KB,
 # 22.9% of calls overflowing the MCP tool-result limit. Reuse the same
 # _cap_search_output machinery search_memory already has, one entry per
-# observation, so truncation always drops whole observations (never splits
-# one mid-content) and the caller sees a truncated notice.
+# observation, so truncation normally drops whole observations at the tail
+# rather than cutting one mid-content. Exception (PR #308 review B1): recall
+# entries don't carry search_memory's trailing ``<id=...>`` suffix, so when a
+# *single* observation alone exceeds the budget, ``_shrink_entry`` falls back
+# to a plain UTF-8-safe byte cut of that one entry instead of dropping it.
+# Returning a truncated partial beats returning zero results — the caller
+# still gets a usable answer, and the truncated notice tells it that
+# happened.
 RECALL_OUTPUT_MAX_BYTES = SEARCH_OUTPUT_MAX_BYTES
 
 
@@ -890,9 +896,11 @@ def recall_context(
         search_mode: 'and' | 'or' | 'and_or' (default and_or).
 
     The returned text is capped at ``RECALL_OUTPUT_MAX_BYTES`` (Issue #356/A1);
-    if the cap is hit, whole observations are dropped from the tail (never
-    split mid-content) and a trailing ``[truncated: showing N of M
-    result(s); ...]`` line is appended.
+    if the cap is hit, whole observations are dropped from the tail, except
+    that a single observation too large to fit on its own is shown as a
+    truncated partial instead of being dropped entirely (PR #308 review B1).
+    Either way a trailing ``[truncated: showing N of M result(s); ...]`` line
+    is appended.
     """
     if search_mode not in ('and', 'or', 'and_or'):
         return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"

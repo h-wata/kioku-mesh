@@ -2210,7 +2210,13 @@ def test_recall_context_truncation_notice_visible_to_caller(
 def test_recall_context_truncation_drops_whole_entries_not_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Truncation must fall on observation boundaries: a shown entry's content is never cut mid-way."""
+    """With multiple observations, truncation falls on boundaries: a shown entry is never cut mid-way.
+
+    (This guarantee holds when more than one observation is in play, so a
+    whole one can be dropped from the tail. See
+    test_recall_context_single_oversized_observation_returns_partial for the
+    single-observation exception, PR #308 review B1.)
+    """
     backend = _mk_local_backend(monkeypatch)
     monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
     kept_marker = 'KEPT_CONTENT_END_MARK'
@@ -2230,6 +2236,58 @@ def test_recall_context_truncation_drops_whole_entries_not_partial(
     # or the whole block was dropped by the tail-truncation — never half-written.
     shown_full_entries = text.count(kept_marker)
     assert shown_full_entries >= 1
+    assert 'truncated: showing' in text
+
+
+def test_recall_context_single_oversized_observation_returns_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single observation that alone exceeds the budget is shown truncated, not dropped to zero results.
+
+    PR #308 review B1: recall entries lack search_memory's ``<id=...>`` suffix,
+    so ``_shrink_entry`` can't preserve entry identity the way it does for
+    search_memory — it falls back to a plain byte cut of the one entry. This
+    is a deliberate exception to the whole-observation-boundary rule: a
+    partial result is more useful than an empty one, and the truncated notice
+    still tells the caller data was cut.
+    """
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    backend.put_observation(_mk_obs_full('w' * 30_000, project='recall-oversized', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-oversized', 'limit': 1},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert 'No matching current context.' not in text
+    assert 'w' in text  # some content survived, not an empty/dropped result
+    assert 'truncated: showing' in text
+    assert len(text.encode('utf-8')) <= 3_000
+
+
+def test_recall_context_single_oversized_observation_utf8_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The partial cut of a single oversized observation never splits a multibyte character."""
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    backend.put_observation(_mk_obs_full('あ' * 30_000, project='recall-oversized-mb', memory_type='note'))
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'recall-oversized-mb', 'limit': 1},
+            )
+            return result.data
+
+    text = _run(_go())
+    text.encode('utf-8')  # must not raise UnicodeEncodeError on a split code point
     assert 'truncated: showing' in text
 
 
