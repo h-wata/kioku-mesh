@@ -809,41 +809,48 @@ RECALL_OUTPUT_MAX_BYTES = SEARCH_OUTPUT_MAX_BYTES
 
 
 def _format_recall_entries(hits: list) -> list[str]:
-    """Render one formatted block per observation, in first-hit (grouped) order.
+    """Render one formatted block per observation, grouped by (project, memory_type).
 
+    Groups are collected in first-hit order (same as the pre-cap
+    implementation) rather than by adjacency, so hits from the same group
+    that are not contiguous in ``hits`` still end up under a single heading.
     A ``### project=.../memory_type=...`` heading is prefixed onto the first
-    entry of each new (project, memory_type) group, so group boundaries
-    survive tail-truncation by ``_cap_search_output`` intact.
+    entry of each group, so group boundaries survive tail-truncation by
+    ``_cap_search_output`` intact.
     """
-    entries = []
-    prev_key: tuple[str, str] | None = None
+    groups: dict[tuple[str, str], list] = {}
     for item in hits:
         obs = item['obs']
-        state = item.get('state', 'live')
         key = (obs.project or '-', obs.memory_type)
-        lines = []
-        if key != prev_key:
-            lines.append(f'### project={key[0]} / memory_type={key[1]}')
-            lines.append('')
-            prev_key = key
-        lines.append(f'id: {obs.observation_id}')
-        lines.append(f'state: {state}')
-        lines.append(f'importance: {obs.importance}')
-        lines.append(f'created_at: {obs.created_at}')
-        lines.append(f'origin: {obs.client_id or "-"} ({_origin_note(obs)})')
-        lines.append(f'subject: {obs.subject or "-"}')
-        lines.append(f'summary: {obs.summary or "-"}')
-        lines.append(f'tags: {", ".join(obs.tags) if obs.tags else "-"}')
-        lines.append(f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}')
-        lines.append(f'references: {", ".join(obs.references) if obs.references else "-"}')
-        if obs.supersedes:
-            lines.append(f'supersedes: {", ".join(obs.supersedes)}')
-        superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
-        if superseded_by:
-            lines.append(f'superseded_by: {superseded_by}')
-        lines.append('content:')
-        lines.append(obs.content)
-        entries.append('\n'.join(lines))
+        groups.setdefault(key, []).append(item)
+
+    entries = []
+    for key, items in groups.items():
+        for i, item in enumerate(items):
+            obs = item['obs']
+            state = item.get('state', 'live')
+            lines = []
+            if i == 0:
+                lines.append(f'### project={key[0]} / memory_type={key[1]}')
+                lines.append('')
+            lines.append(f'id: {obs.observation_id}')
+            lines.append(f'state: {state}')
+            lines.append(f'importance: {obs.importance}')
+            lines.append(f'created_at: {obs.created_at}')
+            lines.append(f'origin: {obs.client_id or "-"} ({_origin_note(obs)})')
+            lines.append(f'subject: {obs.subject or "-"}')
+            lines.append(f'summary: {obs.summary or "-"}')
+            lines.append(f'tags: {", ".join(obs.tags) if obs.tags else "-"}')
+            lines.append(f'source_files: {", ".join(obs.source_files) if obs.source_files else "-"}')
+            lines.append(f'references: {", ".join(obs.references) if obs.references else "-"}')
+            if obs.supersedes:
+                lines.append(f'supersedes: {", ".join(obs.supersedes)}')
+            superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
+            if superseded_by:
+                lines.append(f'superseded_by: {superseded_by}')
+            lines.append('content:')
+            lines.append(obs.content)
+            entries.append('\n'.join(lines))
     return entries
 
 

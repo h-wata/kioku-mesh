@@ -2259,6 +2259,33 @@ def test_recall_context_under_cap_unchanged(
     assert 'small bug content' in text
 
 
+def test_format_recall_entries_groups_non_contiguous_hits() -> None:
+    """A group heading appears exactly once even when hits alternate between groups.
+
+    ``idx.search`` does not guarantee hits are sorted by (project, memory_type),
+    so two hits from the same group can be non-adjacent in ``hits``. The old
+    dict-based grouping collected all hits per key before rendering; a naive
+    prev-key comparison would instead emit the same heading twice.
+    """
+    obs_d1 = _mk_obs_full('decision one', project='p', memory_type='decision')
+    obs_b1 = _mk_obs_full('bug one', project='p', memory_type='bug')
+    obs_d2 = _mk_obs_full('decision two', project='p', memory_type='decision')
+    hits = [
+        {'obs': obs_d1, 'state': 'live'},
+        {'obs': obs_b1, 'state': 'live'},
+        {'obs': obs_d2, 'state': 'live'},
+    ]
+
+    entries = mcp_server_module._format_recall_entries(hits)  # noqa: SLF001
+
+    joined = '\n---\n'.join(entries)
+    assert joined.count('### project=p / memory_type=decision') == 1
+    assert joined.count('### project=p / memory_type=bug') == 1
+    assert obs_d1.observation_id in joined
+    assert obs_b1.observation_id in joined
+    assert obs_d2.observation_id in joined
+
+
 # ---------------------------------------------------------------------------
 # ADR-0028 Phase5: save-lint warn-only guardrails
 # ---------------------------------------------------------------------------
