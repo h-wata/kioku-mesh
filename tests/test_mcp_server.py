@@ -2219,24 +2219,29 @@ def test_recall_context_truncation_drops_whole_entries_not_partial(
     """
     backend = _mk_local_backend(monkeypatch)
     monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
-    kept_marker = 'KEPT_CONTENT_END_MARK'
-    for i in range(6):
-        backend.put_observation(_mk_obs_full('z' * 800 + kept_marker, project='recall-boundary', memory_type='note'))
+    n = 6
+    for i in range(n):
+        content = f'STARTMARK{i}_' + 'z' * 780 + f'_ENDMARK{i}'
+        backend.put_observation(_mk_obs_full(content, project='recall-boundary', memory_type='note'))
 
     async def _go() -> str:
         async with Client(mcp) as client:
             result = await client.call_tool(
                 'recall_context',
-                {'project': 'recall-boundary', 'limit': 6},
+                {'project': 'recall-boundary', 'limit': n},
             )
             return result.data
 
     text = _run(_go())
-    # Every entry that appears in the output is either fully present (marker intact)
-    # or the whole block was dropped by the tail-truncation — never half-written.
-    shown_full_entries = text.count(kept_marker)
-    assert shown_full_entries >= 1
     assert 'truncated: showing' in text
+    # Every entry is either wholly present (both its start and end marker show up)
+    # or wholly dropped (neither does) — a mismatch means a half-written entry
+    # slipped through the tail-truncation boundary.
+    presence = [(f'STARTMARK{i}_' in text, f'_ENDMARK{i}' in text) for i in range(n)]
+    for start_present, end_present in presence:
+        assert start_present == end_present
+    assert any(start_present for start_present, _ in presence)  # at least one full entry survived
+    assert not all(start_present for start_present, _ in presence)  # and at least one was dropped
 
 
 def test_recall_context_single_oversized_observation_returns_partial(
@@ -2253,7 +2258,8 @@ def test_recall_context_single_oversized_observation_returns_partial(
     """
     backend = _mk_local_backend(monkeypatch)
     monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
-    backend.put_observation(_mk_obs_full('w' * 30_000, project='recall-oversized', memory_type='note'))
+    head_marker = 'CONTENT_HEAD_MARKER'
+    backend.put_observation(_mk_obs_full(head_marker + 'w' * 30_000, project='recall-oversized', memory_type='note'))
 
     async def _go() -> str:
         async with Client(mcp) as client:
@@ -2265,7 +2271,10 @@ def test_recall_context_single_oversized_observation_returns_partial(
 
     text = _run(_go())
     assert 'No matching current context.' not in text
-    assert 'w' in text  # some content survived, not an empty/dropped result
+    assert 'recall_context: 1 result(s)' in text  # not dropped to zero results
+    # The observation's own content — not just some incidental character that
+    # happens to also appear in the truncation notice's wording — survived the cut.
+    assert head_marker in text
     assert 'truncated: showing' in text
     assert len(text.encode('utf-8')) <= 3_000
 
@@ -2287,8 +2296,26 @@ def test_recall_context_single_oversized_observation_utf8_safe(
             return result.data
 
     text = _run(_go())
-    text.encode('utf-8')  # must not raise UnicodeEncodeError on a split code point
+    encoded = text.encode('utf-8')  # must not raise UnicodeEncodeError on a split code point
+    assert '�' not in text  # no replacement character from a mis-cut code point
+    assert encoded.decode('utf-8') == text  # round-trip is lossless
     assert 'truncated: showing' in text
+
+    # Directly pin the boundary-cut contract for both a 3-byte (Japanese) and
+    # a 4-byte (surrogate-pair emoji) code point, at a byte offset that lands
+    # squarely inside the character — not just "whatever offset the full
+    # recall_context pipeline happens to produce".
+    ja_text = 'あ' * 10  # each 'あ' is 3 UTF-8 bytes
+    ja_cut = mcp_server_module._cut_utf8(ja_text, 3 * 3 + 1)  # 1 byte into the 4th char
+    assert '�' not in ja_cut
+    assert ja_cut.encode('utf-8').decode('utf-8') == ja_cut
+    assert ja_cut == 'あ' * 3  # the partial 4th character is dropped whole, not mangled
+
+    emoji_text = '\U0001f600' * 10  # each emoji is 4 UTF-8 bytes, a surrogate pair in UTF-16
+    emoji_cut = mcp_server_module._cut_utf8(emoji_text, 4 * 3 + 2)  # 2 bytes into the 4th char
+    assert '�' not in emoji_cut
+    assert emoji_cut.encode('utf-8').decode('utf-8') == emoji_cut
+    assert emoji_cut == '\U0001f600' * 3
 
 
 def test_recall_context_under_cap_unchanged(
