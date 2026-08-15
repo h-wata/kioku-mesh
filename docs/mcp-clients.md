@@ -102,6 +102,49 @@ For ChatGPT Desktop or other clients, follow the same manual config pattern with
 `observation_id` space is shared; mis-tagging the client id just makes
 `search_memory --client-id` filters useless — it does not corrupt storage.
 
+### Removing per-tool approval friction
+
+`kioku-mesh mcp install --client codex-cli` used to also write per-tool
+`approval_mode = "approve"` overrides for `search_memory` and
+`save_observation` in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.kioku_mesh.tools.search_memory]
+approval_mode = "approve"
+
+[mcp_servers.kioku_mesh.tools.save_observation]
+approval_mode = "approve"
+```
+
+Without a per-tool override, Codex CLI approves an MCP tool call based on
+the tool's own MCP annotations (read-only tools like `recall_context` /
+`get_memory` need no approval; a destructive tool like `delete_memory`
+still does). The `approve` overrides above forced a confirmation prompt on
+every single `search_memory` / `save_observation` call — the two
+highest-volume tools — even though neither is destructive. Delete these two
+`[mcp_servers.kioku_mesh.tools.*]` blocks (keep any block for a genuinely
+destructive tool, e.g. `delete_memory`, if one is ever added) and re-parse
+with `python3 -c "import tomllib,pathlib; tomllib.loads(pathlib.Path.home().joinpath('.codex/config.toml').read_text())"`
+to confirm the file is still valid TOML.
+
+### Why AGENTS.md needs its own kioku-mesh section
+
+Unlike Claude Code, Codex CLI does not put MCP server instructions in the
+system prompt. They only reach the model via `tool_search_output`, after
+the model has already called a tool from that server — so "call
+`recall_context` before starting work" can't be read before the model has
+decided to look for the tool in the first place. The result, measured
+across ~430 Codex CLI sessions: kioku-mesh usage tracked the model in use
+(89% of sessions on one model, 0% after two model upgrades), and monthly
+calls dropped from ~217 to 8. Read-only approval friction and a missing
+AGENTS.md section were concurrent factors over this period, amplifying
+the model-driven drop. Restating the
+proactive-use rules in `AGENTS.md` (`~/.codex/AGENTS.md`, or the project's
+own `AGENTS.md`) is what actually gets read at session start, independent
+of tool-search timing. Add a `kioku-mesh` section there next to the
+existing `CodeGraph` section, same length and style — see
+`~/.codex/AGENTS.md` for a worked example.
+
 ## Optional: session id pinning
 
 Agents that expose a launch hook can set `MESH_MEM_SESSION_ID` to a value they control (e.g. the conversation id). When unset, kioku-mesh autogenerates `{YYYYMMDDTHHMMSSZ}-{short-uuid}` once per process and caches it.

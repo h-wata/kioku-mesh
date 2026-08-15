@@ -95,6 +95,46 @@ ChatGPT Desktop やその他のクライアントでは、`chatgpt` などの fa
 共有なので、client id を取り違えても `search_memory --client-id` のフィルタが
 効かなくなる程度で、ストレージは破損しません。
 
+### tool 単位の承認摩擦を外す
+
+以前の `kioku-mesh mcp install --client codex-cli` は、`~/.codex/config.toml` に
+`search_memory` / `save_observation` の per-tool `approval_mode = "approve"`
+override も書いていました:
+
+```toml
+[mcp_servers.kioku_mesh.tools.search_memory]
+approval_mode = "approve"
+
+[mcp_servers.kioku_mesh.tools.save_observation]
+approval_mode = "approve"
+```
+
+per-tool override が無い場合、Codex CLI は tool 自身の MCP annotations を見て
+承認要否を決めます（`recall_context` / `get_memory` のような read-only tool は
+承認不要、`delete_memory` のような破壊的 tool は承認が必要なまま）。上記の
+`approve` override は、破壊的ではないにもかかわらず、呼び出し頻度が最も高い
+2 つの tool 全呼び出しに承認プロンプトを強制していました。この 2 つの
+`[mcp_servers.kioku_mesh.tools.*]` ブロックは削除してください（`delete_memory`
+のような本当に破壊的な tool に override を足す場合はそちらは残す）。削除後は
+`python3 -c "import tomllib,pathlib; tomllib.loads(pathlib.Path.home().joinpath('.codex/config.toml').read_text())"`
+で TOML として壊れていないことを確認します。
+
+### なぜ AGENTS.md に kioku-mesh の節が要るのか
+
+Claude Code と違い、Codex CLI は MCP server の instructions をシステムプロンプトに
+入れません。instructions が届くのは `tool_search_output` 経由のみで、これは
+モデルがそのサーバーの tool を一度呼んだ**後**にしか出てきません。つまり
+「作業開始前に `recall_context` を呼べ」という指示自体が、モデルが tool を
+探しに行った後にしか読めないという循環になります。実測（Codex CLI 約 430
+セッション）では、kioku-mesh の利用率はモデルに強く依存し（あるモデルでは
+89% のセッションで利用、2 回のモデル更新後に 0%）、月間呼び出し数は約 217 →
+8 に落ちました。この間、read 系の承認摩擦と AGENTS.md への未記載が併存して
+おり、モデル側の変化を増幅しています。`AGENTS.md`（`~/.codex/AGENTS.md`、
+またはプロジェクト固有の `AGENTS.md`）に proactive-use のルールを書き直すのが、
+tool_search のタイミングに依存せずセッション開始時に確実に読まれる方法です。
+既存の `CodeGraph` 節の隣に、同じ分量・同じ書き方で `kioku-mesh` 節を追加して
+ください — 実例は `~/.codex/AGENTS.md` を参照。
+
 ## オプション: session id の固定
 
 launch hook を持つ agent は、自分が制御できる値（例: 会話 id）を
