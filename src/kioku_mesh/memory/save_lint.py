@@ -39,6 +39,51 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
+# -- MCP tool-call fragment detection (TASK-373) -------------------------------
+#
+# A field value that arrives with the *next* parameter's markup appended to it
+# means the client failed to terminate the string while assembling the tool
+# call — every observed case (2026-06..2026-08, all client_id=claude-code) has
+# the leak at the very end of ``content``. This is permanent input validation,
+# not a workaround for one client: any LLM client builds tool calls the same
+# way, and an MCP server must not trust the field boundaries it is handed.
+#
+# Detection only. Nothing here strips or rewrites the value — repairing
+# already-stored text is a one-off migration, not a server responsibility.
+
+_SAVE_PARAM_NAMES = (
+    'content|subject|summary|project|tags|memory_type|importance'
+    '|source_files|references|supersedes|visibility|expires_at|ttl_sec'
+)
+
+# Matched anywhere in the value, not just at the end: the leaked block runs from
+# the unterminated ``</content>`` to the end of the tool call and is often
+# hundreds of characters long, so a fixed tail window misses real cases (the
+# 2026-08-11 pair welds at 589 / 642 chars from the end). Precision comes from
+# anchoring on save_observation's own parameter names instead — generic XML in
+# prose does not match. Deliberately quoting this markup in an observation is
+# the known false positive; the tool error says how to reword.
+_TOOL_CALL_FRAGMENT_PATTERNS: list[re.Pattern[str]] = [
+    # ``</content>`` welded to the following parameter's tag
+    re.compile(r'</content>\s*</?(?:%s)>' % _SAVE_PARAM_NAMES),
+    # Claude Code's ``<parameter name="...">`` notation naming one of our params
+    re.compile(r'<parameter\s+name="(?:%s)"' % _SAVE_PARAM_NAMES),
+]
+# A bare tool-call closing tag is deliberately NOT a pattern: every observed
+# leak also carries one of the two welds above, while text that only mentions
+# the closing tag is a note *about* this bug (2 such entries exist in the
+# store). Matching it would have cost 2 false positives and caught nothing new.
+
+
+def find_tool_call_fragment(text: str) -> str | None:
+    """Return the MCP tool-call fragment leaked into ``text``, or None."""
+    for pattern in _TOOL_CALL_FRAGMENT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(0)
+    return None
+
+
 def lint_observation(
     content: str,
     memory_type: str,

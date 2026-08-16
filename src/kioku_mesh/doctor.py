@@ -681,6 +681,82 @@ def check_conflicting_latest(observations: list[Any] | None = None) -> CheckResu
     )
 
 
+_FRAGMENT_SCAN_LIMIT = 10_000
+
+
+def check_tool_call_fragments(observations: list[Any] | None = None) -> CheckResult:
+    """List stored observations whose text carries leaked MCP tool-call markup.
+
+    The save-time guard (``save_observation``) only protects writes made after
+    it shipped; entries saved before it, or replicated from a peer running an
+    older build, are already in the store. This read-only sweep surfaces them
+    so an operator can decide what to do — it never rewrites anything (repair
+    is a one-off append-only supersede-copy, not a doctor action).
+
+    Scans the *effective* set (live, non-superseded) — the entries
+    ``search_memory`` / ``recall_context`` actually return. ``observations``
+    is injectable for tests; the default fetch is capped at
+    :data:`_FRAGMENT_SCAN_LIMIT` and a hit on that cap is surfaced in
+    ``details['truncated']``.
+    """
+    from .memory.save_lint import find_tool_call_fragment  # noqa: PLC0415
+
+    truncated = False
+    if observations is None:
+        try:
+            from .memory.backend import get_backend  # noqa: PLC0415
+
+            observations = get_backend().search_observations(limit=_FRAGMENT_SCAN_LIMIT, include_superseded=False)
+        except Exception as e:  # noqa: BLE001
+            return CheckResult(
+                name='tool_call_fragments',
+                status=CheckStatus.WARN,
+                summary='tool-call fragment scan skipped: could not read memory',
+                hint='Check the backend config / `kioku-mesh status`.',
+                details={'error': type(e).__name__},
+            )
+        truncated = len(observations) >= _FRAGMENT_SCAN_LIMIT
+
+    hits = []
+    for o in observations:
+        for field_name in ('content', 'subject', 'summary'):
+            fragment = find_tool_call_fragment(getattr(o, field_name, '') or '')
+            if fragment:
+                hits.append(
+                    {
+                        'observation_id': o.observation_id,
+                        'created_at': o.created_at[:10],
+                        'field': field_name,
+                        'fragment': fragment,
+                    }
+                )
+                break
+
+    scanned = len(observations)
+    details: dict[str, Any] = {'hits': len(hits), 'scanned': scanned, 'truncated': truncated}
+    if not hits:
+        return CheckResult(
+            name='tool_call_fragments',
+            status=CheckStatus.PASS,
+            summary=f'no tool-call markup found in {scanned} effective (live, non-superseded) entries',
+            details=details,
+        )
+    details['examples'] = hits[:5]
+    summary = f'{len(hits)} of {scanned} effective (live, non-superseded) entries carry MCP tool-call markup'
+    if truncated:
+        summary += f' (scan truncated at {_FRAGMENT_SCAN_LIMIT}; more may exist)'
+    return CheckResult(
+        name='tool_call_fragments',
+        status=CheckStatus.WARN,
+        summary=summary,
+        hint=(
+            'Inspect with `kioku-mesh get-memory <id>`. Repair by saving a cleaned copy with '
+            'supersedes=[old_id] (ADR-0028 append-only); nothing is rewritten in place.'
+        ),
+        details=details,
+    )
+
+
 # ADR-0019 Phase D: legacy namespace preflight check.
 
 
@@ -1136,6 +1212,7 @@ _CHECK_ORDER: tuple[str, ...] = (
     'check_fts5',
     'check_shadow_visibility',
     'check_conflicting_latest',
+    'check_tool_call_fragments',
     'check_legacy_namespace',
     'check_identity',
 )
