@@ -238,9 +238,13 @@ existence-based supersede filter が元 row を通常検索から沈める
 
 - **raw**: `deleted_at IS NULL` のみで数えた、監査用の全 row 数。backfill
   コピーとその修復元の両方を含む。
-- **live**: raw から `superseded_by IS NOT NULL` な row（＝より新しい
-  supersede コピーに置き換えられた行）を除いた、supersedes チェーンで
-  「現在の代表」である row 数。
+- **live**: raw から、supersede コピーに置き換えられた行のうち **その
+  supersede コピー自身が live（未 tombstone・未 shadow・未失効）である**
+  行だけを除いた、supersedes チェーンで「現在の代表」である row 数。
+  `superseded_by IS NOT NULL` を単純に除外するのではない
+  （existence-based supersede filter、ADR-0021 / `local_index.py:669-687`）。
+  supersede コピー自身が tombstone・shadow・失効している場合、元 row は
+  隠されずに live のまま残る。
 - **effective**: live にさらに `project` 等の呼び出し固有フィルタを重ねた、
   「実際にある検索呼び出しが返す」件数。
 
@@ -275,42 +279,71 @@ project 移行などの正規の supersede 運用はすべて raw の見かけ�
 -- raw: 監査用。tombstone されていない全 row（backfill コピーとその修復元を含む）
 SELECT COUNT(*) FROM obs_index WHERE deleted_at IS NULL;
 
--- live: raw から supersede 済み row（より新しいコピーに置き換えられた行）を除いた
--- 「現在の代表」row。deleted_at IS NULL AND superseded_by IS NULL が定義。
+-- live: LocalIndex.search の既定 (include_superseded=False, include_expired=False)
+-- と同じ existence-based supersede filter (local_index.py:669-687)。単純な
+-- `superseded_by IS NULL` ではなく、supersede コピー自身が live（未 tombstone・
+-- 未 shadow・未失効）でない限り元 row を隠さない。:now は snapshot 取得時点の
+-- UTC ISO8601（例 '2026-08-16T06:41:42.000Z'）。
 SELECT COUNT(*) FROM obs_index
-WHERE deleted_at IS NULL AND superseded_by IS NULL;
+WHERE deleted_at IS NULL AND shadowed_at IS NULL
+  AND (expires_at IS NULL OR expires_at = '' OR expires_at > :now)
+  AND (superseded_by IS NULL OR superseded_by NOT IN (
+    SELECT observation_id FROM obs_index
+    WHERE deleted_at IS NULL AND shadowed_at IS NULL
+      AND (expires_at IS NULL OR expires_at = '' OR expires_at > :now)
+  ));
 
--- effective: live からさらに検索呼び出し固有のフィルタ（例: project スコープ、
--- shadowed_at 除外）をかけた「実際に search_memory 等が返す」件数。
--- shadowed_at は supersede とは別のディメンション（ADR-0028 本文 4節: reconciliation
--- による local-only 非表示）なので、通常検索の再現には併せて除外する。
+-- effective: live にさらに検索呼び出し固有のフィルタ（例: project スコープ）を
+-- かけた「実際に search_memory 等が返す」件数。shadowed_at / expires_at は
+-- live の定義に既に含まれるため、ここでは project のみ追加する。
 SELECT COUNT(*) FROM obs_index
-WHERE deleted_at IS NULL AND shadowed_at IS NULL AND superseded_by IS NULL
+WHERE deleted_at IS NULL AND shadowed_at IS NULL
+  AND (expires_at IS NULL OR expires_at = '' OR expires_at > :now)
+  AND (superseded_by IS NULL OR superseded_by NOT IN (
+    SELECT observation_id FROM obs_index
+    WHERE deleted_at IS NULL AND shadowed_at IS NULL
+      AND (expires_at IS NULL OR expires_at = '' OR expires_at > :now)
+  ))
   AND project = 'kioku-mesh';
 ```
 
-### 実測 (2026-08-16 snapshot)
+### 実測 (2026-08-16 15:41 JST snapshot, TASK-377 で再検証・更新)
 
 本番 local index sidecar (`/home/gisen/.local/share/kioku-mesh/index.db`) を
-`/home/gisen/work-tmp/adr-0028-verify/index_copy_20260816.db` へコピーし
-（コピー元とのバイト一致を `md5sum` で確認済み、SELECT のみ実行、コピー元は
-未変更）、上記 SQL をそのまま実行した。
+`/home/gisen/work-tmp/adr-0028-verify/index_copy_20260816_154135.db` へ
+コピーし（SELECT のみ実行、コピー元は未変更）、上記 SQL と `LocalIndex.search`
+の直接呼び出し（`now_iso` を snapshot 取得時点に固定）の両方を実行して
+一致を確認した。
 
-| 区分 | SQL | 件数 |
+| 区分 | SQL / 呼び出し | 件数 |
 |---|---|---:|
-| raw | `deleted_at IS NULL` | 1521 |
-| live | raw AND `superseded_by IS NULL` | 1137 |
-| （参考）live かつ shadowed 除外 | 上記 AND `shadowed_at IS NULL` | 1137（shadowed 0 件のため同値） |
-| effective (`project='kioku-mesh'`) | live AND shadowed 除外 AND project | 264 |
-| supersede 済み（backfill コピーに置き換わった元 row） | `deleted_at IS NULL AND superseded_by IS NOT NULL` | 384 |
+| raw | `deleted_at IS NULL` | 1538 |
+| （参考・誤り）単純な `superseded_by IS NULL` | raw AND `superseded_by IS NULL` | 1146 |
+| live | 本補遺の existence-based SQL | 1147 |
+| live（`LocalIndex.search()` 直接呼び出し、既定引数） | — | 1147（SQL と一致） |
+| effective (`project='kioku-mesh'`) | live AND project | 273 |
+| effective（`LocalIndex.search(project='kioku-mesh')` 直接呼び出し） | — | 273（SQL と一致） |
+| supersede 済み（`superseded_by IS NOT NULL`、単純カウント） | `deleted_at IS NULL AND superseded_by IS NOT NULL` | 392 |
+| supersede により実際に隠れた行（raw − existence-based live） | 1538 − 1147 | 391 |
+
+**単純フィルタとの差異（1146 vs 1147、392 vs 391）**: 該当する 1 件
+（`observation_id=01677efa58e049b4bfff85491fa8f103`）は `superseded_by` が
+指す supersede コピー自身が既に `deleted_at` 付きで tombstone されている
+ケースだった。単純な `superseded_by IS NOT NULL` はこの元 row も
+「supersede 済み」として隠すが、existence-based filter は supersede コピー
+自身が live でない（tombstone 済み）限り元 row を隠さないため、この 1 件は
+live のまま残る。単純フィルタと existence-based filter は一般に一致しない
+ことを示す実例であり、PR310-B1 で指摘された 1137 vs 1138 の食い違いと
+同種の事象が本 snapshot でも再現した（絶対値は書き込みが進んだため異なる）。
 
 **期待との差異、および明記すべき点**: TASK-361 の起票文は「全 live 1517 件」と
 書いていたが、その 1517 は本補遺の定義でいう **raw**（`deleted_at IS NULL`
-のみ）の値であり、**live**（supersede 除外後）ではない。今回の raw 実測 1521
-はほぼ整合する（起票からの経過時間で新規保存が増えた分の差）。一方、本補遺の
-定義に基づく実際の live は 1137 で raw より 384 少ない——この 384 が
+のみ）の値であり、**live**（existence-based supersede filter 適用後）では
+ない。本 snapshot（2026-08-16 15:41 JST）の raw 実測 1538 もほぼ整合する
+（起票からの経過時間で新規保存が増えた分の差）。一方、本補遺の定義に基づく
+実際の live は 1147 で raw より 391 少ない——この 391 が
 まさに backfill 修復コピーによって沈められた元 row の数である。つまり
 「live ≒ raw に近い値のはず」という素朴な期待は成立せず、**raw と live の差
-（384）こそが supersede の正常な効果**であり、バグの兆候ではない。この
+（391）こそが supersede の正常な効果**であり、バグの兆候ではない。この
 raw/live の呼び分けの欠如自体が (b) で示した誤読の再現であり、本補遺が
 解消しようとしている問題と一致する。
