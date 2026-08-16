@@ -203,3 +203,114 @@ Summary は、workload に応じて **再構築可能な derived view** とし�
 長期メモリの主なリスクは忘却だけでなく、**古い記憶を現在の事実として扱う
 hallucinations of the past** である。そのため **delete より supersede を優先** し、
 **shadow は Source of Truth と local index の整合性回復** として扱う。
+
+---
+
+## 補遺: backfill 修復コピーと raw/live/effective 集計規約 (SQUAD-224)
+
+Status: Implemented
+Date: 2026-08-16
+Related: SQUAD-222-consult（`worker4_report.yaml` answers.q4_adr）, TASK-360, TASK-361, TASK-367
+
+### Context
+
+2026-08-15、`kioku-mesh backfill-metadata --apply` が subject/summary 欠落
+observation を修復した結果（330 組 660 行、当時の `deleted_at IS NULL` 件数
+1517 件の 43.5%）を「重複書き込みバグ」と誤検知し、実在しないバグの調査タスクが
+起票される手戻りが発生した。原因は本 ADR の「1. Raw Observation を唯一の
+Source of Truth とする」で示した raw/derived の区別が、backfill の生成物と
+「件数」の集計規約にまで具体化されていなかったことにある。ここに 4 点を補う。
+
+### Decision
+
+**(a) backfill-metadata は append-only の修復コピーを正規動作とする**
+
+`backfill-metadata --apply`（実装: `src/kioku_mesh/__main__.py`
+`_cmd_backfill_metadata`, `src/kioku_mesh/memory/metadata.py`）は元 row を
+一切書き換えない。ADR-0002 の Observation immutable 制約と本 ADR の
+append-only 原則により、同一 `created_at` / `content` を持つ row が増えて
+見えても、それは**新しい `observation_id` + `supersedes=[<元の id>]` を持つ
+修復コピーの append**であり、二重書き込みではない。ADR-0021 の
+existence-based supersede filter が元 row を通常検索から沈める
+（`obs_index.superseded_by` に元 row 側から逆参照が立つ）。
+
+**(b) 「件数」を報告するときは raw / live / effective のいずれかを明記する**
+
+- **raw**: `deleted_at IS NULL` のみで数えた、監査用の全 row 数。backfill
+  コピーとその修復元の両方を含む。
+- **live**: raw から `superseded_by IS NOT NULL` な row（＝より新しい
+  supersede コピーに置き換えられた行）を除いた、supersedes チェーンで
+  「現在の代表」である row 数。
+- **effective**: live にさらに `project` 等の呼び出し固有フィルタを重ねた、
+  「実際にある検索呼び出しが返す」件数。
+
+重複検出（同一 content が何件あるか等）は、既定で **live または effective**
+の logical view を対象にする。raw に対して重複を数えると、supersede コピーの
+存在そのものを「重複」と誤認する（TASK-361 の 132/77 誤読はこのパターン）。
+
+**(c) `deleted_at IS NULL` 単独は defect 判定に使わない**
+
+`deleted_at IS NULL` は raw inventory（監査・整合性チェック用の母数）であり、
+それ単独の増減や絶対値を「バグの証拠」として扱わない。supersede は
+tombstone と異なり `deleted_at` を変更しないため、backfill・rename・
+project 移行などの正規の supersede 運用はすべて raw の見かけ上の件数を
+押し上げる。バグかどうかの判定は必ず `superseded_by` / `supersedes` を
+参照した logical view（live/effective）で行う。
+
+**(d) report には使用した SQL・フィルタ・snapshot 時点を残す**
+
+生データ件数や集計を根拠にした report は、使った SQL（もしくは同等の
+フィルタ条件の文章化）と、対象にした snapshot／DB の取得時点を残す。
+これにより後続 task が同じ集計を再現・検証でき、時点不整合（ある時点の
+実測を別時点の現行障害として扱う誤り、TASK-360/PR #285 のケース）を
+第三者が machine-checkable に検出できる。
+
+### Analysis query template
+
+対象テーブルは `obs_index`（`src/kioku_mesh/memory/local_index.py` の
+`_ensure_schema` 参照）。列名は `deleted_at` / `shadowed_at` /
+`superseded_by` / `project`。
+
+```sql
+-- raw: 監査用。tombstone されていない全 row（backfill コピーとその修復元を含む）
+SELECT COUNT(*) FROM obs_index WHERE deleted_at IS NULL;
+
+-- live: raw から supersede 済み row（より新しいコピーに置き換えられた行）を除いた
+-- 「現在の代表」row。deleted_at IS NULL AND superseded_by IS NULL が定義。
+SELECT COUNT(*) FROM obs_index
+WHERE deleted_at IS NULL AND superseded_by IS NULL;
+
+-- effective: live からさらに検索呼び出し固有のフィルタ（例: project スコープ、
+-- shadowed_at 除外）をかけた「実際に search_memory 等が返す」件数。
+-- shadowed_at は supersede とは別のディメンション（ADR-0028 本文 4節: reconciliation
+-- による local-only 非表示）なので、通常検索の再現には併せて除外する。
+SELECT COUNT(*) FROM obs_index
+WHERE deleted_at IS NULL AND shadowed_at IS NULL AND superseded_by IS NULL
+  AND project = 'kioku-mesh';
+```
+
+### 実測 (2026-08-16 snapshot)
+
+本番 local index sidecar (`/home/gisen/.local/share/kioku-mesh/index.db`) を
+`/home/gisen/work-tmp/adr-0028-verify/index_copy_20260816.db` へコピーし
+（コピー元とのバイト一致を `md5sum` で確認済み、SELECT のみ実行、コピー元は
+未変更）、上記 SQL をそのまま実行した。
+
+| 区分 | SQL | 件数 |
+|---|---|---:|
+| raw | `deleted_at IS NULL` | 1521 |
+| live | raw AND `superseded_by IS NULL` | 1137 |
+| （参考）live かつ shadowed 除外 | 上記 AND `shadowed_at IS NULL` | 1137（shadowed 0 件のため同値） |
+| effective (`project='kioku-mesh'`) | live AND shadowed 除外 AND project | 264 |
+| supersede 済み（backfill コピーに置き換わった元 row） | `deleted_at IS NULL AND superseded_by IS NOT NULL` | 384 |
+
+**期待との差異、および明記すべき点**: TASK-361 の起票文は「全 live 1517 件」と
+書いていたが、その 1517 は本補遺の定義でいう **raw**（`deleted_at IS NULL`
+のみ）の値であり、**live**（supersede 除外後）ではない。今回の raw 実測 1521
+はほぼ整合する（起票からの経過時間で新規保存が増えた分の差）。一方、本補遺の
+定義に基づく実際の live は 1137 で raw より 384 少ない——この 384 が
+まさに backfill 修復コピーによって沈められた元 row の数である。つまり
+「live ≒ raw に近い値のはず」という素朴な期待は成立せず、**raw と live の差
+（384）こそが supersede の正常な効果**であり、バグの兆候ではない。この
+raw/live の呼び分けの欠如自体が (b) で示した誤読の再現であり、本補遺が
+解消しようとしている問題と一致する。
