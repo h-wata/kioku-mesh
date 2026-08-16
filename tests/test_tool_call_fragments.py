@@ -33,8 +33,17 @@ FULL_LEAK = (
 )
 PARTIAL_LEAK_MEMORY_TYPE = '外部先例では上位 N の既定はいずれも 10。</content>\n<parameter name="memory_type">bug'
 PARTIAL_LEAK_REFERENCES = 'Heuristic は点検促し止まり。</content>\n<parameter name="references">["#158", "#104"]'
+# PR312-B1: subject/summary-anchored welds (Codex's independent probe found these undetected)
+SUBJECT_ANCHORED_LEAK = 'topic</subject><summary>actual summary</summary>'
+SUMMARY_ANCHORED_LEAK = 'line</summary><project>kioku-mesh</project>'
 
-POLLUTED = [FULL_LEAK, PARTIAL_LEAK_MEMORY_TYPE, PARTIAL_LEAK_REFERENCES]
+POLLUTED = [
+    FULL_LEAK,
+    PARTIAL_LEAK_MEMORY_TYPE,
+    PARTIAL_LEAK_REFERENCES,
+    SUBJECT_ANCHORED_LEAK,
+    SUMMARY_ANCHORED_LEAK,
+]
 
 CLEAN = [
     'Root cause: race condition in the flush path when two sessions write at once.',

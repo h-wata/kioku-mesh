@@ -64,8 +64,11 @@ _SAVE_PARAM_NAMES = (
 # prose does not match. Deliberately quoting this markup in an observation is
 # the known false positive; the tool error says how to reword.
 _TOOL_CALL_FRAGMENT_PATTERNS: list[re.Pattern[str]] = [
-    # ``</content>`` welded to the following parameter's tag
-    re.compile(r'</content>\s*</?(?:%s)>' % _SAVE_PARAM_NAMES),
+    # ``</content>``, ``</subject>`` or ``</summary>`` welded to the following
+    # parameter's tag — any of the three fields save_observation accepts can
+    # be left unterminated by the client (PR312-B1: content-only anchoring
+    # missed subject/summary-origin welds).
+    re.compile(r'</(?:content|subject|summary)>\s*</?(?:%s)>' % _SAVE_PARAM_NAMES),
     # Claude Code's ``<parameter name="...">`` notation naming one of our params
     re.compile(r'<parameter\s+name="(?:%s)"' % _SAVE_PARAM_NAMES),
 ]
