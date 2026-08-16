@@ -133,10 +133,11 @@ SEARCH MEMORY (``search_memory`` → ``get_memory``) when:
 Search pattern: first query with a ``project`` filter and a generous ``limit``,
 keeping the query terms to one or two proper nouns / IDs. If that returns zero
 results, do not conclude "nothing is stored" yet — retry with (1) the same
-concept's key terms in the other language (EN <-> JA/ZH/KO) and (2)
-``search_mode='or'``. Only after both retries come up empty is "no prior
-memory" a safe conclusion. For broad "what's the context here" recall, prefer
-``recall_context`` over ``search_memory``.
+concept's key terms in the other language (EN <-> JA/ZH/KO) as a SEPARATE call
+(never both languages in one ``query`` string — see ``search_memory``'s
+docstring for why) and (2) ``search_mode='or'``. Only after both retries come
+up empty is "no prior memory" a safe conclusion. For broad "what's the context
+here" recall, prefer ``recall_context`` over ``search_memory``.
 
 Identity (agent_family / client_id / pc_id / session_id) is resolved on the
 server side from environment + state. Do not pass these as tool arguments;
@@ -661,6 +662,22 @@ def search_memory(
     ``[truncated: showing N of M result(s); ...]`` line is appended. The
     AND->OR fallback marker above is passed through as ``prefix=`` so it is
     never counted as a result entry in the ``showing N of M`` total.
+
+    Bilingual queries (TASK-370): for a general concept, run EN and JA as TWO
+    SEPARATE single-term calls, e.g. ``query='config'`` then ``query='設定'``.
+    Do NOT pass both in one query like ``query='config 設定'`` — under the
+    default 'and' mode, one AND hit in EITHER language is enough to skip the
+    OR fallback above, so a combined query silently returns only the
+    intersection (measured: 44 of 217 total hits for config/設定). Splitting
+    also keeps each call's byte cap independent so one language's results
+    are not truncated to make room for the other's. Code identifiers, ADR
+    numbers, and literal error strings (e.g. ``deleted_at``, ``and_or``,
+    ``append-only``) are not translated in this corpus — search them once,
+    verbatim, in their original token. Filter by ``subject``/summary in the
+    results before calling ``get_memory`` on only the ones worth full detail.
+    Unlike this tool's 'and' default, ``recall_context`` defaults to
+    ``search_mode='and_or'`` (union, not intersection-first) — do not assume
+    the two tools behave the same way with the same query.
     """
     try:
         from .memory.local_index import _validate_search_mode  # noqa: PLC0415
@@ -901,6 +918,12 @@ def recall_context(
     truncated partial instead of being dropped entirely (PR #308 review B1).
     Either way a trailing ``[truncated: showing N of M result(s); ...]`` line
     is appended.
+
+    Bilingual queries: same rule as ``search_memory`` — run EN and JA as two
+    separate single-term calls, never combined in one ``query`` string. Note
+    the default here is ``search_mode='and_or'`` (union), unlike
+    ``search_memory``'s default 'and' (intersection-first); do not assume the
+    two tools' defaults behave the same way for the same query.
     """
     if search_mode not in ('and', 'or', 'and_or'):
         return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"
