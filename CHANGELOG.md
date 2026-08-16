@@ -37,6 +37,7 @@ ADR-0030.
 
 ### Changed
 
+- docs: `search_memory` / `recall_context` の tool description に日英クエリ分割運用を明記 (TASK-370/371)
 - messaging: message body size limits are now measured, enforced, and documented
   (#202). The 64 KiB limit applies to `body` itself (it was previously applied to
   the whole serialized message, so a 64 KiB body was rejected by the ~434-byte
