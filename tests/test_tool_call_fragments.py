@@ -36,6 +36,11 @@ PARTIAL_LEAK_REFERENCES = 'Heuristic は点検促し止まり。</content>\n<par
 # PR312-B1: subject/summary-anchored welds (Codex's independent probe found these undetected)
 SUBJECT_ANCHORED_LEAK = 'topic</subject><summary>actual summary</summary>'
 SUMMARY_ANCHORED_LEAK = 'line</summary><project>kioku-mesh</project>'
+# PR312-B2: whitespace between the closing tag name and '>' (XML end-tags permit this)
+SUBJECT_SPACE_LEAK = 'topic</subject > <summary>actual summary</summary>'
+SUBJECT_NEWLINE_LEAK = 'topic</subject\n><summary>actual summary</summary>'
+SUBJECT_TAB_LEAK = 'topic</subject\t><summary>actual summary</summary>'
+SUBJECT_MULTI_NEWLINE_LEAK = 'topic</subject\n\n><summary>actual summary</summary>'
 
 POLLUTED = [
     FULL_LEAK,
@@ -43,6 +48,10 @@ POLLUTED = [
     PARTIAL_LEAK_REFERENCES,
     SUBJECT_ANCHORED_LEAK,
     SUMMARY_ANCHORED_LEAK,
+    SUBJECT_SPACE_LEAK,
+    SUBJECT_NEWLINE_LEAK,
+    SUBJECT_TAB_LEAK,
+    SUBJECT_MULTI_NEWLINE_LEAK,
 ]
 
 CLEAN = [
