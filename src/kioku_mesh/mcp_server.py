@@ -35,6 +35,7 @@ from .identity import get_pc_id
 from .identity import get_session_id
 from .memory.metadata import MetadataRequiredError
 from .memory.metadata import validate_required_metadata
+from .memory.save_lint import find_tool_call_fragment
 from .memory.save_lint import lint_observation
 from .messaging.keyspace import ack_key
 from .messaging.limits import bound_metadata_value
@@ -447,6 +448,21 @@ def save_observation(
         # as a successful save and never retry. ToolError carries the message
         # through as a protocol-level tool error instead.
         raise ToolError(str(e)) from e
+    # TASK-373: reject values that carry the next parameter's tool-call markup —
+    # the string was not terminated by the client. Rejected (ToolError), not
+    # warned: the save would persist a value whose real metadata is stranded
+    # inside the text, and this store is append-only, so a bad write costs a
+    # supersede-copy migration while a false positive costs one retry.
+    for field_name, value in (('content', content), ('subject', subject), ('summary', summary)):
+        fragment = find_tool_call_fragment(value)
+        if fragment:
+            log.warning('rejected save_observation: %s contains tool-call fragment %r', field_name, fragment)
+            raise ToolError(
+                f'{field_name} contains an MCP tool-call fragment ({fragment!r}). '
+                f'The {field_name} string was probably not terminated — re-send the call with '
+                'each parameter as its own argument. If the markup is intentional prose, '
+                'reword it (e.g. describe the tag instead of quoting it verbatim).'
+            )
     try:
         resolved_expires_at = resolve_expires_at(expires_at=expires_at, ttl_sec=ttl_sec)
     except ValueError as e:

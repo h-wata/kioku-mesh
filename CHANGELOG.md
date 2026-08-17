@@ -16,6 +16,19 @@ ADR-0030.
 
 ### Added
 
+- `save_observation`: content / subject / summary に MCP tool-call の断片
+  (`</content>` に続く別パラメータのタグ、`<parameter name="...">` 表記) が
+  混入している場合に ToolError で拒否する入力検証を追加した。クライアントが
+  tool call を組み立てる際に文字列を終端し損ねると、本来 `memory_type` などへ
+  渡るはずだった値が content 内に文字列として死蔵される (2026-06〜08 に 4 件、
+  すべて claude-code)。フィールド境界を送信側に任せないための恒久的な検証で、
+  検出のみを行う (サーバ側でのサニタイズはしない)。検出パターンは
+  `save_observation` 自身の引数名にアンカーしているため、通常の XML を含む
+  文章は弾かれない (既存 1533 件に対し誤検知 0 / 真陽性 6)。
+- `kioku-mesh doctor`: 保存済みエントリに残っている tool-call 断片を洗い出す
+  読み取り専用チェック `tool_call_fragments` を追加した
+  (`--check-tool-call-fragments` で単独実行可)。live かつ non-superseded な
+  effective 集合を走査して該当 observation_id を列挙するのみで、書き換えはしない。
 - `get_memory_status` に直近7日の family 別 save 数を追加 (#280)
 - `search_memory` / `recall_context`: read-side project aliases
   (`mesh-mem` ↔ `kioku-mesh`). A project filter now matches every stored

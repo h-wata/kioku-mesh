@@ -1313,6 +1313,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     """Run diagnostic checks and report PASS / WARN / FAIL with hints."""
     if getattr(args, 'check_legacy_namespace', False):
         results = [doctor_module.check_legacy_namespace()]
+    elif getattr(args, 'check_tool_call_fragments', False):
+        results = [doctor_module.check_tool_call_fragments()]
     else:
         results = doctor_module.run_all_checks()
     if args.json:
@@ -2561,6 +2563,11 @@ def _build_parser() -> argparse.ArgumentParser:
         '--check-legacy-namespace',
         action='store_true',
         help='run only the legacy-namespace preflight check (ADR-0019 Phase D)',
+    )
+    p_doctor.add_argument(
+        '--check-tool-call-fragments',
+        action='store_true',
+        help='run only the scan for stored MCP tool-call markup (read-only)',
     )
     p_doctor.set_defaults(func=_cmd_doctor)
 
