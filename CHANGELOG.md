@@ -165,6 +165,16 @@ ADR-0030.
 
 ### Fixed
 
+- ADR-0028 補遺の live/effective 集計 SQL を `LocalIndex.search` の
+  existence-based supersede filter (`local_index.py:669-687`) と一致するよう
+  修正。単純な `superseded_by IS NULL` は supersede コピー自身が
+  tombstone/shadow/失効している場合に元 row を誤って隠す方向にズレる
+  (PR #310/#311 cross-review 追従)。
+- `recall_context` tool description の `search_mode='and_or'` の説明を
+  「union」から「AND first; remaining slots are OR-filled」(intersection-first)
+  に修正。実装 (`LocalIndex.search`) は AND 結果を先頭に置き、AND が limit に
+  達すれば OR phase を実行しないため、旧記述は実装と逆だった
+  (PR #310/#311 cross-review 追従)。
 - Messaging: acknowledgement rows with no matching message are no longer read
   as acknowledgements. `is_acked` is an exact-pair point lookup, so such a row
   suppressed a *live* message carrying the same

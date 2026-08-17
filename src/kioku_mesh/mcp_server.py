@@ -692,8 +692,9 @@ def search_memory(
     verbatim, in their original token. Filter by ``subject``/summary in the
     results before calling ``get_memory`` on only the ones worth full detail.
     Unlike this tool's 'and' default, ``recall_context`` defaults to
-    ``search_mode='and_or'`` (union, not intersection-first) — do not assume
-    the two tools behave the same way with the same query.
+    ``search_mode='and_or'`` (AND first; remaining slots are OR-filled, so it
+    is intersection-first, not a plain union) — do not assume the two tools
+    behave the same way with the same query.
     """
     try:
         from .memory.local_index import _validate_search_mode  # noqa: PLC0415
@@ -937,9 +938,11 @@ def recall_context(
 
     Bilingual queries: same rule as ``search_memory`` — run EN and JA as two
     separate single-term calls, never combined in one ``query`` string. Note
-    the default here is ``search_mode='and_or'`` (union), unlike
-    ``search_memory``'s default 'and' (intersection-first); do not assume the
-    two tools' defaults behave the same way for the same query.
+    the default here is ``search_mode='and_or'`` (AND first; remaining slots
+    are OR-filled — intersection-first, ranked ahead of the OR-only fill),
+    unlike ``search_memory``'s default 'and' (pure AND, with an automatic
+    OR-fallback retry only when AND returns empty); do not assume the two
+    tools' defaults behave the same way for the same query.
     """
     if search_mode not in ('and', 'or', 'and_or'):
         return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"
