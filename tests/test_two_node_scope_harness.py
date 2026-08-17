@@ -49,6 +49,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 from typing import Any
 
@@ -281,8 +282,8 @@ def _scan_dir(node: _Node, dir_name: str) -> set[str]:
     if node.running:
         raise RuntimeError(f'stop node {node.name} before scanning {dir_name}: RocksDB is single-writer')
     scanner = _Node(f'{node.name}-scan-{dir_name}', node.workdir, node.root, _free_port())
-    scanner.start({'scan_store': _storage('mem/**', 'mem', dir_name, replicated=False)})
     try:
+        scanner.start({'scan_store': _storage('mem/**', 'mem', dir_name, replicated=False)})
         with _client(scanner) as session:
             return _local_keys(session, 'mem/**')
     finally:
@@ -336,6 +337,46 @@ def two_nodes(tmp_path: Path) -> Iterator[tuple[_Node, _Node]]:
     finally:
         b.stop()
         a.stop()
+
+
+# -- RC1 regression: _scan_dir must not leak a throwaway zenohd on startup failure ---
+
+
+def test_scan_dir_stops_scanner_when_admin_registration_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``scanner.start`` failure after the process spawns must still stop it.
+
+    ``_Node.start`` spawns ``zenohd`` via ``subprocess.Popen`` and only then
+    waits for the router and for its storages to register in the admin space
+    (see ``_Node.start``). If that wait raises, the process is already running
+    and must be reaped. This reproduces the failure by making the admin-space
+    ``wait_until`` raise, and asserts ``scanner.stop()`` still ran and the
+    process is gone — the regression this guards is a leaked throwaway zenohd
+    on any startup failure path, not just this specific wait.
+    """
+    _require_zenohd()
+    workdir = tmp_path / 'harness'
+    workdir.mkdir()
+    node = _Node('leak-src', workdir, workdir / 'leak-rocksdb', _free_port())
+
+    stopped: list[_Node] = []
+    original_stop = _Node.stop
+
+    def tracking_stop(self: _Node, timeout: float = 5.0) -> None:
+        stopped.append(self)
+        original_stop(self, timeout)
+
+    def failing_wait_until(predicate: object, description: str, **kwargs: object) -> None:
+        raise RuntimeError('simulated admin-space registration failure')
+
+    monkeypatch.setattr(_Node, 'stop', tracking_stop)
+    monkeypatch.setattr(sys.modules[__name__], 'wait_until', failing_wait_until)
+
+    with pytest.raises(RuntimeError, match='simulated admin-space registration failure'):
+        _scan_dir(node, 'leak-src-dir')
+
+    scanners = [n for n in stopped if n.name.startswith('leak-src-scan-')]
+    assert scanners, 'scanner.stop() must run even when admin-space registration fails'
+    assert not scanners[0].running, 'scanner process must be terminated after the startup failure'
 
 
 # -- property 1 ----------------------------------------------------------------
