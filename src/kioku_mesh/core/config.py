@@ -212,6 +212,26 @@ def format_visibility(visibility: str, scope_id: str) -> str:
     return visibility
 
 
+def get_storage_scopes() -> list | None:
+    """Return the raw ``storage_scopes`` list from the host-global config.
+
+    Host-global only, on purpose: which scopes a *host* stores is an
+    operator decision tied to that machine's zenohd storages, so a
+    project-local (possibly committed) ``.kioku-mesh.yaml`` must not be able
+    to change it. Returns ``None`` when the key is absent, which
+    :func:`kioku_mesh.core.scope.resolve_storage_scopes` reads as the
+    pre-Phase-E default of mesh only. Validation lives there, so a
+    malformed value still reaches the caller as an actionable error.
+
+    Read fresh on every call (no caching) so a long-lived MCP process picks
+    up a config edit without a restart.
+    """
+    cfg = _read_yaml(_config_path())
+    if 'storage_scopes' not in cfg:
+        return None
+    return cfg.get('storage_scopes')
+
+
 def get_backend_mode() -> str:
     """Return the configured backend mode.
 

@@ -30,6 +30,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 import logging
+from typing import Any
 
 from ..core.keyspace import find_by_id_selector
 from ..core.keyspace import is_legacy_key
@@ -39,6 +40,8 @@ from ..core.keyspace import tomb_selector
 from ..core.models import Observation
 from ..core.models import Tombstone
 from ..core.project_alias import normalize_project_filter
+from ..core.scope import preflight_write_key
+from ..core.scope import ScopePreflightError  # noqa: F401  (façade re-export for callers/tests)
 from ..core.transport import _iter_ok_replies
 from ..core.transport import _now_iso_utc  # noqa: F401  (façade re-export, #167)
 from ..core.transport import _open_session  # noqa: F401  (façade re-export, #167)
@@ -206,6 +209,19 @@ def _parse_iso(s: str) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _preflight_session() -> Any:
+    """Session to inspect for the write preflight, or ``None`` when down.
+
+    A dead transport is not a retryable preflight failure: with no session
+    there is no admin space, so durability cannot be confirmed and the
+    write is refused before it can be queued as if it were accepted.
+    """
+    try:
+        return get_session()
+    except _RETRYABLE_EXC:
+        return None
+
+
 @with_retry
 def put_observation(obs: Observation) -> None:
     """Publish an observation to its canonical ``mem/obs/...`` key.
@@ -217,6 +233,7 @@ def put_observation(obs: Observation) -> None:
     On transport failure, the serialized observation is also queued in the
     local pending-puts SQLite DB so a later successful write can replay it.
     """
+    preflight_write_key(obs.key_expr, _preflight_session())
     payload_json = obs.to_json()
     try:
         get_session().put(obs.key_expr, payload_json)
@@ -242,6 +259,7 @@ def put_tombstone(obs: Observation, reason: str = '') -> None:
     tomb = Tombstone(observation_id=obs.observation_id, reason=reason)
     payload_json = tomb.to_json()
     key_expr = obs.tombstone_key_expr()
+    preflight_write_key(key_expr, _preflight_session())
     try:
         get_session().put(key_expr, payload_json)
     except _RETRYABLE_EXC:
