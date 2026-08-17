@@ -45,7 +45,12 @@ from .wait_helpers import wait_until
 # Modules that must see the unpatched write gate. Everything that is itself a
 # write sink belongs here; the bypass is only for tests whose subject is
 # something else and whose stub sessions predate scope storages.
-_REAL_SCOPE_GATE_MODULES = ('test_scope', 'test_visibility_migration')
+_REAL_SCOPE_GATE_MODULES = (
+    'test_scope',
+    'test_visibility_migration',
+    'test_scope_migration',
+    'test_two_node_scope_harness',
+)
 
 
 @pytest.fixture(autouse=True)
@@ -69,6 +74,11 @@ def scope_storages_rendered(request: pytest.FixtureRequest, monkeypatch: pytest.
     it has to be tested against the real gate — this bypass is what hid the
     missing migration gate (PR #316 review, B1). Those tests build
     gate-passing sessions of their own.
+
+    ``tests/test_scope_migration.py`` and ``tests/test_two_node_scope_harness.py``
+    are exempted for the same reason: the mesh re-PUT (task 5) publishes every
+    manifest key, and its gate on live exact ``mesh`` storage is part of what
+    those tests check.
     """
     if request.module.__name__.rsplit('.', 1)[-1] in _REAL_SCOPE_GATE_MODULES:
         return

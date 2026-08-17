@@ -197,6 +197,10 @@ RAW_AND_INFRA_MODULES = {
     'save_lint.py': 'stateless save-time lint checks — not a persisted view',
     'supersede.py': 'supersede/tombstone logic operating on the raw store — not a persisted view',
     'visibility_migration.py': 'one-off migration CLI helper — not a persisted view',
+    'scope_migration.py': (
+        'one-off scope cutover CLI helper (manifest / re-PUT / inventory / purge); its manifest and '
+        'checkpoint are run artifacts re-derivable by re-running the phase, not a persisted view'
+    ),
 }
 
 DERIVED_VIEW_REBUILD_SYMBOL = 'rebuild_from_raw'

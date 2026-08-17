@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 import uuid
 
 try:
@@ -41,6 +42,8 @@ from .config import resolve_write_visibility
 from .config import write_local_config
 from .core.scope import resolve_storage_scopes
 from .core.scope import ScopeConfigError
+from .core.scope import ScopePreflightError
+from .core.storage_render import LEGACY_SOURCE_DIR
 from .core.storage_render import LEGACY_SOURCE_NAME
 from .core.storage_render import missing_scope_counts
 from .core.storage_render import render_storage_entries
@@ -76,6 +79,9 @@ from .store import scan_obs_by_pc_id
 from .store import set_rebuild_on_init_default
 from .store import set_rebuild_on_init_explicit
 from .store import stop_pending_drain_background
+
+if TYPE_CHECKING:
+    from .memory.scope_migration import Manifest
 
 log = logging.getLogger(__name__)
 
@@ -1390,6 +1396,278 @@ def _cmd_config_render_storages(args: argparse.Namespace) -> int:
     print('storages: ' + ', '.join(s.storage_name for s in scopes))
     print('next: restart zenohd, then `kioku-mesh doctor`')
     print(_HALF_APPLIED_WARNING)
+    return 0
+
+
+def _rocksdb_root(args: argparse.Namespace) -> Path:
+    """Resolve the RocksDB root zenohd stores its scope directories under."""
+    explicit = getattr(args, 'rocksdb_root', '')
+    if explicit:
+        return Path(explicit)
+    env = os.environ.get('ZENOH_BACKEND_ROCKSDB_ROOT', '')
+    if env:
+        return Path(env)
+    return Path.home() / '.local' / 'share' / data_share_leaf()
+
+
+def _print_manifest_summary(manifest: 'Manifest') -> None:
+    counts = manifest.kind_counts()
+    print(f'source:    {manifest.selector}')
+    print(f'keys:      {len(manifest.entries)} (obs {counts["obs"]}, tomb {counts["tomb"]}, other {counts["other"]})')
+    print(f'peers:     {len(manifest.peer_zids)} router(s): ' + (', '.join(manifest.peer_zids) or 'none'))
+    for replier in manifest.repliers:
+        print(f'  storage {replier.zid}/{replier.eid}: {replier.keys} key(s)')
+    print(f'digest:    {manifest.digest}')
+
+
+def _cmd_scope_migrate_manifest(args: argparse.Namespace) -> int:
+    """Build the immutable manifest of mesh keys from the pre-split storage.
+
+    Design v3 B1 step 2, run while the transitional config serves the old
+    broad ``agent_mem`` read-only. Nothing is published here: the manifest
+    carries the key/payload bytes, so the re-PUT can run later against the
+    final config — which it has to, because the write gate refuses any PUT
+    while an overlapping broad storage is still live (that gate is what keeps
+    the mesh group's data out of the broad group).
+    """
+    from .memory.scope_migration import build_manifest
+    from .memory.scope_migration import ScopeMigrationError
+    from .memory.scope_migration import write_manifest
+
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+    run_id = now_dt.strftime('%Y%m%dT%H%M%SZ')
+    manifest_path = (
+        Path(args.out)
+        if args.out
+        else Path.home() / '.local' / 'share' / 'kioku-mesh' / 'scope-migrations' / run_id / 'manifest.json'
+    )
+    if manifest_path.exists() and not args.dry_run:
+        print(
+            f'error: {manifest_path} already exists. A manifest is immutable — keep it and run '
+            '`scope-migrate re-put`, or pass --out with a new path.',
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        manifest = build_manifest(get_session(), expected_peers=args.expected_peers, now_iso=now_iso)
+    except ScopeMigrationError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+
+    _print_manifest_summary(manifest)
+    if args.dry_run:
+        print('dry-run: nothing was written.')
+        print(f'  manifest would be: {manifest_path}')
+        print(f'  {LEGACY_SOURCE_DIR} is only read here and is never deleted (rollback artifact)')
+        return 0
+
+    write_manifest(manifest, manifest_path)
+    print(f'wrote manifest {manifest_path}')
+    print('next: apply the final config on every peer (`config render-storages --apply`, no --transitional),')
+    print(f'      restart zenohd, then `kioku-mesh scope-migrate re-put --manifest {manifest_path}`')
+    return 0
+
+
+def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
+    """Re-PUT a manifest into the new clean mesh storage, resumably.
+
+    Design v3 B1 steps 4/6. Run against the final config: every key is gated
+    on a live exact ``mesh`` storage with no overlapping broad storage, then
+    the result is verified key-by-key against the manifest digests. Re-running
+    the same command continues from the checkpoint, and a checkpoint from a
+    different manifest is refused rather than merged.
+    """
+    from .memory.scope_migration import read_manifest
+    from .memory.scope_migration import replay_manifest
+    from .memory.scope_migration import ScopeMigrationError
+    from .memory.scope_migration import verify_reput
+
+    now_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    manifest_path = Path(args.manifest)
+    if not manifest_path.is_file():
+        print(f'error: --manifest {manifest_path}: file not found.', file=sys.stderr)
+        return 2
+    checkpoint_path = Path(args.checkpoint) if args.checkpoint else manifest_path.parent / 'checkpoint.json'
+
+    session = get_session()
+    try:
+        manifest = read_manifest(manifest_path)
+    except ScopeMigrationError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 1
+
+    _print_manifest_summary(manifest)
+    if args.dry_run:
+        already = 0
+        if checkpoint_path.exists():
+            try:
+                already = len(set(_load_reput_done(checkpoint_path)) & {e.key for e in manifest.entries})
+            except ScopeMigrationError as e:
+                print(f'error: {e}', file=sys.stderr)
+                return 1
+        print('dry-run: nothing was written.')
+        print(f'  checkpoint:  {checkpoint_path} ({already} key(s) already re-PUT)')
+        print(f'  would re-PUT {len(manifest.entries) - already} key(s) into the live mesh storage')
+        print('  every key is gated on a live exact mesh storage before its PUT')
+        print(f'  {LEGACY_SOURCE_DIR} is not touched (rollback artifact; never deleted here)')
+        return 0
+
+    if not args.yes:
+        print(
+            f'About to re-PUT up to {len(manifest.entries)} key(s) into the live mesh storage.\n'
+            f'Manifest: {manifest_path}\nCheckpoint: {checkpoint_path}\n'
+            f"Type 're-put {len(manifest.entries)}' to continue: ",
+            end='',
+            flush=True,
+        )
+        try:
+            answer = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            answer = ''
+        if answer != f're-put {len(manifest.entries)}':
+            print('\ncancelled.', file=sys.stderr)
+            return 1
+
+    try:
+        result = replay_manifest(
+            manifest,
+            session=session,
+            checkpoint_path=checkpoint_path,
+            now_iso=now_iso,
+            batch_size=args.batch_size,
+        )
+    except (ScopeMigrationError, ScopePreflightError) as e:
+        print(f'error: {e}', file=sys.stderr)
+        print(
+            f'checkpoint kept at {checkpoint_path}; re-run the same command to continue once the cause is fixed',
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f're-PUT {result.put} key(s) ({result.already_done} already done in an earlier run)')
+    report = verify_reput(session, manifest)
+    if report.ok:
+        print(f'verify: OK — {dict(report.kind_counts)} match the manifest key set and payload digests')
+        print(f'{LEGACY_SOURCE_DIR} left in place as the rollback artifact (not deleted).')
+        print('next: `kioku-mesh scope-inventory` on every peer, then `kioku-mesh doctor`')
+        return 0
+    print('verify: FAILED', file=sys.stderr)
+    for label, keys in (
+        ('missing', report.missing),
+        ('payload digest mismatch', report.digest_mismatch),
+        ('unexpected extra', report.extra),
+    ):
+        if keys:
+            print(f'  {label}: {len(keys)} — {", ".join(keys[:5])}', file=sys.stderr)
+    print(f'  re-run `scope-migrate re-put --manifest {manifest_path}` after fixing the cause.', file=sys.stderr)
+    return 1
+
+
+def _load_reput_done(checkpoint_path: Path) -> list[str]:
+    from .memory.scope_migration import load_reput_checkpoint
+
+    return load_reput_checkpoint(checkpoint_path).done
+
+
+def _cmd_scope_inventory(args: argparse.Namespace) -> int:
+    """Report what this host still holds, per scope (read-only)."""
+    from .memory.scope_migration import scope_inventory
+
+    db_path = args.db or local_index_db_path()
+    try:
+        inventory = scope_inventory(get_session(), db_path=db_path, self_only=not args.all_peers)
+    except ScopeConfigError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+
+    print('declared storage_scopes: ' + ', '.join(inventory.declared))
+    print(f'\nZenoh directory probe ({"all peers" if args.all_peers else "this host"}, selector mem/**):')
+    if inventory.zenoh:
+        for label in sorted(inventory.zenoh):
+            counts = inventory.zenoh[label]
+            print(
+                f'  {label}: obs {counts["obs"]}, tomb {counts["tomb"]}, other {counts["other"]}'
+                + ('' if label in inventory.declared else '   [not declared by this host]')
+            )
+    else:
+        print('  (no keys answered — is zenohd running with its storages?)')
+    print(
+        '  tombstones are counted here, not from SQLite: a tombstone whose observation row is gone\n'
+        '  has no obs_index row to be counted in, so obs and tomb are reported from separate sources.'
+    )
+
+    print(f'\nSQLite index ({db_path}, payload_json parse):')
+    if inventory.sqlite:
+        for label in sorted(inventory.sqlite):
+            state = inventory.sqlite[label]
+            print(
+                f'  {label}: live {state["live"]}, deleted {state["deleted"]}, shadowed {state["shadowed"]}'
+                + ('' if label in inventory.declared or label == 'legacy' else '   [not declared by this host]')
+            )
+    else:
+        print('  (no rows)')
+
+    if inventory.undeclared:
+        print('\nundeclared scopes present on this host: ' + ', '.join(inventory.undeclared))
+        print('  remove the host-local copies with `kioku-mesh scope-purge` (other hosts keep theirs).')
+    return 0
+
+
+def _cmd_scope_purge(args: argparse.Namespace) -> int:
+    """Remove host-local copies of scopes this host no longer declares."""
+    from .memory.scope_migration import build_purge_plan
+    from .memory.scope_migration import execute_purge
+    from .memory.scope_migration import PURGE_LIMIT_NOTE
+
+    db_path = args.db or local_index_db_path()
+    root = _rocksdb_root(args)
+    try:
+        plan = build_purge_plan(db_path=db_path, rocksdb_root=root, session=get_session())
+    except ScopeConfigError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+
+    print('declared storage_scopes: ' + ', '.join(plan.declared))
+    print(PURGE_LIMIT_NOTE)
+    if plan.empty:
+        print('nothing to purge: no undeclared scope has host-local rows or directories.')
+        return 0
+    print(f'\nSQLite rows to delete ({db_path}):')
+    for label, ids in plan.rows.items():
+        print(f'  {label}: {len(ids)} row(s)')
+    print(f'\nRocksDB directories to rename aside (under {root}):')
+    for directory in plan.dirs or ():
+        print(f'  {directory}')
+    if not plan.dirs:
+        print('  (none — a directory a live storage still serves is never a target)')
+    print('\nlegacy (pre-visibility) rows are not purged here; they belong to `migrate-visibility`.')
+    print(f'{LEGACY_SOURCE_DIR} is never purged: it is the cutover rollback artifact.')
+
+    if args.dry_run:
+        print('\ndry-run: nothing was removed.')
+        return 0
+    if not args.yes:
+        print(
+            f"\nType 'purge {plan.row_count}' to remove the host-local copies listed above: ",
+            end='',
+            flush=True,
+        )
+        try:
+            answer = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            answer = ''
+        if answer != f'purge {plan.row_count}':
+            print('\ncancelled.', file=sys.stderr)
+            return 1
+
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    result = execute_purge(plan, index=get_index(), now_stamp=stamp)
+    print(f'\ndeleted {result.rows_deleted} SQLite row(s)')
+    for src, dst in result.dirs_renamed:
+        print(f'renamed {src} -> {dst}')
+    print(PURGE_LIMIT_NOTE)
     return 0
 
 
@@ -3052,6 +3330,85 @@ def _build_parser() -> argparse.ArgumentParser:
         help='apply even though stored observations fall outside storage_scopes',
     )
     p_config_render.set_defaults(func=_cmd_config_render_storages)
+
+    p_scope_migrate = sub.add_parser(
+        'scope-migrate',
+        help='Move the pre-split mem/mesh/** keys into the new clean mesh storage (design v3 B1)',
+        description='Two phases: `manifest` under the transitional config, `re-put` under the final config. '
+        'The re-PUT is gated on a live exact mesh storage, so it cannot run while the transitional '
+        'broad storage is still serving.',
+    )
+    p_scope_migrate_sub = p_scope_migrate.add_subparsers(dest='scope_migrate_command', required=True)
+    p_scope_manifest = p_scope_migrate_sub.add_parser(
+        'manifest',
+        help='Build the immutable key/payload manifest from the pre-split storage (writes nothing to Zenoh)',
+    )
+    p_scope_manifest.add_argument(
+        '--expected-peers',
+        dest='expected_peers',
+        type=_positive_int,
+        required=True,
+        metavar='N',
+        help='number of peer routers that must answer the source get (keys held only by a peer that '
+        'did not answer would be missing from the manifest)',
+    )
+    p_scope_manifest.add_argument(
+        '--out', default='', metavar='PATH', help='manifest path (default: under ~/.local/share)'
+    )
+    p_scope_manifest.add_argument(
+        '--dry-run', dest='dry_run', action='store_true', help='print the manifest summary; write no file'
+    )
+    p_scope_manifest.set_defaults(func=_cmd_scope_migrate_manifest)
+
+    p_scope_reput = p_scope_migrate_sub.add_parser(
+        're-put',
+        help='Re-PUT a manifest into the live mesh storage, resumably, then verify digests',
+    )
+    p_scope_reput.add_argument(
+        '--manifest', required=True, metavar='PATH', help='manifest built by the manifest phase'
+    )
+    p_scope_reput.add_argument('--checkpoint', default='', help='checkpoint path (default: beside the manifest)')
+    p_scope_reput.add_argument(
+        '--dry-run', dest='dry_run', action='store_true', help='print what would be re-PUT; write nothing'
+    )
+    p_scope_reput.add_argument('--yes', action='store_true', help='skip interactive confirmation')
+    p_scope_reput.add_argument(
+        '--batch-size',
+        dest='batch_size',
+        type=_positive_int,
+        default=500,
+        help='keys re-PUT per checkpoint flush (default 500)',
+    )
+    p_scope_reput.set_defaults(func=_cmd_scope_migrate_reput)
+
+    p_scope_inventory = sub.add_parser(
+        'scope-inventory',
+        help='Report what this host still holds per scope (read-only: Zenoh dir probe + SQLite index)',
+    )
+    p_scope_inventory.add_argument('--db', default='', metavar='PATH', help='SQLite index (default: the local index)')
+    p_scope_inventory.add_argument(
+        '--all-peers',
+        dest='all_peers',
+        action='store_true',
+        help='also count replies from other routers (default: this host only)',
+    )
+    p_scope_inventory.set_defaults(func=_cmd_scope_inventory)
+
+    p_scope_purge = sub.add_parser(
+        'scope-purge',
+        help='Remove host-local copies of scopes this host no longer declares (no Zenoh delete)',
+    )
+    p_scope_purge.add_argument('--db', default='', metavar='PATH', help='SQLite index (default: the local index)')
+    p_scope_purge.add_argument(
+        '--rocksdb-root',
+        dest='rocksdb_root',
+        default='',
+        metavar='PATH',
+        help='RocksDB root (default: $ZENOH_BACKEND_ROCKSDB_ROOT or ~/.local/share/kioku-mesh)',
+    )
+    p_scope_purge.add_argument('--dry-run', dest='dry_run', action='store_true', help='print the plan only')
+    p_scope_purge.add_argument('--yes', action='store_true', help='skip interactive confirmation')
+    p_scope_purge.set_defaults(func=_cmd_scope_purge)
 
     p_migrate = sub.add_parser(
         'migrate-visibility',

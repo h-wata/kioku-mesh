@@ -1,6 +1,8 @@
 """Two-node Zenoh + RocksDB harness for the storage-scope cutover (design v3 task 4).
 
-Five properties, one test each. Each runs real ``zenohd`` routers on isolated
+Seven properties, one test each (the last two belong to the task-5 migration
+tools and reuse this harness rather than standing up another one). Each runs
+real ``zenohd`` routers on isolated
 loopback ports with their own ``ZENOH_BACKEND_ROCKSDB_ROOT`` and multicast /
 gossip scouting disabled, so nothing here touches the production mesh:
 
@@ -24,6 +26,12 @@ gossip scouting disabled, so nothing here touches the production mesh:
    on the old broad config still receives live traffic but never gets the
    backlog the new mesh group already holds (N5). The lack of convergence is
    asserted against a live-traffic control so it cannot pass on a dead link.
+6. :func:`test_reput_moves_every_mesh_kind_and_nothing_else` — the manifest
+   built from the transitional source carries obs, tomb and non-observation mesh
+   keys, the re-PUT lands exactly those in the new directory, and the write gate
+   refuses the re-PUT while the transitional broad storage is still live.
+7. :func:`test_reput_resumes_from_its_checkpoint_after_an_interruption` — an
+   interrupted re-PUT continues from its checkpoint and re-passes the gate.
 
 Every directory inspection goes through :func:`_scan_dir`, which stops the node
 and opens its RocksDB directory with a throwaway broad-storage router — a real
@@ -60,6 +68,14 @@ from kioku_mesh import replication
 from kioku_mesh import store
 from kioku_mesh.core.scope import fetch_self_storages
 from kioku_mesh.core.scope import parse_scope
+from kioku_mesh.core.scope import ScopePreflightError
+from kioku_mesh.memory.scope_migration import build_manifest
+from kioku_mesh.memory.scope_migration import load_reput_checkpoint
+from kioku_mesh.memory.scope_migration import probe_inventory
+from kioku_mesh.memory.scope_migration import read_manifest
+from kioku_mesh.memory.scope_migration import replay_manifest
+from kioku_mesh.memory.scope_migration import verify_reput
+from kioku_mesh.memory.scope_migration import write_manifest
 from kioku_mesh.models import Observation
 
 from .conftest import _free_port
@@ -614,6 +630,170 @@ def test_user_scope_never_reaches_a_peer_that_does_not_declare_it(
     assert user_obs.key_expr not in mesh_dir_keys, 'user-scope key landed in a mesh-only peer directory'
     user_dir = b.root / parse_scope('user/hwata').volume_dir
     assert not user_dir.exists(), f'a user-scope directory was created on a peer that never declared it: {user_dir}'
+
+
+# -- properties 6 and 7: the mesh re-PUT migration (task 5) --------------------
+
+
+def _as_mesh_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node: _Node) -> None:
+    """Make this process the coordinator on ``node``'s host: mesh-only, local router.
+
+    The re-PUT goes through the real write gate (this module is in
+    ``conftest._REAL_SCOPE_GATE_MODULES``), which reads ``storage_scopes`` from
+    the host config and requires ``ZENOH_CONNECT`` to name a local router.
+    """
+    config_home = tmp_path / 'coordinator-config' / 'kioku-mesh'
+    config_home.mkdir(parents=True, exist_ok=True)
+    (config_home / 'config.yaml').write_text('storage_scopes:\n  - mesh\n')
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path / 'coordinator-config'))
+    monkeypatch.setenv('ZENOH_CONNECT', node.endpoint)
+
+
+def _put_raw(node: _Node, pairs: list[tuple[str, str]]) -> None:
+    """Publish raw key/payload pairs (a tombstone, a non-observation mesh key)."""
+    with _client(node) as session:
+        for key, payload in pairs:
+            handshake(
+                lambda k=key, p=payload: session.put(k, p),
+                lambda k=key: storage_has(session, k),
+                f'{node.name} storage to hold {key}',
+            )
+
+
+def _verified(session: Any, manifest: Any) -> Any:
+    """Return the verify report once it passes, else None (for :func:`wait_until`).
+
+    A storage acknowledges a put before the key is readable, so the first
+    verify right after the last PUT can legitimately still be short.
+    """
+    report = verify_reput(session, manifest)
+    if report.ok:
+        return report
+    return None
+
+
+class _FailingPuts:
+    """A real session that raises after ``fail_after`` puts, to interrupt a re-PUT."""
+
+    def __init__(self, session: zenoh.Session, fail_after: int) -> None:
+        self._session = session
+        self._fail_after = fail_after
+        self.puts = 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def put(self, key_expr: str, payload: Any) -> None:
+        if self.puts >= self._fail_after:
+            raise RuntimeError('simulated interruption mid re-PUT')
+        self.puts += 1
+        self._session.put(key_expr, payload)
+
+
+def test_reput_moves_every_mesh_kind_and_nothing_else(
+    two_nodes: tuple[_Node, _Node],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest carries obs, tomb and other mesh keys; the new dir gets exactly those.
+
+    Walks the design's B1 phases on a real router: seed a broad directory with
+    all three tiers, build the manifest under the transitional config, then
+    re-PUT under the final config. The refusal in the middle is part of the
+    property, not an accident — the write gate forbids a PUT while the
+    transitional broad storage would also receive it, which is why the manifest
+    is a file and the re-PUT is a separate phase.
+    """
+    a, _b = two_nodes
+    mesh_obs = _obs('mesh observation to migrate')
+    legacy = _obs('legacy key that must stay behind', visibility='')
+    user = _obs('user key that must stay behind', visibility='user', scope_id='hwata')
+    tomb = f'mem/mesh/tomb/claude/scope-harness/harness-pc/harness-session/{mesh_obs.observation_id}'
+    other = 'mem/mesh/marker/harness'
+
+    a.start(_broad('old_a'))
+    _seed(a, [mesh_obs, legacy, user])
+    _put_raw(a, [(tomb, '{"deleted_at":"2026-08-17T00:00:00Z"}'), (other, 'not-an-observation')])
+    a.stop()
+
+    a.start(_transitional('old_a', 'mesh_a'))
+    with _client(a) as session:
+        manifest = build_manifest(session, expected_peers=1, now_iso='2026-08-17T00:00:00Z')
+    assert dict(manifest.kind_counts()) == {'obs': 1, 'tomb': 1, 'other': 1}
+    assert {e.key for e in manifest.entries} == {mesh_obs.key_expr, tomb, other}
+
+    manifest_path = tmp_path / 'manifest.json'
+    write_manifest(manifest, manifest_path)
+    assert read_manifest(manifest_path).digest == manifest.digest, 'the manifest file must survive a round trip'
+
+    checkpoint = tmp_path / 'checkpoint.json'
+    _as_mesh_host(tmp_path, monkeypatch, a)
+    with _client(a) as session, pytest.raises(ScopePreflightError):
+        replay_manifest(manifest, session=session, checkpoint_path=checkpoint, now_iso='t')
+
+    a.stop()
+    a.start(_scope_storages('mesh'))
+    with _client(a) as session:
+        result = replay_manifest(manifest, session=session, checkpoint_path=checkpoint, now_iso='t')
+        assert result.put == 3
+        wait_until(
+            lambda: _verified(session, manifest),
+            f'the {result.put} re-PUT keys to read back with the manifest digests',
+            timeout=ALIGN_TIMEOUT,
+        )
+        assert set(probe_inventory(session)) == {'mesh'}, 'the mem/** probe found a non-mesh key in the new dir'
+    a.stop()
+
+    assert _scan_dir(a, parse_scope('mesh').volume_dir) == {mesh_obs.key_expr, tomb, other}
+    # The old directory is the rollback artifact: still there, still complete.
+    assert {legacy.key_expr, user.key_expr, mesh_obs.key_expr} <= _scan_dir(a, 'old_a')
+
+
+def test_reput_resumes_from_its_checkpoint_after_an_interruption(
+    two_nodes: tuple[_Node, _Node],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted re-PUT continues from the checkpoint instead of restarting.
+
+    The interruption is injected into the third PUT of a per-key batch, so the
+    checkpoint has to be flushed per batch for the resumed run to skip exactly
+    what was done. The resumed run goes through the same write gate.
+    """
+    a, _b = two_nodes
+    observations = [_obs(f'key {i} of the manifest') for i in range(3)]
+
+    a.start(_broad('old_a'))
+    _seed(a, observations)
+    a.stop()
+
+    a.start(_transitional('old_a', 'mesh_a'))
+    with _client(a) as session:
+        manifest = build_manifest(session, expected_peers=1, now_iso='t')
+    assert len(manifest.entries) == 3
+    a.stop()
+
+    checkpoint = tmp_path / 'checkpoint.json'
+    a.start(_scope_storages('mesh'))
+    _as_mesh_host(tmp_path, monkeypatch, a)
+    with _client(a) as session:
+        interrupted = _FailingPuts(session, fail_after=1)
+        with pytest.raises(RuntimeError, match='simulated interruption'):
+            replay_manifest(manifest, session=interrupted, checkpoint_path=checkpoint, now_iso='t', batch_size=1)
+        done = load_reput_checkpoint(checkpoint).done
+        assert len(done) == 1, f'the checkpoint must record the finished key only: {done}'
+
+        result = replay_manifest(manifest, session=session, checkpoint_path=checkpoint, now_iso='t')
+        assert result.already_done == 1
+        assert result.put == 2
+        wait_until(
+            lambda: _verified(session, manifest),
+            'the resumed re-PUT to complete the manifest',
+            timeout=ALIGN_TIMEOUT,
+        )
+    a.stop()
+
+    assert _scan_dir(a, parse_scope('mesh').volume_dir) == {o.key_expr for o in observations}
 
 
 # -- property 5 ----------------------------------------------------------------
