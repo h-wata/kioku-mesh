@@ -14,22 +14,46 @@ ADR-0030.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-17
+
+> **このリリースは後方非互換の変更を含む (minor bump だが安全な更新ではない)。**
+> `search_memory` と `recall_context` は、これまで無制限に返していた結果を
+> 20,000 UTF-8 バイトで打ち切るようになった。件数や内容量が多い既存の呼び出しは、
+> これまでと違って一部の結果しか受け取れなくなる場合がある。
+> `save_observation` も、従来は受理していた正当な文章（guard 自身の検出対象である
+> 閉じタグの連結を本文中で引用したもの）を ToolError で拒否するようになった
+> (#312, #314)。受理範囲を狭める変更であり、これも semver 上 breaking。
+> ADR-0029 の semver 契約ではこれらの変更は major bump に相当するが、単一運用者
+> 期間中の例外を定める ADR-0030 の条件（CHANGELOG 冒頭・release notes 最上部への
+> 明記、upgrade notes の提示）を満たしたうえでユーザー判断により minor とした。
+> 更新前に下記 "Upgrade notes for v1.2" を必ず確認すること。
+
 ### Added
 
 - `save_observation`: content / subject / summary に MCP tool-call の断片
-  (`</content>` に続く別パラメータのタグ、`<parameter name="...">` 表記) が
+  (`</content>` 等の閉じタグに続く save_observation の既知パラメータ名の
+  開始/終了タグ（間に空白・改行・タブが入っていても検出される）、または name に
+  既知パラメータ名を持つ `<parameter name="subject">` のような
+  `<parameter name="...">` 表記) が
   混入している場合に ToolError で拒否する入力検証を追加した。クライアントが
   tool call を組み立てる際に文字列を終端し損ねると、本来 `memory_type` などへ
   渡るはずだった値が content 内に文字列として死蔵される (2026-06〜08 に 4 件、
   すべて claude-code)。フィールド境界を送信側に任せないための恒久的な検証で、
-  検出のみを行う (サーバ側でのサニタイズはしない)。検出パターンは
-  `save_observation` 自身の引数名にアンカーしているため、通常の XML を含む
-  文章は弾かれない (既存 1533 件に対し誤検知 0 / 真陽性 6)。
+  検出のみを行う (サーバ側でのサニタイズはしない)。**破壊的変更**: 検出パターンは
+  `save_observation` 自身の引数名にアンカーしているため一般的な XML の大半は
+  弾かれないが、この guard 自体を解説する文章のように `</subject><summary>` 等の
+  閉じタグ連結を本文中に引用した正当な prose は既知の false positive として拒否
+  される (既存 1533 件に対し誤検知 0 / 真陽性 6 の測定はこの既知 false positive
+  発見前のもの)。回避方法は当該マークアップを引用せず記述に言い換えること
+  (ToolError メッセージが同じ言い回しを案内する。`mcp_server.py`
+  save_observation のフィールドチェック実装を参照)。閉じタグの直前に空白・
+  改行が入る形も検出する (#312, #314)。
 - `kioku-mesh doctor`: 保存済みエントリに残っている tool-call 断片を洗い出す
   読み取り専用チェック `tool_call_fragments` を追加した
   (`--check-tool-call-fragments` で単独実行可)。live かつ non-superseded な
   effective 集合を走査して該当 observation_id を列挙するのみで、書き換えはしない。
-- `get_memory_status` に直近7日の family 別 save 数を追加 (#280)
+  (#312)
+- `get_memory_status` に直近7日の family 別 save 数を追加 (#286, closes #280)
 - `search_memory` / `recall_context`: read-side project aliases
   (`mesh-mem` ↔ `kioku-mesh`). A project filter now matches every stored
   `project` label of the same logical project in **both** directions: the
@@ -40,20 +64,36 @@ ADR-0030.
   small hardcoded table (`core/project_alias.py`) and is applied only to the
   incoming search filter; `save_observation` still persists the literal
   `project` value it was given. `recall_context` names the expansion in its
-  `filters:` line (`project='kioku-mesh' (also matching 'mesh-mem')`) (#278).
+  `filters:` line (`project='kioku-mesh' (also matching 'mesh-mem')`)
+  (#288, closes #278).
 - supersede suggestion (ADR-0026) の候補検出・ヒント描画で握り潰していた例外に
   debug ログの breadcrumb を追加した (CLI `save` / MCP `save_observation` の
   両経路)。save の成功は従来どおり守りつつ、検出が繰り返し失敗している場合に
   原因を追えるようにする。あわせて MCP 経路の renderer-error 回帰テスト
   (候補の描画中に例外が出ても save が成功し candidates が落ちるだけであること)
-  を追加した。(#236)
+  を追加した。(#293, closes #236)
+- Regression tests: parameterized `tests/test_store_errors.py` coverage
+  verifying the Zenoh fallback's tombstone / since-until / cursor base
+  filters are never overridden by a matching query term in the `or` and
+  `and_or` search modes (#294, closes #230). Sabotage testing confirmed the
+  tombstone and since/until cases had no prior coverage against `or`/`and_or`;
+  the
+  cursor case was already caught by an existing `and`-mode test but not
+  against `or`/`and_or`.
+- `search_memory` / `recall_context`: three more read-side project aliases
+  (`/home/gisen/work/mesh-mem` -> `kioku-mesh`, `portable_colorized_scanner` ->
+  `portable-scanner`, `rmf` -> `rmf_ws`), so the spelling variants found in the
+  store resolve to one logical project the same way `mesh-mem` -> `kioku-mesh`
+  already did (`PROJECT_ALIASES` now has 4 entries total) (#309).
 
 ### Changed
 
-- docs: `search_memory` / `recall_context` の tool description に日英クエリ分割運用を明記 (TASK-370/371)
+- docs: `search_memory` / `recall_context` の tool description に日英クエリ分割運用を明記
+  (#311)
 - messaging: message body size limits are now measured, enforced, and documented
-  (#202). The 64 KiB limit applies to `body` itself (it was previously applied to
-  the whole serialized message, so a 64 KiB body was rejected by the ~434-byte
+  (#295, closes #202). The 64 KiB limit applies to `body` itself (it was
+  previously applied to the whole serialized message, so a 64 KiB body was
+  rejected by the ~434-byte
   JSON envelope); a separate 192 KiB envelope cap stops `payload` / metadata from
   smuggling content past it, and tmux injection keeps its 8 KiB body cap. Sizes
   are counted in UTF-8 bytes, at-limit is accepted, and over-limit is rejected —
@@ -79,11 +119,11 @@ ADR-0030.
   set, and the encoded item is then re-measured against a 72 KiB per-message
   budget as a backstop. A new `withheld_fields` list plus the notice text name
   what was dropped, so nothing goes missing silently.
-- `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES` (20,000
-  UTF-8 bytes); when exceeded, results are dropped from the tail and a
+- **BREAKING**: `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES`
+  (20,000 UTF-8 bytes); when exceeded, results are dropped from the tail and a
   trailing `[truncated: showing N of M result(s); ...]` line is appended
-  (#277). The cap covers the *whole* returned text — any prefix banner, the
-  entries, and the truncation notice itself — so
+  (#291, closes #277). The cap covers the *whole* returned text — any prefix
+  banner, the entries, and the truncation notice itself — so
   `len(result.encode('utf-8')) <= SEARCH_OUTPUT_MAX_BYTES` always holds. When a
   single observation is too large to show in full, its header and full 32-char
   `<id=...>` are preserved and only the body is shrunk at a safe UTF-8
@@ -96,7 +136,8 @@ ADR-0030.
   entry to the current `KIOKU_MESH_*` prefix. Command, args, every other env
   var and any field this version knows nothing about are left untouched —
   unlike `--force`, which resets the whole entry. Each client is edited
-  through its own config file rather than through its CLI. (#279)
+  through its own config file rather than through its CLI.
+  (#287, closes #279)
 
   "Everything else untouched" is enforced rather than assumed:
 
@@ -162,6 +203,19 @@ ADR-0030.
   - `mcp install --client codex-cli` now escapes values per TOML 1.0, so a
     command path or env value containing `"` or `\` no longer produces a
     config that fails to parse.
+- Superseded ADR-0029's semver clause with ADR-0030, which documents a
+  single-operator exception allowing breaking changes to ship as minor
+  releases (CHANGELOG-first disclosure + upgrade notes + release note
+  placement required), and its failure condition once a third-party user
+  exists. (#283)
+- **BREAKING**: `recall_context`: output is now capped at `RECALL_OUTPUT_MAX_BYTES`
+  (20,000 UTF-8 bytes), reusing the `search_memory` cap helper. Results were previously
+  concatenated in full, which made the median response ~25 KB and pushed 22.9%
+  of calls past the client's tool-output limit, so the recalled context never
+  reached the conversation at all. Entries are dropped from the tail with the
+  same `[truncated: showing N of M ...]` notice; a single observation larger
+  than the whole budget falls back to a UTF-8-safe partial cut rather than
+  returning nothing (#308).
 
 ### Fixed
 
@@ -169,12 +223,12 @@ ADR-0030.
   existence-based supersede filter (`local_index.py:669-687`) と一致するよう
   修正。単純な `superseded_by IS NULL` は supersede コピー自身が
   tombstone/shadow/失効している場合に元 row を誤って隠す方向にズレる
-  (PR #310/#311 cross-review 追従)。
+  (#313, PR #310/#311 cross-review 追従)。
 - `recall_context` tool description の `search_mode='and_or'` の説明を
   「union」から「AND first; remaining slots are OR-filled」(intersection-first)
   に修正。実装 (`LocalIndex.search`) は AND 結果を先頭に置き、AND が limit に
   達すれば OR phase を実行しないため、旧記述は実装と逆だった
-  (PR #310/#311 cross-review 追従)。
+  (#313, PR #310/#311 cross-review 追従)。
 - Messaging: acknowledgement rows with no matching message are no longer read
   as acknowledgements. `is_acked` is an exact-pair point lookup, so such a row
   suppressed a *live* message carrying the same
@@ -198,7 +252,7 @@ ADR-0030.
   audited before image covers the quarantined row, the authoritative ack and
   the message together. There is deliberately no bulk delete and no age-based
   cleanup. This is the first of three units; the `check_messages` suppression
-  path itself changes in the next one (N4).
+  path itself changes in the next one (N4). (#304)
 - Messaging: `check_messages` no longer drops a message without saying so, and
   expiry purge no longer manufactures the ack rows that made it happen (N4,
   unit 2 of 3). Three changes: `is_acked` now believes an acknowledgement only
@@ -220,7 +274,7 @@ ADR-0030.
   `duplicate_retired`, or as `protocol_violation` when the envelope changed.
   The inbox schema is v3 (two nullable columns on `message_tombstones`
   recording the retired envelope, added in place on existing databases).
-- Messaging: closed the three ways an arrival could still be withheld without
+- Messaging (#305): closed the three ways an arrival could still be withheld without
   a word (cross-review of the above). An ack row written *after* the upgrade
   pass — what an old writer leaves behind during a rolling upgrade — was not
   covered by the one-time migration, so it became authoritative as soon as its
@@ -243,7 +297,7 @@ ADR-0030.
   quarantined acks record a `provenance` (`migration` or
   `post_migration_ack`), added in place on existing databases and shown by
   `orphan-acks list`.
-- Messaging: three narrower gaps from the second cross-review of the above. An
+- Messaging (#305): three narrower gaps from the second cross-review of the above. An
   expired arrival was deleted from Zenoh storage *before* it was classified, so
   a classification that then failed took the last copy of the message with it —
   no tombstone was written, the id quietly became reusable, and the
@@ -261,7 +315,7 @@ ADR-0030.
   acked duplicate would have come back flagged as withheld even from a caller
   that asked for acked mail, and with no diagnostic attached. Callers read
   `acked` (decided inside the classifying transaction) and the code's
-  `is_diagnostic` instead.
+  `is_diagnostic` instead. (#305)
 - Messaging: `kioku-mesh messaging orphan-acks status` reports whether a node
   has finished the ack-state rollout, and `docs/messaging-orphan-ack-rollout.md`
   describes the fleet procedure (N4, unit 3 of 3). The check is read-only and
@@ -274,9 +328,9 @@ ADR-0030.
   ambiguity the design refuses to guess away, and failing the check on them
   would manufacture pressure to bulk-clear the quarantine. A fleet is done when
   every node exits 0 with the same reported writer version; the command reads
-  one database and does not infer anything about the others.
+  one database and does not infer anything about the others. (#306)
 - `search_memory`: the #285 AND->OR fallback marker (`(no AND match; fell
-  back to OR)`) was appended directly into the result list, so the #277
+  back to OR)`) was appended directly into the result list, so the #291
   byte-cap counted it as a result and `showing N of M` was off by one
   whenever a fallback search also hit the cap. The marker is now passed to
   `_cap_search_output` via `prefix=` instead: its bytes still count toward
@@ -291,7 +345,8 @@ ADR-0030.
   changed and let the replace through, while the staged file still wore the
   values read a syscall earlier. `--repair` reported success and the change
   was gone. Both values are now derived from that single snapshot, so the
-  staged file and the compare-and-swap baseline can no longer disagree (#279).
+  staged file and the compare-and-swap baseline can no longer disagree
+  (#287, closes #279).
 - Test suite: disabled the `launch_testing` / `launch_ros` pytest plugins via
   `addopts` in `pyproject.toml`. When a shell has ROS2 sourced, `PYTHONPATH`
   pulls in those plugins' setuptools entry points, which conflict with
@@ -300,7 +355,7 @@ ADR-0030.
   `agent_family`-resolution tests fail nondeterministically outside CI
   (`caplog.records` came back empty even though the warning was logged to
   stderr), unrelated to any code under test. GitHub Actions never sees this
-  since its runners don't have ROS2 sourced. See #289.
+  since its runners don't have ROS2 sourced. (#290, closes #289)
 - `search_memory`: when `search_mode` is left at its default `'and'` and that
   AND search returns zero results, the tool now automatically retries with
   `search_mode='or'` and prefixes the result with `(no AND match; fell back
@@ -308,8 +363,8 @@ ADR-0030.
   already resilient to this; `search_memory` previously returned `"No
   matching memories."` for any natural-language query missing one term.
   Explicit `search_mode='or'`/`'and_or'` calls and the default value itself
-  are unchanged (#276).
-- `get_memory_status` の直近7日集計 (#280): 検索が `MAX_SEARCH` 上限に達し、かつ
+  are unchanged (#285, closes #276).
+- `get_memory_status` の直近7日集計 (#286, closes #280): 検索が `MAX_SEARCH` 上限に達し、かつ
   返却された最古の行がまだ7日窓の内側にある場合、セクション見出しを
   `family (last 7d) [PARTIAL: search limit … reached; …]` とし、各行を
   `family_7d <name>: >=N` の下限値表示に変えた（従来は打ち切られた件数を確定値の
@@ -339,7 +394,7 @@ ADR-0030.
   under test is published before the path is known to deliver. A new test pins
   what the production one-shot CLI shape (lazy-open -> put -> close, as in
   `kioku-mesh save`) delivers to an already-established peer: both its live
-  subscriber and the router's storage receive the sample.
+  subscriber and the router's storage receive the sample. (#298)
 
 - tests: the same fixed-sleep pattern is gone from the rest of the router-backed
   suite. `tests/test_gc.py` (42 sleeps), `tests/conftest.py`'s inter-test purge
@@ -353,7 +408,7 @@ ADR-0030.
   disabled, then matched on the replier zid), so "B holds a local replica" is
   verified rather than assumed from a reply A could have served. Measured over
   30 consecutive runs of the two files: 0 failures before and after,
-  36.6s → 8.0s per run.
+  36.6s → 8.0s per run. (#301)
 
 - tests: the same fixed-sleep pattern is now also gone from the rest of the
   suite. `tests/test_mcp_cli.py`, `test_mcp_server.py`, `test_store_single.py`,
@@ -382,13 +437,13 @@ ADR-0030.
   sleep. No flakiness was observed
   in either version over 30 consecutive runs of the 7 changed files (0
   failures before and after); the waits also cut the run time, 36.6s → 18.2s
-  per run.
+  per run. (#302)
 
 - `init --install-systemd`: when `zenohd` is not on `PATH`, the generated unit's
   `ExecStart` now checks `zenohd_install.default_bin_dir() / 'zenohd'`
   (`~/.local/share/kioku-mesh/bin/zenohd`) before falling back to the hardcoded
   `/usr/bin/zenohd` constant, and prints a notice indicating which binary was
-  baked in (#223).
+  baked in (#292, closes #223).
 - `backfill-metadata`: summary derivation no longer ends a sentence at a period
   inside an identifier (version numbers, filenames, IP addresses, dotted
   identifiers, decimals), nor at a numbered-list marker (`… 落とし穴 3 件: 1. Node
@@ -403,25 +458,27 @@ ADR-0030.
   cannot see a mis-split whose period is followed by a space. Over the 321
   repairable observations in the live store that audit surfaces 6 candidates
   before the fix (5 real mis-splits, 1 correct sentence end) and 2 after
-  (0 mis-splits — both are correct first sentences whose content continues).
+  (0 mis-splits — both are correct first sentences whose content continues). (#284)
 
-### Added
+### Upgrade notes for v1.2
 
-- Regression tests: parameterized `tests/test_store_errors.py` coverage
-  verifying the Zenoh fallback's tombstone / since-until / cursor base
-  filters are never overridden by a matching query term in the `or` and
-  `and_or` search modes (#230). Sabotage testing confirmed the tombstone
-  and since/until cases had no prior coverage against `or`/`and_or`; the
-  cursor case was already caught by an existing `and`-mode test but not
-  against `or`/`and_or`.
-
-### Changed
-
-- Superseded ADR-0029's semver clause with ADR-0030, which documents a
-  single-operator exception allowing breaking changes to ship as minor
-  releases (CHANGELOG-first disclosure + upgrade notes + release note
-  placement required), and its failure condition once a third-party user
-  exists.
+- `search_memory` / `recall_context` を呼ぶ側は、応答が 20,000 UTF-8 バイトを
+  超える場合に結果が末尾から打ち切られることを前提にすること。打ち切りが
+  発生すると末尾に `[truncated: showing N of M ...]` の通知行が付く。全件が
+  必要な場合は `limit` を絞って複数回呼ぶか、`get_memory` で個別の
+  observation_id を取得すること。単一の observation 自体が上限を超える場合は、
+  ヘッダと `<id=...>` を保持したまま本文のみ UTF-8 安全に切り詰められる。
+- 影響を受けるのは 1 回の応答が 20,000 バイトを超えるような大きめの検索・
+  想起のみで、通常サイズの呼び出しの挙動は変わらない。
+- `save_observation` を呼ぶ側で、content / subject / summary に MCP
+  tool-call のマークアップ（`</content>` 等の閉じタグに save_observation の
+  既知パラメータ名の開始/終了タグが続く形（間に空白・改行・タブが入っていても
+  検出される）、または name に既知パラメータ名を持つ `<parameter name="subject">`
+  のような `<parameter name="...">` 表記）を
+  文中に引用している場合は ToolError で拒否されるようになった (#312, #314)。
+  name の値が `...` や `parameter` のような非該当の文字列であれば拒否されない。
+  該当箇所を「このタグを引用する」のではなく記述に言い換えれば通る。既存の
+  非マークアップな通常 content には影響しない。
 
 ## [1.1.0] - 2026-08-08
 
