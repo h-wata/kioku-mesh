@@ -129,3 +129,7 @@ timeout = 60
 # この2プラグインは kioku-mesh の純 Python テストスイートには無関係なので明示的に無効化する。
 # 未インストール環境では no-op。
 addopts = "-p no:launch_testing -p no:launch_ros"
+# integration: 実 zenohd を起動し replication の収束を待つテスト
+# (tests/test_two_node_scope_harness.py)。既定の `pytest tests/ -q` に含める。
+# これだけ回すなら `pytest -m integration`、外すなら `pytest -m "not integration"`。
+markers = ["integration: spawns real zenohd routers and waits for replication"]
