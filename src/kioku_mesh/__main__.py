@@ -82,6 +82,7 @@ from .store import stop_pending_drain_background
 
 if TYPE_CHECKING:
     from .memory.scope_migration import Manifest
+    from .memory.scope_migration import VerifyReport
 
 log = logging.getLogger(__name__)
 
@@ -1501,8 +1502,9 @@ def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
     _print_manifest_summary(manifest)
     if args.dry_run:
         # The dry-run answers "would the real run go through?", so it runs the
-        # same two checks the real run stops on — checkpoint/manifest binding
-        # and the per-key gate — and never PUTs (review B1).
+        # three checks the real run stops on — checkpoint/manifest binding, the
+        # per-key gate (review B1) and the final verify, predicted from the end
+        # state the pending PUTs would produce (review B2) — and never PUTs.
         from .memory.scope_migration import load_bound_checkpoint
         from .memory.visibility_migration import preflight_migration_target
 
@@ -1510,16 +1512,23 @@ def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
         try:
             if checkpoint_path.exists():
                 done = set(load_bound_checkpoint(checkpoint_path, manifest).done) & {e.key for e in manifest.entries}
-            for key in dict.fromkeys(e.key for e in manifest.entries if e.key not in done):
+            pending = list(dict.fromkeys(e.key for e in manifest.entries if e.key not in done))
+            for key in pending:
                 preflight_migration_target(key, session)
         except (ScopeMigrationError, ScopePreflightError) as e:
             print(f'error: {e}', file=sys.stderr)
             return 1
         already = len(done)
+        report = verify_reput(session, manifest, assume_put=pending)
+        if not report.ok:
+            print('dry-run: nothing was written.')
+            _print_verify_failure(report, manifest_path, predicted=True)
+            return 1
         print('dry-run: nothing was written.')
         print(f'  checkpoint:  {checkpoint_path} ({already} key(s) already re-PUT)')
         print(f'  would re-PUT {len(manifest.entries) - already} key(s) into the live mesh storage')
         print('  every pending key passed the live exact mesh storage gate')
+        print('  predicted verify: OK — no missing / mismatched / extra key would be left')
         print(f'  {LEGACY_SOURCE_DIR} is not touched (rollback artifact; never deleted here)')
         return 0
 
@@ -1562,7 +1571,13 @@ def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
         print(f'{LEGACY_SOURCE_DIR} left in place as the rollback artifact (not deleted).')
         print('next: `kioku-mesh scope-inventory` on every peer, then `kioku-mesh doctor`')
         return 0
-    print('verify: FAILED', file=sys.stderr)
+    _print_verify_failure(report, manifest_path)
+    return 1
+
+
+def _print_verify_failure(report: 'VerifyReport', manifest_path: Path, *, predicted: bool = False) -> None:
+    """Report a failed re-PUT verify, real or predicted by ``--dry-run`` (B2)."""
+    print('predicted verify: FAILED' if predicted else 'verify: FAILED', file=sys.stderr)
     for label, keys in (
         ('missing', report.missing),
         ('payload digest mismatch', report.digest_mismatch),
@@ -1571,7 +1586,6 @@ def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
         if keys:
             print(f'  {label}: {len(keys)} — {", ".join(keys[:5])}', file=sys.stderr)
     print(f'  re-run `scope-migrate re-put --manifest {manifest_path}` after fixing the cause.', file=sys.stderr)
-    return 1
 
 
 def _cmd_scope_inventory(args: argparse.Namespace) -> int:

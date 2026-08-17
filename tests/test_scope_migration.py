@@ -266,26 +266,39 @@ def test_verify_reports_missing_and_mismatched_keys() -> None:
 _BROAD_STORAGES = {'agent_mem': {'key_expr': 'mem/**', 'strip_prefix': 'mem', 'volume': {'dir': 'agent_mem'}}}
 
 
-def _reput_dry_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: _SourceSession, *, checkpoint: Path | None = None
+def _reput(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session: _SourceSession,
+    *,
+    checkpoint: Path | None = None,
+    manifest: sm.Manifest | None = None,
+    dry_run: bool = True,
 ) -> int:
-    """Run ``scope-migrate re-put --dry-run`` against ``session``."""
+    """Run ``scope-migrate re-put`` (dry-run or real) against ``session``."""
     import argparse
 
     from kioku_mesh import __main__ as cli
 
-    manifest = sm.build_manifest(_two_peer_source(), expected_peers=2, now_iso='t')
+    if manifest is None:
+        manifest = sm.build_manifest(_two_peer_source(), expected_peers=2, now_iso='t')
     manifest_path = tmp_path / 'manifest.json'
     sm.write_manifest(manifest, manifest_path)
     monkeypatch.setattr(cli, 'get_session', lambda: session)
     args = argparse.Namespace(
         manifest=str(manifest_path),
         checkpoint=str(checkpoint) if checkpoint else None,
-        dry_run=True,
+        dry_run=dry_run,
         yes=True,
         batch_size=100,
     )
     return cli._cmd_scope_migrate_reput(args)
+
+
+def _reput_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: _SourceSession, *, checkpoint: Path | None = None
+) -> int:
+    return _reput(tmp_path, monkeypatch, session, checkpoint=checkpoint)
 
 
 def test_reput_dry_run_fails_on_a_transitional_config(
@@ -324,6 +337,84 @@ def test_reput_dry_run_fails_on_a_checkpoint_from_another_manifest(
 
     assert rc == 1
     assert 'belongs to manifest' in capsys.readouterr().err
+
+
+# -- re-PUT --dry-run vs the real run: final verify parity (review B2) ----------
+
+
+class _EchoingSource(_SourceSession):
+    """A target that keeps what is PUT into it, as a live mesh storage does."""
+
+    def put(self, key_expr: str, payload: Any) -> None:
+        super().put(key_expr, payload)
+        self.data[key_expr] = _both_peers(payload)
+
+
+def test_dry_run_predicts_the_verify_failure_of_an_empty_manifest_with_a_stale_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing to re-PUT but a stale live key: the run fails verify, so must the dry-run (B2)."""
+    empty = sm.build_manifest(_SourceSession({}), expected_peers=0, now_iso='t')
+    stale = {'mem/mesh/obs/proj/STALE': _both_peers(b'{}')}
+
+    dry_session = _SourceSession(dict(stale))
+    dry_rc = _reput(tmp_path, monkeypatch, dry_session, manifest=empty)
+    dry_err = capsys.readouterr().err
+    run_rc = _reput(tmp_path, monkeypatch, _EchoingSource(dict(stale)), manifest=empty, dry_run=False)
+
+    assert (dry_rc, run_rc) == (1, 1)
+    assert 'predicted verify: FAILED' in dry_err
+    assert 'unexpected extra: 1' in dry_err
+    assert dry_session.puts == [], 'a dry-run never writes'
+
+
+def test_dry_run_predicts_the_verify_failure_of_a_fully_done_checkpoint_on_an_incomplete_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Checkpoint says done, target is not: pending is 0, so live state is the end state (B2)."""
+    manifest = sm.build_manifest(_two_peer_source(), expected_peers=2, now_iso='t')
+    checkpoint = tmp_path / 'chk.json'
+    sm.save_reput_checkpoint(
+        sm.ReputCheckpoint(manifest_digest=manifest.digest, done=[e.key for e in manifest.entries]), checkpoint
+    )
+    incomplete = _two_peer_source()
+    del incomplete.data['mem/mesh/meta/whatever']
+
+    dry_rc = _reput(tmp_path, monkeypatch, incomplete, checkpoint=checkpoint, manifest=manifest)
+    dry_err = capsys.readouterr().err
+    run_target = _EchoingSource(dict(incomplete.data))
+    run_rc = _reput(tmp_path, monkeypatch, run_target, checkpoint=checkpoint, manifest=manifest, dry_run=False)
+
+    assert (dry_rc, run_rc) == (1, 1)
+    assert 'missing: 1' in dry_err
+    assert incomplete.puts == [], 'a dry-run never writes'
+    assert run_target.puts == [], 'a fully done checkpoint re-PUTs nothing'
+
+
+def test_dry_run_verdict_matches_the_run_with_pending_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With pending keys the prediction uses the end state the PUTs would produce (B2)."""
+    manifest = sm.build_manifest(_two_peer_source(), expected_peers=2, now_iso='t')
+
+    runs = [tmp_path / name for name in ('clean-dry', 'clean-run', 'stale-dry', 'stale-run')]
+    for d in runs:
+        d.mkdir()
+
+    clean_dry = _reput(runs[0], monkeypatch, _SourceSession({}), manifest=manifest)
+    assert 'predicted verify: OK' in capsys.readouterr().out
+    clean_run = _reput(runs[1], monkeypatch, _EchoingSource({}), manifest=manifest, dry_run=False)
+    assert (clean_dry, clean_run) == (0, 0)
+
+    stale = {'mem/mesh/obs/proj/STALE': _both_peers(b'{}')}
+    dry_session = _SourceSession(dict(stale))
+    dry_rc = _reput(runs[2], monkeypatch, dry_session, manifest=manifest)
+    dry_err = capsys.readouterr().err
+    run_rc = _reput(runs[3], monkeypatch, _EchoingSource(dict(stale)), manifest=manifest, dry_run=False)
+
+    assert (dry_rc, run_rc) == (1, 1)
+    assert 'unexpected extra: 1' in dry_err
+    assert dry_session.puts == [], 'a dry-run never writes'
 
 
 # -- inventory -----------------------------------------------------------------

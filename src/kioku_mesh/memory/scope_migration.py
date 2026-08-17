@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import base64
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
 import hashlib
@@ -433,12 +434,22 @@ def verify_reput(
     *,
     selector: str = MESH_SOURCE_SELECTOR,
     timeout: float = GET_TIMEOUT,
+    assume_put: Iterable[str] = (),
 ) -> VerifyReport:
-    """Compare live keys and payload digests against the manifest, per kind."""
+    """Compare live keys and payload digests against the manifest, per kind.
+
+    ``assume_put`` names the manifest keys a run has not PUT yet, which lets
+    ``--dry-run`` predict the verify the real run would end on without writing
+    anything (review B2). A PUT writes the manifest payload bytes, so the
+    predicted end state of such a key is its manifest digest.
+    """
     live: dict[str, str] = {}
     for reply in _get_unconsolidated(session, selector, timeout=timeout):
         live.setdefault(reply.key, hashlib.sha256(reply.payload).hexdigest())
     expected = {e.key: e.sha256 for e in manifest.entries}
+    for key in assume_put:
+        if key in expected:
+            live[key] = expected[key]
     missing = tuple(sorted(k for k in expected if k not in live))
     mismatch = tuple(sorted(k for k, sha in expected.items() if k in live and live[k] != sha))
     extra = tuple(sorted(k for k in live if k not in expected))
