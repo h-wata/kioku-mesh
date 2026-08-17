@@ -202,19 +202,23 @@ class _Node:
                 start_new_session=True,
                 env={**os.environ, 'ZENOH_BACKEND_ROCKSDB_ROOT': str(self.root)},
             )
-        _wait_for_router(self.port)
-        # The router accepts client sessions before storage_manager has opened
-        # every backend, and a sample published into that window is simply not
-        # stored by the storage that was still coming up — measured: seeding a
-        # transitional node right after start left its mesh_store empty while
-        # the already-loaded legacy store held everything, so the test's own
-        # read-back said "stored" and the harness silently tested nothing.
-        expected = set(storages)
-        with _client(self) as session:
-            wait_until(
-                lambda: expected <= {s.name for s in fetch_self_storages(session)},
-                f'storages {sorted(expected)} of node {self.name} to register in the admin space',
-            )
+        try:
+            _wait_for_router(self.port)
+            # The router accepts client sessions before storage_manager has opened
+            # every backend, and a sample published into that window is simply not
+            # stored by the storage that was still coming up — measured: seeding a
+            # transitional node right after start left its mesh_store empty while
+            # the already-loaded legacy store held everything, so the test's own
+            # read-back said "stored" and the harness silently tested nothing.
+            expected = set(storages)
+            with _client(self) as session:
+                wait_until(
+                    lambda: expected <= {s.name for s in fetch_self_storages(session)},
+                    f'storages {sorted(expected)} of node {self.name} to register in the admin space',
+                )
+        except BaseException:
+            self.stop()
+            raise
 
     def stop(self, timeout: float = 5.0) -> None:
         """Terminate the router; SIGKILL on timeout. Idempotent."""
@@ -377,6 +381,40 @@ def test_scan_dir_stops_scanner_when_admin_registration_fails(tmp_path: Path, mo
     scanners = [n for n in stopped if n.name.startswith('leak-src-scan-')]
     assert scanners, 'scanner.stop() must run even when admin-space registration fails'
     assert not scanners[0].running, 'scanner process must be terminated after the startup failure'
+
+
+# -- RC2 regression: _Node.start() itself must not leak zenohd on startup failure ---
+
+
+def test_node_start_stops_itself_when_wait_for_router_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A direct ``_Node.start()`` call must self-reap on a post-``Popen`` failure.
+
+    ``_scan_dir`` and the ``two_nodes`` fixture both catch a startup failure and
+    call ``stop()`` on the caller's behalf, so the RC1 regression above only
+    proves the wrapper is safe. ``_Node.start`` itself does not: injecting a
+    failure into ``_wait_for_router`` after ``subprocess.Popen`` leaves
+    ``self.proc`` set and the child running, because nothing between the
+    ``Popen`` call and the return catches the exception. This calls
+    ``_Node.start`` directly (no wrapper) and asserts the node reaps its own
+    child before propagating the failure.
+    """
+    _require_zenohd()
+    workdir = tmp_path / 'harness'
+    workdir.mkdir()
+    node = _Node('rc2-leak', workdir, workdir / 'rc2-leak-rocksdb', _free_port())
+
+    def failing_wait_for_router(port: int, **kwargs: object) -> None:
+        raise RuntimeError('simulated router wait failure')
+
+    monkeypatch.setattr(sys.modules[__name__], '_wait_for_router', failing_wait_for_router)
+
+    try:
+        with pytest.raises(RuntimeError, match='simulated router wait failure'):
+            node.start(_broad('rc2-leak-dir'))
+        assert not node.running, 'node must stop its own zenohd when _wait_for_router fails'
+        assert node.proc is None, 'proc handle must be cleared after self-recovery'
+    finally:
+        node.stop()
 
 
 # -- property 1 ----------------------------------------------------------------
