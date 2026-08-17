@@ -841,8 +841,11 @@ def check_storage_scopes(
 
     # Tier 1 (`kioku-mesh mesh start`): that router cannot hold a storage at
     # all, so a mesh-only host is allowed to save through it. Say so plainly
-    # instead of reporting a storage set it can never have.
-    if embedded_router and [s.label for s in declared] == ['mesh']:
+    # instead of reporting a storage set it can never have. Only for a local
+    # endpoint — a remote embedded router is not this host's quickstart, and
+    # the write gate refuses it (N6), so doctor must not advertise it as
+    # accepted either.
+    if embedded_router and local_ok and [s.label for s in declared] == ['mesh']:
         return CheckResult(
             name='storage_scopes',
             status=CheckStatus.WARN,

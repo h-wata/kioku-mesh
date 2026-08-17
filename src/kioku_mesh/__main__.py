@@ -2272,17 +2272,26 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
             )
             plan.items.extend(extra_items)
 
-    result = execute_migration(
-        plan,
-        session=session,
-        dry_run=args.dry_run,
-        yes=args.yes,
-        batch_size=batch_size,
-        checkpoint_path=checkpoint_path,
-        backup_dir=backup_dir,
-        now_iso=now_iso,
-        params_hash=current_params_hash,
-    )
+    from .core.scope import ScopePreflightError
+
+    try:
+        result = execute_migration(
+            plan,
+            session=session,
+            dry_run=args.dry_run,
+            yes=args.yes,
+            batch_size=batch_size,
+            checkpoint_path=checkpoint_path,
+            backup_dir=backup_dir,
+            now_iso=now_iso,
+            params_hash=current_params_hash,
+        )
+    except ScopePreflightError as e:
+        # The gate runs before the batch's first PUT, so nothing was copied and
+        # no legacy source key was deleted.
+        print(f'error: {e}', file=sys.stderr)
+        print(f'Nothing was migrated; resume with --resume {checkpoint_path} once fixed.', file=sys.stderr)
+        return 1
 
     if not args.dry_run:
         print(

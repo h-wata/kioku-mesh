@@ -42,6 +42,11 @@ from kioku_mesh.backend import reset_backend
 from .wait_helpers import storage_missing
 from .wait_helpers import wait_until
 
+# Modules that must see the unpatched write gate. Everything that is itself a
+# write sink belongs here; the bypass is only for tests whose subject is
+# something else and whose stub sessions predate scope storages.
+_REAL_SCOPE_GATE_MODULES = ('test_scope', 'test_visibility_migration')
+
 
 @pytest.fixture(autouse=True)
 def scope_storages_rendered(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -58,8 +63,14 @@ def scope_storages_rendered(request: pytest.FixtureRequest, monkeypatch: pytest.
     fail-closed store / drain behavior — is exercised for real in
     ``tests/test_scope.py``, which is exempted here so it sees the unpatched
     functions.
+
+    ``tests/test_visibility_migration.py`` is exempted too: migration is a
+    write sink that DELETEs the legacy source right after its target PUT, so
+    it has to be tested against the real gate — this bypass is what hid the
+    missing migration gate (PR #316 review, B1). Those tests build
+    gate-passing sessions of their own.
     """
-    if request.module.__name__.rsplit('.', 1)[-1] == 'test_scope':
+    if request.module.__name__.rsplit('.', 1)[-1] in _REAL_SCOPE_GATE_MODULES:
         return
     from kioku_mesh.core import scope as scope_mod
 

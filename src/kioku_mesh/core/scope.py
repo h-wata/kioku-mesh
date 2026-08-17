@@ -493,6 +493,21 @@ def evaluate_write_key(key_expr: str, session: Any | None) -> PreflightVerdict:
             reason=f'cannot read the live storage list from zenohd ({type(e).__name__}: {e})',
             hint=f'Start or reconnect zenohd, then retry. {_DOCTOR_HINT}',
         )
+    # N6 first, and before the Tier 1 exception below: a remote router's
+    # storages are not this host's, and neither is a remote *embedded* router
+    # a local `kioku-mesh mesh start`. The exception is for the local
+    # quickstart only, so the endpoint check gates it too.
+    if not local_router_endpoint_ok():
+        return PreflightVerdict(
+            False,
+            key_expr,
+            scope.label,
+            reason=(
+                'ZENOH_CONNECT does not point at a local router, so live storage reported as "self" '
+                'may belong to another host'
+            ),
+            hint=f'Start the local zenohd and point ZENOH_CONNECT at it. {_DOCTOR_HINT}',
+        )
     # Tier 1 (`kioku-mesh mesh start`): that router cannot hold a storage at
     # all, so a mesh-only host may save through it. Probed only when there is
     # no storage to match anyway, so the normal path costs nothing extra.
@@ -506,17 +521,6 @@ def evaluate_write_key(key_expr: str, session: Any | None) -> PreflightVerdict:
                 '`kioku-mesh mesh start`, which has no storage, and this host is mesh-only. '
                 'The save reaches connected peers live but no storage keeps it — start zenohd for durability.'
             ),
-        )
-    if not local_router_endpoint_ok():
-        return PreflightVerdict(
-            False,
-            key_expr,
-            scope.label,
-            reason=(
-                'ZENOH_CONNECT does not point at a local router, so live storage reported as "self" '
-                'may belong to another host'
-            ),
-            hint=f'Start the local zenohd and point ZENOH_CONNECT at it. {_DOCTOR_HINT}',
         )
     return _verdict_against_live(key_expr, scope, live)
 

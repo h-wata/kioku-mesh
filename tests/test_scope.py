@@ -657,6 +657,52 @@ def test_exception_is_reported_to_the_user_once(
     assert len(notices) == 1
 
 
+def test_remote_embedded_router_is_refused_before_the_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """N6 precedes Tier 1 (B2): a remote embedded router is not this host's mesh start."""
+    declare(monkeypatch, ['mesh'])
+    monkeypatch.setenv('ZENOH_CONNECT', 'tcp/192.168.128.12:7447')
+    session = embedded_session()
+    verdict = scope.evaluate_write_key(MESH_KEY, session)
+    assert not verdict.ok
+    assert not verdict.note
+    assert 'local router' in verdict.reason
+    assert session.puts == []
+
+
+def test_remote_embedded_router_save_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing lands anywhere: no zenoh put, no SQLite upsert, no pending-puts row."""
+    declare(monkeypatch, ['mesh'])
+    monkeypatch.setenv('ZENOH_CONNECT', 'tcp/192.168.128.12:7447')
+    session = embedded_session()
+    monkeypatch.setattr(store, 'get_session', lambda: session)
+    upserts: list[Any] = []
+    monkeypatch.setattr(store, 'get_index', lambda: type('I', (), {'upsert': lambda _s, o: upserts.append(o)})())
+
+    obs = _observation(visibility='mesh', scope_id='')
+    with pytest.raises(scope.ScopePreflightError):
+        store.put_observation(obs)
+    assert session.puts == []
+    assert upserts == []
+    assert pending_queue._count_pending_puts() == 0
+
+
+def test_doctor_does_not_claim_the_exception_for_a_remote_embedded_router(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Doctor must not advertise the Tier 1 exception the write gate refuses (B2)."""
+    declare(monkeypatch, ['mesh'])
+    result = doctor.check_storage_scopes(
+        live=[],
+        embedded_router=True,
+        endpoint='tcp/192.168.128.12:7447',
+        config_path=tmp_path / 'zenohd.json5',
+        blocked_pending=[],
+    )
+    assert result.status is doctor.CheckStatus.FAIL
+    assert 'not stored durably' not in result.summary
+    assert result.details['local_router_endpoint'] is False
+
+
 def test_doctor_reports_the_embedded_router_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     declare(monkeypatch, ['mesh'])
     result = doctor.check_storage_scopes(

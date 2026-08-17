@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kioku_mesh.core import scope as scope_mod
 from kioku_mesh.core.models import Observation
 from kioku_mesh.memory.visibility_migration import build_migration_plan
 from kioku_mesh.memory.visibility_migration import compute_params_hash
@@ -31,6 +32,10 @@ from kioku_mesh.memory.visibility_migration import save_checkpoint_atomic
 from kioku_mesh.memory.visibility_migration import scan_legacy_visibility
 from kioku_mesh.memory.visibility_migration import verify_key_payload
 from kioku_mesh.memory.visibility_migration import write_backup
+
+from .test_scope import FakeSession
+from .test_scope import rendered_storages
+from .test_scope import storage_body
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -68,6 +73,39 @@ def _make_sample(key: str, payload: str) -> MagicMock:
     sample.key_expr = key
     sample.payload.to_string.return_value = payload
     return sample
+
+
+# This module runs the *real* write gate (see ``_REAL_SCOPE_GATE_MODULES`` in
+# conftest): migration deletes the legacy source right after its target PUT,
+# so a bypassed gate here would hide exactly the bug it was added for.
+_MESH_STORAGES = rendered_storages((scope_mod.ScopeSpec('mesh'),))
+_BROAD_STORAGES = {'agent_mem': storage_body('mem/**', 'mem', 'agent_mem')}
+_USER_ONLY_STORAGES = rendered_storages((scope_mod.ScopeSpec('user', 'hwata'),))
+
+
+@pytest.fixture(autouse=True)
+def _mesh_scope_declared(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declare mesh storage and a local endpoint so the real gate can pass."""
+    monkeypatch.setenv('ZENOH_CONNECT', 'tcp/localhost:7447')
+    monkeypatch.setattr(scope_mod, 'get_storage_scopes', lambda: ['mesh'])
+
+
+def _gate_session(
+    storages: dict[str, dict[str, object]] | None = None,
+    *,
+    serves_admin: bool = True,
+) -> MagicMock:
+    """MagicMock session that also answers the admin space like a live zenohd.
+
+    Defaults to the post-cutover storage set (exact ``mem/mesh/**``), so the
+    migration write gate passes; pass ``storages`` to model a host that has
+    not been converted.
+    """
+    admin = FakeSession(_MESH_STORAGES if storages is None else storages, serves_admin=serves_admin)
+    session = MagicMock()
+    session.info.routers_zid.return_value = ['ZID1']
+    session.get.side_effect = lambda selector, timeout=0.0: admin.get(selector, timeout)
+    return session
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +448,7 @@ def test_execute_order_put_verify_delete_repair(tmp_path: pathlib.Path) -> None:
     plan = MigrationPlan(target=target, items=[item])
 
     calls: list[str] = []
-    session = MagicMock()
+    session = _gate_session()
     session.put.side_effect = lambda key, payload: calls.append(f'PUT:{key}')
     session.delete.side_effect = lambda key: calls.append(f'DEL:{key}')
 
@@ -528,7 +566,7 @@ def test_checkpoint_resume_target_put_no_source_deleted(tmp_path: pathlib.Path) 
     backup_dir.mkdir()
     (backup_dir / 'manifest.jsonl').write_text('', encoding='utf-8')
 
-    session = MagicMock()
+    session = _gate_session()
 
     with (
         patch('kioku_mesh.memory.visibility_migration.verify_key_payload', return_value=True),
@@ -599,7 +637,7 @@ def test_checkpoint_resume_source_deleted_repair_pending(tmp_path: pathlib.Path)
     backup_dir.mkdir()
     (backup_dir / 'manifest.jsonl').write_text('', encoding='utf-8')
 
-    session = MagicMock()
+    session = _gate_session()
 
     with patch('kioku_mesh.memory.store.get_index') as mock_index:
         mock_index.return_value.rebuild_from_zenoh = MagicMock()
@@ -758,7 +796,7 @@ def test_execute_checkpoint_flushed_at_phase_boundaries(tmp_path: pathlib.Path) 
 
     checkpoint_path = tmp_path / 'chk.json'
     backup_dir = tmp_path / 'backup'
-    session = MagicMock()
+    session = _gate_session()
 
     save_calls: list[str] = []
 
@@ -941,7 +979,7 @@ def test_cmd_migrate_resume_repairs_after_source_deleted(
     backend_mock = MagicMock()
     backend_mock.get_status.return_value = status_mock
 
-    session = MagicMock()
+    session = _gate_session()
     # scan returns empty (legacy key already deleted)
     # verify returns True so the item (from checkpoint) can proceed to repair
     repair_put_calls: list[tuple[str, str]] = []
@@ -1050,3 +1088,167 @@ def test_reconstruct_items_from_checkpoint_obs(tmp_path: pathlib.Path) -> None:
     assert item.kind == 'obs'
     new_obs = Observation.from_json(item.new_payload)
     assert new_obs.visibility == 'mesh'
+
+
+# ---------------------------------------------------------------------------
+# B1: every migration target PUT is gated on live exact target storage
+# ---------------------------------------------------------------------------
+
+
+_LEGACY_SOURCE_STORAGES = {'legacy_source': storage_body('mem/obs/**', 'mem', 'legacy_source')}
+
+
+def _mesh_obs_plan() -> MigrationPlan:
+    """One-item legacy -> mesh plan for the obs key."""
+    obs = _make_obs()
+    original_payload = obs.to_json()
+    obs.visibility = 'mesh'
+    return MigrationPlan(
+        target=MigrationTarget(visibility='mesh', scope_id='', display='mesh'),
+        items=[
+            MigrationItem(
+                kind='obs',
+                observation_id=_OBS_ID,
+                old_key=_LEGACY_OBS_KEY,
+                new_key=_MESH_OBS_KEY,
+                original_payload=original_payload,
+                new_payload=obs.to_json(),
+            )
+        ],
+    )
+
+
+def _run_migration(plan: MigrationPlan, session: MagicMock, tmp_path: pathlib.Path, **kw: object) -> object:
+    with (
+        patch('kioku_mesh.memory.visibility_migration.verify_key_payload', return_value=True),
+        patch('kioku_mesh.memory.store.get_index') as mock_index,
+    ):
+        mock_index.return_value.rebuild_from_zenoh = MagicMock()
+        return execute_migration(
+            plan,
+            session=session,
+            dry_run=False,
+            yes=True,
+            batch_size=500,
+            checkpoint_path=kw.get('checkpoint_path') or tmp_path / 'chk.json',
+            backup_dir=kw.get('backup_dir') or tmp_path / 'backup',
+            now_iso=_NOW_ISO,
+        )
+
+
+@pytest.mark.parametrize(
+    ('storages', 'serves_admin'),
+    [
+        pytest.param({}, True, id='no-storage'),
+        pytest.param(_BROAD_STORAGES, True, id='broad-only'),
+        pytest.param({**_MESH_STORAGES, **_BROAD_STORAGES}, True, id='exact-plus-broad-overlap'),
+        pytest.param(_USER_ONLY_STORAGES, True, id='config-only-not-live'),
+        pytest.param({}, False, id='tier1-embedded-router-non-durable'),
+    ],
+)
+def test_migration_refuses_target_put_without_live_exact_storage(
+    tmp_path: pathlib.Path,
+    storages: dict[str, dict[str, object]],
+    serves_admin: bool,
+) -> None:
+    """No exact live target storage -> no target PUT, no source DELETE.
+
+    The last case is the Tier 1 embedded router: a normal save is accepted
+    there (non-durably), migration must not be — it deletes the source.
+    """
+    session = _gate_session(storages, serves_admin=serves_admin)
+
+    with pytest.raises(scope_mod.ScopePreflightError, match='migration refused'):
+        _run_migration(_mesh_obs_plan(), session, tmp_path)
+
+    session.put.assert_not_called()
+    session.delete.assert_not_called()
+    chk = load_checkpoint(tmp_path / 'chk.json')
+    assert chk.items == {}
+
+
+def test_migration_transitional_source_plus_exact_target_runs(tmp_path: pathlib.Path) -> None:
+    """The approved transitional layout (legacy source store + exact target) works."""
+    session = _gate_session({**_MESH_STORAGES, **_LEGACY_SOURCE_STORAGES})
+
+    result = _run_migration(_mesh_obs_plan(), session, tmp_path)
+
+    assert (result.copied, result.verified, result.deleted, result.repair_put) == (1, 1, 1, 1)
+    session.delete.assert_called_once_with(_LEGACY_OBS_KEY)
+
+
+def test_migration_transitional_resume_repair_put_passes_gate(tmp_path: pathlib.Path) -> None:
+    """A resumed repair-PUT-only batch also runs the gate, and passes when storage is live."""
+    chk = MigrationCheckpoint(
+        version=1,
+        run_id='run1',
+        params={'from': 'legacy', 'to': 'mesh'},
+        target={'visibility': 'mesh', 'scope_id': ''},
+        started_at=_NOW_ISO,
+        updated_at=_NOW_ISO,
+    )
+    chk.items[f'{_OBS_ID}:obs'] = {
+        'old_key': _LEGACY_OBS_KEY,
+        'new_key': _MESH_OBS_KEY,
+        'backed_up': True,
+        'target_put': True,
+        'target_verified': True,
+        'source_deleted': True,
+        'repair_put': False,
+    }
+    checkpoint_path = tmp_path / 'chk.json'
+    save_checkpoint_atomic(chk, checkpoint_path)
+    backup_dir = tmp_path / 'backup'
+    backup_dir.mkdir()
+    (backup_dir / 'manifest.jsonl').write_text('', encoding='utf-8')
+
+    session = _gate_session({**_MESH_STORAGES, **_LEGACY_SOURCE_STORAGES})
+    result = _run_migration(
+        _mesh_obs_plan(),
+        session,
+        tmp_path,
+        checkpoint_path=checkpoint_path,
+        backup_dir=backup_dir,
+    )
+
+    assert result.repair_put == 1
+    session.delete.assert_not_called()
+
+
+def test_migration_resume_repair_put_refused_when_target_storage_gone(tmp_path: pathlib.Path) -> None:
+    """Same resumed batch, but the target storage disappeared -> no repair PUT."""
+    chk = MigrationCheckpoint(
+        version=1,
+        run_id='run1',
+        params={'from': 'legacy', 'to': 'mesh'},
+        target={'visibility': 'mesh', 'scope_id': ''},
+        started_at=_NOW_ISO,
+        updated_at=_NOW_ISO,
+    )
+    chk.items[f'{_OBS_ID}:obs'] = {
+        'old_key': _LEGACY_OBS_KEY,
+        'new_key': _MESH_OBS_KEY,
+        'backed_up': True,
+        'target_put': True,
+        'target_verified': True,
+        'source_deleted': True,
+        'repair_put': False,
+    }
+    checkpoint_path = tmp_path / 'chk.json'
+    save_checkpoint_atomic(chk, checkpoint_path)
+    backup_dir = tmp_path / 'backup'
+    backup_dir.mkdir()
+    (backup_dir / 'manifest.jsonl').write_text('', encoding='utf-8')
+
+    session = _gate_session(_BROAD_STORAGES)
+    with pytest.raises(scope_mod.ScopePreflightError, match='migration refused'):
+        _run_migration(
+            _mesh_obs_plan(),
+            session,
+            tmp_path,
+            checkpoint_path=checkpoint_path,
+            backup_dir=backup_dir,
+        )
+
+    session.put.assert_not_called()
+    assert load_checkpoint(checkpoint_path).items[f'{_OBS_ID}:obs']['repair_put'] is False
