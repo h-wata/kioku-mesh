@@ -790,6 +790,7 @@ def check_storage_scopes(
     config_path: Path | None = None,
     endpoint: str | None = None,
     blocked_pending: list[tuple[str, str]] | None = None,
+    embedded_router: bool | None = None,
 ) -> CheckResult:
     """Compare declared ``storage_scopes`` with this host's live zenohd storages.
 
@@ -820,7 +821,10 @@ def check_storage_scopes(
         try:
             from .core.transport import get_session  # noqa: PLC0415
 
-            live = scope_mod.fetch_self_storages(get_session())
+            session = get_session()
+            if embedded_router is None:
+                embedded_router = scope_mod.is_storageless_embedded_router(session)
+            live = scope_mod.fetch_self_storages(session)
         except Exception as e:  # noqa: BLE001
             return CheckResult(
                 name='storage_scopes',
@@ -833,6 +837,23 @@ def check_storage_scopes(
         {'name': s.name, 'key_expr': s.key_expr, 'strip_prefix': s.strip_prefix, 'volume_dir': s.volume_dir}
         for s in live
     ]
+    details['embedded_router'] = bool(embedded_router)
+
+    # Tier 1 (`kioku-mesh mesh start`): that router cannot hold a storage at
+    # all, so a mesh-only host is allowed to save through it. Say so plainly
+    # instead of reporting a storage set it can never have.
+    if embedded_router and [s.label for s in declared] == ['mesh']:
+        return CheckResult(
+            name='storage_scopes',
+            status=CheckStatus.WARN,
+            summary='Tier 1 embedded router (mesh start): mesh-only saves are accepted but not stored durably',
+            hint=(
+                'Saves reach connected peers live and this process indexes them, but no storage keeps them. '
+                'Run zenohd (`kioku-mesh init` + start) for durable storage. '
+                'user/team scopes stay refused on this router.'
+            ),
+            details=details,
+        )
 
     problems: list[str] = []
     for spec in declared:

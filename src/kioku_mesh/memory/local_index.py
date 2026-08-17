@@ -39,11 +39,12 @@ from typing import Iterator
 from ..core.identity import state_dir
 from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
-from ..core.keyspace import OBS_READ_KEY_EXPR
-from ..core.keyspace import TOMB_READ_KEY_EXPR
 from ..core.models import Observation
 from ..core.models import Tombstone
 from ..core.project_alias import normalize_project_filter
+from ..core.scope import obs_read_selectors
+from ..core.scope import tomb_read_selectors
+from ..core.transport import _iter_replies_over
 
 log = logging.getLogger(__name__)
 
@@ -1297,7 +1298,7 @@ class LocalIndex:
             return RebuildStats()
 
         obs_list: list[Observation] = []
-        for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
+        for reply in _iter_replies_over(session, obs_read_selectors(), timeout=30.0):
             if reply.ok:
                 key_str = str(reply.ok.key_expr)
                 # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
@@ -1326,7 +1327,7 @@ class LocalIndex:
                 obs_list.append(obs)
 
         tomb_ids: dict[str, str] = {}
-        for reply in session.get(TOMB_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
+        for reply in _iter_replies_over(session, tomb_read_selectors(), timeout=30.0):
             if reply.ok:
                 key_str = str(reply.ok.key_expr)
                 # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).

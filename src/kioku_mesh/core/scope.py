@@ -35,8 +35,10 @@ Two deliberate choices, both from the design review (worker3_design_review_404):
 The preflight is unconditional: there is no flag that downgrades a refusal
 to a warning, because a warned-through save is precisely the
 "reported as saved, never persisted" outcome this design exists to remove.
-``KIOKU_MESH_SCOPE_ISOLATION`` governs the *read* path selectors (subscriber
-/ rebuild / fallback / purge, task 2) and does not weaken this gate.
+``KIOKU_MESH_SCOPE_ISOLATION`` governs the *read* path selectors
+(:func:`obs_read_selectors` / :func:`tomb_read_selectors`, used by the
+subscriber, the rebuild scan and the purge sweep) and does not weaken this
+gate.
 
 Deployment consequence, stated plainly: a host whose zenohd still runs the
 single broad ``agent_mem`` (``mem/**``) storage has no exact scope storage,
@@ -55,12 +57,18 @@ import os
 from typing import Any
 
 from .config import get_storage_scopes
+from .keyspace import OBS_READ_KEY_EXPR
+from .keyspace import TOMB_READ_KEY_EXPR
 from .keyspace import validate_scope_slug
 
 log = logging.getLogger(__name__)
 
 # Self-scoped admin get: cheap and independent of remote peer liveness (N1).
 ADMIN_STORAGES_SUFFIX = 'router/status/plugins/storage_manager/storages/**'
+# Base of a router's admin space. zenohd answers it; the in-process router
+# behind `kioku-mesh mesh start` answers nothing at all (measured, see
+# :func:`is_storageless_embedded_router`).
+ADMIN_ROUTER_SUFFIX = 'router'
 ADMIN_GET_TIMEOUT = 2.0
 
 _UNSCOPED_TIERS = ('mesh',)
@@ -222,6 +230,42 @@ def scope_from_key(key_expr: str) -> ScopeSpec | None:
     return None
 
 
+# -- read path selectors (design v3 task 2) ------------------------------------
+
+SCOPE_ISOLATION_ENV = 'KIOKU_MESH_SCOPE_ISOLATION'
+
+
+def read_isolation_enabled() -> bool:
+    """Return True when the read path is restricted to this host's scopes.
+
+    ``KIOKU_MESH_SCOPE_ISOLATION=enforce`` opts in; anything else (the
+    initial-release default) keeps the pre-Phase-E behavior of reading every
+    namespace. Read-path only — it cannot weaken the write preflight, which
+    refuses unconditionally.
+    """
+    return os.environ.get(SCOPE_ISOLATION_ENV, '').strip().lower() == 'enforce'
+
+
+def obs_read_selectors() -> tuple[str, ...]:
+    """Return the obs selectors the subscriber / rebuild / purge may read.
+
+    Under isolation this is one selector per declared scope, so nothing
+    outside ``storage_scopes`` can be indexed, re-verified, or swept. An
+    invalid declaration raises instead of falling back to the global
+    selector: silently reading everything is the failure this replaces.
+    """
+    if not read_isolation_enabled():
+        return (OBS_READ_KEY_EXPR,)
+    return tuple(spec.obs_read_key_expr for spec in resolve_storage_scopes())
+
+
+def tomb_read_selectors() -> tuple[str, ...]:
+    """Tombstone counterpart of :func:`obs_read_selectors`."""
+    if not read_isolation_enabled():
+        return (TOMB_READ_KEY_EXPR,)
+    return tuple(spec.tomb_read_key_expr for spec in resolve_storage_scopes())
+
+
 # -- live storage inspection (Zenoh admin space) -------------------------------
 
 
@@ -329,18 +373,58 @@ def fetch_peer_storages(session: Any, *, timeout: float = ADMIN_GET_TIMEOUT) -> 
     return out
 
 
+def router_serves_admin_space(session: Any, zid: str, *, timeout: float = ADMIN_GET_TIMEOUT) -> bool:
+    """Return True when the attached router answers its own admin space.
+
+    zenohd answers ``@/<zid>/router`` (measured on the production router:
+    1 reply, plus 20 keys under ``@/<zid>/router/**``). The in-process router
+    that ``kioku-mesh mesh start`` opens answers **zero** replies to both —
+    zenoh-python cannot load the ``storage_manager`` (or any) plugin, and
+    the router admin space comes with it.
+    """
+    for reply in session.get(f'@/{zid}/{ADMIN_ROUTER_SUFFIX}', timeout=timeout):
+        if getattr(reply, 'ok', None) is not None:
+            return True
+    return False
+
+
+def is_storageless_embedded_router(session: Any, *, timeout: float = ADMIN_GET_TIMEOUT) -> bool:
+    """Return True when this session is attached to a Tier 1 embedded router.
+
+    Two conditions, both required: the router serves no admin space at all,
+    and it reports no storages. "No storages" alone is deliberately not
+    enough — a real zenohd whose storages were never rendered must keep
+    failing the preflight, which is the whole point of the gate.
+
+    A real zenohd that is merely slow to answer could in principle be
+    misread as embedded here. The blast radius is bounded on purpose: the
+    exception this feeds also requires the write to be mesh-scoped on a
+    mesh-only host, so no user/team key can be published through it.
+    """
+    zid = self_router_zid(session)
+    if router_serves_admin_space(session, zid, timeout=timeout):
+        return False
+    return not fetch_self_storages(session, timeout=timeout)
+
+
 # -- write preflight -----------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class PreflightVerdict:
-    """Outcome of one write preflight."""
+    """Outcome of one write preflight.
+
+    ``note`` is set when the write was accepted through the Tier 1
+    embedded-router exception rather than on proof of durable storage, so
+    callers can tell the user which of the two happened.
+    """
 
     ok: bool
     key_expr: str
     scope: str = ''
     reason: str = ''
     hint: str = ''
+    note: str = ''
 
     @property
     def message(self) -> str:
@@ -391,17 +475,6 @@ def evaluate_write_key(key_expr: str, session: Any | None) -> PreflightVerdict:
                 f'(on every host joining {scope.label}). {_DOCTOR_HINT}'
             ),
         )
-    if not local_router_endpoint_ok():
-        return PreflightVerdict(
-            False,
-            key_expr,
-            scope.label,
-            reason=(
-                'ZENOH_CONNECT does not point at a local router, so live storage reported as "self" '
-                'may belong to another host'
-            ),
-            hint=f'Start the local zenohd and point ZENOH_CONNECT at it. {_DOCTOR_HINT}',
-        )
     if session is None:
         return PreflightVerdict(
             False,
@@ -420,7 +493,45 @@ def evaluate_write_key(key_expr: str, session: Any | None) -> PreflightVerdict:
             reason=f'cannot read the live storage list from zenohd ({type(e).__name__}: {e})',
             hint=f'Start or reconnect zenohd, then retry. {_DOCTOR_HINT}',
         )
+    # Tier 1 (`kioku-mesh mesh start`): that router cannot hold a storage at
+    # all, so a mesh-only host may save through it. Probed only when there is
+    # no storage to match anyway, so the normal path costs nothing extra.
+    if not live and _mesh_only(scope, declared) and _embedded_router(session):
+        return PreflightVerdict(
+            True,
+            key_expr,
+            scope.label,
+            note=(
+                'accepted by the Tier 1 exception: this router is the in-process one from '
+                '`kioku-mesh mesh start`, which has no storage, and this host is mesh-only. '
+                'The save reaches connected peers live but no storage keeps it — start zenohd for durability.'
+            ),
+        )
+    if not local_router_endpoint_ok():
+        return PreflightVerdict(
+            False,
+            key_expr,
+            scope.label,
+            reason=(
+                'ZENOH_CONNECT does not point at a local router, so live storage reported as "self" '
+                'may belong to another host'
+            ),
+            hint=f'Start the local zenohd and point ZENOH_CONNECT at it. {_DOCTOR_HINT}',
+        )
     return _verdict_against_live(key_expr, scope, live)
+
+
+def _mesh_only(scope: ScopeSpec, declared: tuple[ScopeSpec, ...]) -> bool:
+    """Return True for a mesh write on a host that declares mesh and nothing else."""
+    return scope.visibility == 'mesh' and tuple(s.label for s in declared) == ('mesh',)
+
+
+def _embedded_router(session: Any) -> bool:
+    """:func:`is_storageless_embedded_router`, but never raising."""
+    try:
+        return is_storageless_embedded_router(session)
+    except Exception:  # noqa: BLE001 — an unanswerable probe is not proof of an embedded router
+        return False
 
 
 def _verdict_against_live(key_expr: str, scope: ScopeSpec, live: list[LiveStorage]) -> PreflightVerdict:
@@ -474,4 +585,28 @@ def preflight_write_key(key_expr: str, session: Any | None) -> PreflightVerdict:
     verdict = evaluate_write_key(key_expr, session)
     if not verdict.ok:
         raise ScopePreflightError(verdict.message)
+    if verdict.note:
+        _log_exception_once(verdict.note)
     return verdict
+
+
+_exception_notice_logged = False
+
+
+def _log_exception_once(note: str) -> None:
+    """Surface the Tier 1 exception the first time it carries a save.
+
+    Once per process: the point is that the user learns their saves are not
+    durably stored, not that every save repeats it.
+    """
+    global _exception_notice_logged
+    if _exception_notice_logged:
+        return
+    _exception_notice_logged = True
+    log.info('save %s', note)
+
+
+def reset_exception_notice() -> None:
+    """Re-arm the once-per-process notice (tests)."""
+    global _exception_notice_logged
+    _exception_notice_logged = False

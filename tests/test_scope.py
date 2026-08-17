@@ -18,6 +18,7 @@ import pytest
 from kioku_mesh import config as config_mod
 from kioku_mesh import doctor
 from kioku_mesh import store
+from kioku_mesh.core import keyspace
 from kioku_mesh.core import scope
 from kioku_mesh.core.keyspace import obs_key
 from kioku_mesh.memory import pending_queue
@@ -53,14 +54,24 @@ class _FakeInfo:
 class FakeSession:
     """Answers the admin-space get with a configurable storage list."""
 
-    def __init__(self, storages: dict[str, dict[str, Any]] | None = None, zid: str = 'ZID1') -> None:
+    def __init__(
+        self,
+        storages: dict[str, dict[str, Any]] | None = None,
+        zid: str = 'ZID1',
+        *,
+        serves_admin: bool = True,
+    ) -> None:
         self.storages = storages if storages is not None else {}
         self.info = _FakeInfo(zid)
         self.selectors: list[str] = []
         self.puts: list[tuple[str, str]] = []
+        # zenohd answers its admin base; the embedded router answers nothing.
+        self.serves_admin = serves_admin
 
     def get(self, selector: str, timeout: float = 0.0) -> list[_FakeReply]:
         self.selectors.append(selector)
+        if selector.endswith('/router'):
+            return [_FakeReply(_FakeSample(selector, '{"version":"1.9.0"}'))] if self.serves_admin else []
         prefix = selector.split('/router/')[0]
         return [
             _FakeReply(
@@ -294,7 +305,7 @@ def test_refuses_when_endpoint_is_not_local(monkeypatch: pytest.MonkeyPatch) -> 
     verdict = scope.evaluate_write_key(MESH_KEY, session)
     assert not verdict.ok
     assert 'local router' in verdict.reason
-    assert session.selectors == []  # no admin get attempted
+    # the storage list may be read, but nothing about it is accepted as evidence
 
 
 @pytest.mark.parametrize(
@@ -501,3 +512,159 @@ def test_doctor_reads_replication_from_config_not_admin_space(monkeypatch: pytes
 
 def test_storage_scopes_check_is_registered() -> None:
     assert 'check_storage_scopes' in doctor._CHECK_ORDER
+
+
+# ---------------------------------------------------------------------------
+# read path selectors (design v3 task 2)
+# ---------------------------------------------------------------------------
+
+
+def _includes(outer: str, inner: str) -> bool:
+    import zenoh
+
+    return zenoh.KeyExpr(outer).includes(zenoh.KeyExpr(inner))
+
+
+def test_read_selectors_stay_global_while_isolation_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default (staged) behavior: read everything, exactly as before."""
+    declare(monkeypatch, ['mesh', 'team/sbgisen'])
+    monkeypatch.delenv('KIOKU_MESH_SCOPE_ISOLATION', raising=False)
+    assert scope.obs_read_selectors() == (keyspace.OBS_READ_KEY_EXPR,)
+    assert scope.tomb_read_selectors() == (keyspace.TOMB_READ_KEY_EXPR,)
+
+
+def test_read_selectors_are_inside_declared_scopes_when_enforcing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """INVARIANT: every selector read under enforcement is covered by a declared scope.
+
+    Nothing outside this host's storage_scopes may reach the subscriber, the
+    rebuild scan, or the purge sweep — that is what read-path isolation means.
+    """
+    declare(monkeypatch, ['mesh', 'user/hwata', 'team/sbgisen'])
+    monkeypatch.setenv('KIOKU_MESH_SCOPE_ISOLATION', 'enforce')
+    declared = scope.resolve_storage_scopes()
+
+    selectors = scope.obs_read_selectors() + scope.tomb_read_selectors()
+    assert selectors  # never empty: an empty selector set would silently index nothing
+    for selector in selectors:
+        assert any(_includes(spec.key_expr, selector) for spec in declared), selector
+    # and every declared scope is actually covered — isolation must not drop a scope
+    for spec in declared:
+        assert spec.obs_read_key_expr in selectors
+        assert spec.tomb_read_key_expr in selectors
+
+
+def test_enforced_selectors_exclude_foreign_and_legacy_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    declare(monkeypatch, ['mesh', 'team/sbgisen'])
+    monkeypatch.setenv('KIOKU_MESH_SCOPE_ISOLATION', 'enforce')
+    selectors = scope.obs_read_selectors() + scope.tomb_read_selectors()
+    foreign = (
+        'mem/team/other/obs/claude/c/pc/s/' + 'a' * 32,
+        'mem/user/someone/obs/claude/c/pc/s/' + 'a' * 32,
+        'mem/obs/claude/c/pc/s/' + 'a' * 32,
+    )
+    for key in foreign:
+        assert not any(_includes(selector, key) for selector in selectors), key
+
+
+def test_read_isolation_rejects_invalid_declaration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken storage_scopes must not silently fall back to reading everything."""
+    declare(monkeypatch, ['user/hwata'])  # mesh missing
+    monkeypatch.setenv('KIOKU_MESH_SCOPE_ISOLATION', 'enforce')
+    with pytest.raises(scope.ScopeConfigError):
+        scope.obs_read_selectors()
+
+
+def test_subscriber_declares_one_subscription_per_selector(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The replication subscriber must go through the scope API, not the constants."""
+    declare(monkeypatch, ['mesh', 'team/sbgisen'])
+    monkeypatch.setenv('KIOKU_MESH_SCOPE_ISOLATION', 'enforce')
+
+    declared: list[str] = []
+
+    class _SubSession:
+        def declare_subscriber(self, key_expr: str, handler: object) -> object:  # noqa: ARG002
+            declared.append(key_expr)
+            return object()
+
+    from kioku_mesh.memory import replication
+
+    monkeypatch.setattr(
+        replication,
+        '_store',
+        lambda: type('S', (), {'get_index': staticmethod(lambda: type('I', (), {'disabled': False})())}),
+    )
+    subs = replication.start_index_subscriber(_SubSession())
+    assert len(subs) == len(declared)
+    assert sorted(declared) == sorted(scope.obs_read_selectors() + scope.tomb_read_selectors())
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 embedded router exception (mesh-only)
+# ---------------------------------------------------------------------------
+
+
+def embedded_session() -> FakeSession:
+    """Return a `mesh start` router: no admin space, no storages."""
+    return FakeSession(storages={}, serves_admin=False)
+
+
+def test_detects_embedded_router_by_absent_admin_space() -> None:
+    assert scope.is_storageless_embedded_router(embedded_session()) is True
+    # a real zenohd answers its admin base even when no storage is configured
+    assert scope.is_storageless_embedded_router(FakeSession(storages={})) is False
+
+
+def test_mesh_save_passes_through_embedded_router(monkeypatch: pytest.MonkeyPatch) -> None:
+    declare(monkeypatch, ['mesh'])
+    verdict = scope.evaluate_write_key(MESH_KEY, embedded_session())
+    assert verdict.ok
+    assert 'Tier 1 exception' in verdict.note
+
+
+def test_embedded_router_still_refuses_scoped_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exception is mesh-only: user/team must not leak through a storage-less router."""
+    declare(monkeypatch, ['mesh', 'team/other', 'user/hwata'])
+    for key in (TEAM_KEY, 'mem/user/hwata/obs/claude/cli/pc/sess/' + 'a' * 32):
+        verdict = scope.evaluate_write_key(key, embedded_session())
+        assert not verdict.ok, key
+
+
+def test_embedded_exception_needs_a_mesh_only_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host that also stores team data is not in the Tier 1 quickstart case."""
+    declare(monkeypatch, ['mesh', 'team/sbgisen'])
+    verdict = scope.evaluate_write_key(MESH_KEY, embedded_session())
+    assert not verdict.ok
+
+
+def test_zenohd_without_storages_is_still_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Absent storages alone must never open the gate — only a storage-less embedded router does."""
+    declare(monkeypatch, ['mesh'])
+    verdict = scope.evaluate_write_key(MESH_KEY, FakeSession(storages={}))
+    assert not verdict.ok
+    assert 'no exact mesh storage' in verdict.reason
+
+
+def test_exception_is_reported_to_the_user_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    declare(monkeypatch, ['mesh'])
+    scope.reset_exception_notice()
+    session = embedded_session()
+    with caplog.at_level('INFO', logger='kioku_mesh.core.scope'):
+        scope.preflight_write_key(MESH_KEY, session)
+        scope.preflight_write_key(MESH_KEY, session)
+    notices = [r for r in caplog.records if 'Tier 1 exception' in r.getMessage()]
+    assert len(notices) == 1
+
+
+def test_doctor_reports_the_embedded_router_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    declare(monkeypatch, ['mesh'])
+    result = doctor.check_storage_scopes(
+        live=[],
+        embedded_router=True,
+        config_path=tmp_path / 'zenohd.json5',
+        blocked_pending=[],
+    )
+    assert result.status is doctor.CheckStatus.WARN
+    assert 'not stored durably' in result.summary
+    assert result.details['embedded_router'] is True

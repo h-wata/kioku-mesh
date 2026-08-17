@@ -289,6 +289,32 @@ def with_retry(func: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
+def _iter_replies_over(
+    session: zenoh.Session,
+    key_exprs: tuple[str, ...] | list[str],
+    timeout: float = GET_TIMEOUT,
+) -> Iterator[Any]:
+    """Yield raw replies from one ``session.get()`` per selector, in order.
+
+    Scope isolation turns a single global selector into one selector per
+    declared scope (see ``core.scope.obs_read_selectors``), and every read
+    site wants the union. Same local-accumulation contract as
+    :func:`_iter_ok_replies`.
+    """
+    for key_expr in key_exprs:
+        yield from session.get(key_expr, timeout=timeout)
+
+
+def _iter_ok_replies_over(
+    session: zenoh.Session,
+    key_exprs: tuple[str, ...] | list[str],
+    timeout: float = GET_TIMEOUT,
+) -> Iterator[Any]:
+    """``_iter_ok_replies`` across several selectors (see :func:`_iter_replies_over`)."""
+    for key_expr in key_exprs:
+        yield from _iter_ok_replies(session, key_expr, timeout=timeout)
+
+
 def _iter_ok_replies(
     session: zenoh.Session,
     key_expr: str,
