@@ -93,7 +93,6 @@ def rendered_storages(scopes: tuple[scope.ScopeSpec, ...]) -> dict[str, dict[str
 def _local_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point at a local router so N6 does not fire in unrelated tests."""
     monkeypatch.setenv('ZENOH_CONNECT', 'tcp/localhost:7447')
-    monkeypatch.delenv(scope.SCOPE_ISOLATION_ENV, raising=False)
 
 
 def declare(monkeypatch: pytest.MonkeyPatch, entries: list[str] | None) -> None:
@@ -312,17 +311,15 @@ def test_local_router_endpoint_ok(endpoint: str, expected: bool) -> None:
     assert scope.local_router_endpoint_ok(endpoint) is expected
 
 
-def test_preflight_raises_only_when_enforcing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preflight_raises_with_no_flag_to_downgrade_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-closed is unconditional — no env var turns a refusal into a warning."""
     declare(monkeypatch, ['mesh'])
     session = FakeSession({'agent_mem': storage_body('mem/**', 'mem', 'agent_mem')})
-
-    # staged default: refused verdict returned, write still allowed through
-    assert scope.preflight_write_key(MESH_KEY, session).ok is False
-
-    monkeypatch.setenv(scope.SCOPE_ISOLATION_ENV, 'enforce')
+    monkeypatch.setenv('KIOKU_MESH_SCOPE_ISOLATION', 'off')  # read-path flag, must not weaken this
     with pytest.raises(scope.ScopePreflightError) as excinfo:
         scope.preflight_write_key(MESH_KEY, session)
     assert 'save refused' in str(excinfo.value)
+    assert scope.preflight_write_key.__module__ == 'kioku_mesh.core.scope'
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +346,6 @@ def _observation(visibility: str = 'team', scope_id: str = 'other') -> Any:
 def test_save_writes_nothing_when_preflight_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """fail-closed: no zenoh put, no SQLite upsert, no pending-puts row."""
     declare(monkeypatch, ['mesh'])
-    monkeypatch.setenv(scope.SCOPE_ISOLATION_ENV, 'enforce')
     session = FakeSession(rendered_storages(scope.resolve_storage_scopes()))
     monkeypatch.setattr(store, 'get_session', lambda: session)
 
@@ -366,7 +362,6 @@ def test_save_writes_nothing_when_preflight_fails(monkeypatch: pytest.MonkeyPatc
 
 def test_save_succeeds_when_storage_exists(monkeypatch: pytest.MonkeyPatch) -> None:
     declare(monkeypatch, ['mesh', 'team/other'])
-    monkeypatch.setenv(scope.SCOPE_ISOLATION_ENV, 'enforce')
     session = FakeSession(rendered_storages(scope.resolve_storage_scopes()))
     monkeypatch.setattr(store, 'get_session', lambda: session)
     monkeypatch.setattr(store, 'get_index', lambda: type('I', (), {'upsert': lambda _s, _o: None})())
@@ -387,7 +382,6 @@ def test_drain_keeps_entries_that_fail_preflight(monkeypatch: pytest.MonkeyPatch
     pending_queue._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
     assert pending_queue._count_pending_puts() == 1
 
-    monkeypatch.setenv(scope.SCOPE_ISOLATION_ENV, 'enforce')
     session = FakeSession(rendered_storages(scope.resolve_storage_scopes()))
     monkeypatch.setattr(store, 'get_session', lambda: session)
 
@@ -404,7 +398,6 @@ def test_drain_replays_entries_that_pass_preflight(monkeypatch: pytest.MonkeyPat
     obs = _observation()
     pending_queue._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
 
-    monkeypatch.setenv(scope.SCOPE_ISOLATION_ENV, 'enforce')
     session = FakeSession(rendered_storages(scope.resolve_storage_scopes()))
     monkeypatch.setattr(store, 'get_session', lambda: session)
     monkeypatch.setattr(store, 'get_index', lambda: type('I', (), {'upsert': lambda _s, _o: None})())

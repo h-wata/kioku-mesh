@@ -32,12 +32,18 @@ Two deliberate choices, both from the design review (worker3_design_review_404):
   so a long-lived MCP process notices a config edit, a renderer apply, or
   a zenohd restart immediately. At 0.1 ms there is nothing to cache.
 
-Enforcement is staged behind ``KIOKU_MESH_SCOPE_ISOLATION`` (default
-``off``, ADR-0019 Phase E): the preflight always runs and logs, but only
-rejects when the flag is ``enforce``. Without the staging every existing
-install — whose zenohd still has the single broad ``agent_mem``
-(``mem/**``) storage — would fail every save the moment this lands, before
-the storage cutover (task 3) has had a chance to run.
+The preflight is unconditional: there is no flag that downgrades a refusal
+to a warning, because a warned-through save is precisely the
+"reported as saved, never persisted" outcome this design exists to remove.
+``KIOKU_MESH_SCOPE_ISOLATION`` governs the *read* path selectors (subscriber
+/ rebuild / fallback / purge, task 2) and does not weaken this gate.
+
+Deployment consequence, stated plainly: a host whose zenohd still runs the
+single broad ``agent_mem`` (``mem/**``) storage has no exact scope storage,
+so every save is refused until the storage cutover (task 3) has run there.
+The same holds while zenohd is down — with no admin space there is no proof
+of durable storage, so saves are refused instead of being queued (task 6
+announces this as a breaking change).
 """
 
 from __future__ import annotations
@@ -52,8 +58,6 @@ from .config import get_storage_scopes
 from .keyspace import validate_scope_slug
 
 log = logging.getLogger(__name__)
-
-SCOPE_ISOLATION_ENV = 'KIOKU_MESH_SCOPE_ISOLATION'
 
 # Self-scoped admin get: cheap and independent of remote peer liveness (N1).
 ADMIN_STORAGES_SUFFIX = 'router/status/plugins/storage_manager/storages/**'
@@ -216,11 +220,6 @@ def scope_from_key(key_expr: str) -> ScopeSpec | None:
     except ScopeConfigError:
         return None
     return None
-
-
-def enforcement_enabled() -> bool:
-    """Return True when ``KIOKU_MESH_SCOPE_ISOLATION=enforce`` (default: off)."""
-    return os.environ.get(SCOPE_ISOLATION_ENV, '').strip().lower() == 'enforce'
 
 
 # -- live storage inspection (Zenoh admin space) -------------------------------
@@ -464,21 +463,15 @@ def _verdict_against_live(key_expr: str, scope: ScopeSpec, live: list[LiveStorag
 
 
 def preflight_write_key(key_expr: str, session: Any | None) -> PreflightVerdict:
-    """Gate a write on live storage coverage; raise when enforcing.
+    """Gate a write on live storage coverage; raise on any refusal.
 
     Called before ``session.put()``, the SQLite upsert, and the pending-puts
     enqueue, so a refused save leaves no trace anywhere — that is the point
     of fail-closed: never show a save as accepted when the mesh has nowhere
-    to keep it.
-
-    With ``KIOKU_MESH_SCOPE_ISOLATION`` unset (the staged default) a failed
-    verdict is logged and the write proceeds, so hosts that have not run the
-    storage cutover yet keep working.
+    to keep it. Unconditional by design (v3 B2): a WARN here would be exactly
+    the "looks saved, is not persisted" failure the design exists to remove.
     """
     verdict = evaluate_write_key(key_expr, session)
-    if verdict.ok:
-        return verdict
-    if enforcement_enabled():
+    if not verdict.ok:
         raise ScopePreflightError(verdict.message)
-    log.warning('%s (allowed: %s is not "enforce")', verdict.message, SCOPE_ISOLATION_ENV)
     return verdict
