@@ -35,10 +35,10 @@ import zenoh
 
 from ..core.keyspace import is_legacy_key
 from ..core.keyspace import obs_id_from_key
-from ..core.keyspace import OBS_READ_KEY_EXPR
-from ..core.keyspace import TOMB_READ_KEY_EXPR
 from ..core.models import Observation
 from ..core.models import Tombstone
+from ..core.scope import obs_read_selectors
+from ..core.scope import tomb_read_selectors
 
 log = logging.getLogger(__name__)
 
@@ -254,6 +254,8 @@ def start_index_subscriber(session: zenoh.Session) -> list:
         except Exception as e:  # noqa: BLE001
             log.warning('index subscriber on_tomb error: %s', e)
 
-    sub_obs = session.declare_subscriber(OBS_READ_KEY_EXPR, on_obs)
-    sub_tomb = session.declare_subscriber(TOMB_READ_KEY_EXPR, on_tomb)
-    return [sub_obs, sub_tomb]
+    # One subscription per selector: a single global selector under isolation
+    # would keep delivering other hosts' scopes into this index.
+    subs = [session.declare_subscriber(selector, on_obs) for selector in obs_read_selectors()]
+    subs += [session.declare_subscriber(selector, on_tomb) for selector in tomb_read_selectors()]
+    return subs

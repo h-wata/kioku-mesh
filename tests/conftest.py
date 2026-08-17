@@ -42,6 +42,44 @@ from kioku_mesh.backend import reset_backend
 from .wait_helpers import storage_missing
 from .wait_helpers import wait_until
 
+# Modules that must see the unpatched write gate. Everything that is itself a
+# write sink belongs here; the bypass is only for tests whose subject is
+# something else and whose stub sessions predate scope storages.
+_REAL_SCOPE_GATE_MODULES = ('test_scope', 'test_visibility_migration')
+
+
+@pytest.fixture(autouse=True)
+def scope_storages_rendered(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend this test host completed the scope storage cutover (design v3 task 1).
+
+    The save preflight refuses any write whose scope has no exact live
+    storage in the running zenohd. The test routers (and the many stub
+    sessions in this suite) predate scope storages and serve a single broad
+    ``mem/**`` — which does cover every key, legacy ones included — so
+    without this fixture every write test would fail on the gate instead of
+    on what it actually tests.
+
+    The gate itself — declaration parsing, live-storage matching, and the
+    fail-closed store / drain behavior — is exercised for real in
+    ``tests/test_scope.py``, which is exempted here so it sees the unpatched
+    functions.
+
+    ``tests/test_visibility_migration.py`` is exempted too: migration is a
+    write sink that DELETEs the legacy source right after its target PUT, so
+    it has to be tested against the real gate — this bypass is what hid the
+    missing migration gate (PR #316 review, B1). Those tests build
+    gate-passing sessions of their own.
+    """
+    if request.module.__name__.rsplit('.', 1)[-1] in _REAL_SCOPE_GATE_MODULES:
+        return
+    from kioku_mesh.core import scope as scope_mod
+
+    def _every_key_has_storage(key_expr: str, session: object) -> scope_mod.PreflightVerdict:
+        spec = scope_mod.scope_from_key(key_expr)
+        return scope_mod.PreflightVerdict(True, key_expr, spec.label if spec else '')
+
+    monkeypatch.setattr(scope_mod, 'evaluate_write_key', _every_key_has_storage)
+
 
 @pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
@@ -116,10 +154,25 @@ def _base_storage() -> dict:
     }
 
 
+def _mesh_scope_storage() -> dict:
+    """Target-state storage for the mesh scope (design v3 task 1).
+
+    ``mem/mesh/**`` with ``strip_prefix: mem`` and no broad storage beside
+    it — what a host looks like after the storage cutover, which is what the
+    save preflight requires.
+    """
+    return {
+        'key_expr': 'mem/mesh/**',
+        'strip_prefix': 'mem',
+        'volume': 'memory',
+    }
+
+
 def _router_config(
     port: int,
     peer_ports: list[int] | None = None,
     replication: dict | None = None,
+    storages: dict | None = None,
 ) -> dict:
     """Build a zenohd JSON5 config dict. ``peer_ports`` drives the ``connect`` list."""
     storage = _base_storage()
@@ -134,7 +187,7 @@ def _router_config(
         'plugins': {
             'storage_manager': {
                 'volumes': {'memory': {}},
-                'storages': {'agent_mem': storage},
+                'storages': storages if storages is not None else {'agent_mem': storage},
             },
         },
     }
@@ -213,11 +266,12 @@ def _spawn_router(
     tag: str,
     peer_ports: list[int] | None = None,
     replication: dict | None = None,
+    storages: dict | None = None,
 ) -> _RouterHandle:
     port = _free_port()
     cfg_path = workdir / f'zenohd_{tag}_{port}.json5'
     log_path = workdir / f'zenohd_{tag}_{port}.log'
-    cfg_path.write_text(json.dumps(_router_config(port, peer_ports, replication), indent=2))
+    cfg_path.write_text(json.dumps(_router_config(port, peer_ports, replication, storages), indent=2))
     handle = _RouterHandle(
         port=port,
         proc=None,
@@ -233,6 +287,35 @@ def _spawn_router(
 @pytest.fixture(scope='session')
 def _zenohd_tmp_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp('zenohd')
+
+
+@pytest.fixture(scope='session')
+def _mesh_scope_router(_zenohd_tmp_root: Path) -> Iterator[_RouterHandle]:
+    """Router configured the way a host looks *after* the scope storage cutover."""
+    if not _zenohd_available():
+        pytest.skip('zenohd binary not found on PATH')
+    handle = _spawn_router(_zenohd_tmp_root, 'meshscope', storages={'mesh_store': _mesh_scope_storage()})
+    try:
+        yield handle
+    finally:
+        handle.stop()
+
+
+@pytest.fixture
+def mesh_scope_zenohd(_mesh_scope_router: _RouterHandle, monkeypatch: pytest.MonkeyPatch) -> Iterator[_RouterHandle]:
+    """Point this test (and any subprocess it spawns) at the post-cutover router.
+
+    Needed by tests whose writes go through a *child process*, where the
+    in-process preflight stub of ``scope_storages_rendered`` does not reach:
+    the child runs the real gate, so it needs a router that really serves an
+    exact ``mem/mesh/**`` storage.
+    """
+    monkeypatch.setenv('ZENOH_CONNECT', _mesh_scope_router.endpoint)
+    store._reset_session()
+    try:
+        yield _mesh_scope_router
+    finally:
+        store._reset_session()
 
 
 @pytest.fixture(scope='session')

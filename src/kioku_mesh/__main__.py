@@ -12,6 +12,7 @@ from collections.abc import Iterator
 import dataclasses
 from datetime import datetime
 from datetime import timezone
+import difflib
 import json
 import logging
 import os
@@ -38,6 +39,13 @@ from .backend import reset_backend
 from .config import format_visibility
 from .config import resolve_write_visibility
 from .config import write_local_config
+from .core.scope import resolve_storage_scopes
+from .core.scope import ScopeConfigError
+from .core.storage_render import LEGACY_SOURCE_NAME
+from .core.storage_render import missing_scope_counts
+from .core.storage_render import render_storage_entries
+from .core.storage_render import replace_storages
+from .core.storage_render import StorageRenderError
 from .identity import get_pc_id
 from .identity import get_session_id
 from .identity import IdentitySource
@@ -45,6 +53,7 @@ from .identity import resolve_agent_family
 from .identity import resolve_client_id
 from .local_index import LocalIndex
 from .mcp_install import MCPClient
+from .memory.local_index import _resolve_db_path as local_index_db_path
 from .memory.metadata import derive_subject
 from .memory.metadata import derive_summary
 from .memory.metadata import is_missing
@@ -1236,6 +1245,13 @@ def _render_mesh_config(
     When ``tls`` is set, endpoints use the ``tls/`` scheme and a
     ``transport.link.tls`` mTLS block is emitted; the cert paths it references
     must already exist (the caller validates this).
+
+    Storages come from ``storage_scopes`` (one per declared scope), so a fresh
+    host starts in the post-split shape the save preflight requires. Converting
+    an *existing* host is not this function's job: use
+    ``config render-storages --apply``, which keeps the rest of the config, and
+    follow the migration runbook — ``init --force`` rewrites the whole file and
+    does not move the data in the old ``agent_mem`` directory.
     """
     if tls:
         listen_endpoints = _to_tls_endpoints(listen_endpoints)
@@ -1246,6 +1262,7 @@ def _render_mesh_config(
         connect_block = f'    endpoints: [\n      {connect_lines},\n    ],'
     else:
         connect_block = '    endpoints: [],'
+    storage_entries = render_storage_entries(resolve_storage_scopes())
     role_note = 'hub: spokes dial in' if mode == 'hub' else 'spoke: dials the hub'
     tls_note = ' (mTLS enabled)' if tls else ''
     tls_block = _render_tls_block() if tls else ''
@@ -1277,27 +1294,103 @@ def _render_mesh_config(
         '        rocksdb: {},\n'
         '      },\n'
         '      storages: {\n'
-        '        agent_mem: {\n'
-        '          key_expr: "mem/**",\n'
-        '          strip_prefix: "mem",\n'
-        '          replication: {\n'
-        '            interval: 10.0,\n'
-        '            sub_intervals: 5,\n'
-        '            hot: 6,\n'
-        '            warm: 30,\n'
-        '            propagation_delay: 250,\n'
-        '          },\n'
-        '          volume: {\n'
-        '            id: "rocksdb",\n'
-        '            dir: "agent_mem",\n'
-        '            create_db: true,\n'
-        '          },\n'
-        '        },\n'
+        f'{storage_entries}\n'
         '      },\n'
         '    },\n'
         '  },\n'
         '}\n'
     )
+
+
+_HALF_APPLIED_WARNING = (
+    'Apply this on every peer within one maintenance window. Storages with different key_expr\n'
+    'form different replica groups, so a host left on the old broad agent_mem config cannot\n'
+    'align with the new mem/mesh/** group: it keeps receiving live publications, but whatever\n'
+    'it misses while it lags is never backfilled. Do not resume normal operation half-applied.'
+)
+
+
+def _cmd_config_render_storages(args: argparse.Namespace) -> int:
+    """Rewrite only the storages block of an existing zenohd config.
+
+    Everything else in the file (listen / connect / transport TLS / anything
+    hand-added) is preserved, so the storage cutover does not depend on
+    ``init --force`` regenerating the config or on hand-editing it.
+
+    See :data:`_HALF_APPLIED_WARNING`: this command converts one host, and a
+    partially converted mesh does not repair itself.
+    """
+    config_path = Path(args.out) if args.out else _default_init_path()
+    if not config_path.exists():
+        print(f'error: {config_path} does not exist. Run `kioku-mesh init` first.', file=sys.stderr)
+        return 1
+    try:
+        scopes = resolve_storage_scopes()
+    except ScopeConfigError as e:
+        print(f'error: {e}', file=sys.stderr)
+        return 2
+
+    # ``_resolve_db_path`` is private but is the one resolver that honors
+    # KIOKU_MESH_INDEX_DB; opening a LocalIndex just to read a path would create
+    # the database as a side effect.
+    db_path = args.db or local_index_db_path()
+    missing = missing_scope_counts(scopes, db_path)
+    if missing:
+        print(
+            'warning: this index holds observations in scopes that no rendered storage would keep:',
+            file=sys.stderr,
+        )
+        for label, count in sorted(missing.items()):
+            print(f'  {label}: {count} observation(s)', file=sys.stderr)
+        print(
+            f'  add them to storage_scopes in the host config, or re-run with '
+            f'--acknowledge-missing-scopes to render {[s.label for s in scopes]} anyway.',
+            file=sys.stderr,
+        )
+
+    current = config_path.read_text(encoding='utf-8')
+    try:
+        rendered = replace_storages(current, render_storage_entries(scopes, include_legacy_source=args.transitional))
+    except StorageRenderError as e:
+        print(f'error: {config_path}: {e}', file=sys.stderr)
+        return 1
+
+    if args.dry_run or not args.apply:
+        print(f'# {config_path} (dry-run, nothing written)')
+        print('# storages for: ' + ', '.join(s.label for s in scopes))
+        if args.transitional:
+            print(f'# transitional: read-only {LEGACY_SOURCE_NAME} kept as the mesh re-PUT source')
+        print(
+            ''.join(
+                difflib.unified_diff(
+                    current.splitlines(keepends=True),
+                    rendered.splitlines(keepends=True),
+                    fromfile=str(config_path),
+                    tofile=f'{config_path} (rendered)',
+                )
+            )
+            or '# no change'
+        )
+        for line in _HALF_APPLIED_WARNING.splitlines():
+            print(f'# {line}')
+        return 0
+
+    if missing and not args.acknowledge_missing_scopes:
+        print(
+            'error: refusing to apply while observations exist in scopes with no storage '
+            '(see the warning above). Pass --acknowledge-missing-scopes to proceed anyway.',
+            file=sys.stderr,
+        )
+        return 1
+    if rendered == current:
+        print(f'{config_path} already matches storage_scopes (unchanged)')
+        return 0
+    config_path.write_text(rendered, encoding='utf-8')
+    print(f'wrote {config_path}')
+    print('storages: ' + ', '.join(s.storage_name for s in scopes))
+    print('next: restart zenohd, then `kioku-mesh doctor`')
+    print(_HALF_APPLIED_WARNING)
+    return 0
 
 
 def _resolve_listen_endpoints(args: argparse.Namespace, detected: list[str]) -> list[str]:
@@ -2179,17 +2272,26 @@ def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
             )
             plan.items.extend(extra_items)
 
-    result = execute_migration(
-        plan,
-        session=session,
-        dry_run=args.dry_run,
-        yes=args.yes,
-        batch_size=batch_size,
-        checkpoint_path=checkpoint_path,
-        backup_dir=backup_dir,
-        now_iso=now_iso,
-        params_hash=current_params_hash,
-    )
+    from .core.scope import ScopePreflightError
+
+    try:
+        result = execute_migration(
+            plan,
+            session=session,
+            dry_run=args.dry_run,
+            yes=args.yes,
+            batch_size=batch_size,
+            checkpoint_path=checkpoint_path,
+            backup_dir=backup_dir,
+            now_iso=now_iso,
+            params_hash=current_params_hash,
+        )
+    except ScopePreflightError as e:
+        # The gate runs before the batch's first PUT, so nothing was copied and
+        # no legacy source key was deleted.
+        print(f'error: {e}', file=sys.stderr)
+        print(f'Nothing was migrated; resume with --resume {checkpoint_path} once fixed.', file=sys.stderr)
+        return 1
 
     if not args.dry_run:
         print(
@@ -2917,6 +3019,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help='Print download progress',
     )
     p_zenohd_install.set_defaults(func=_cmd_zenohd_install)
+
+    p_config = sub.add_parser('config', help='Inspect and update generated configuration')
+    p_config_sub = p_config.add_subparsers(dest='config_command', required=True)
+    p_config_render = p_config_sub.add_parser(
+        'render-storages',
+        help='Rewrite the zenohd storages block from storage_scopes, keeping the rest of the config',
+    )
+    p_config_render.add_argument('--dry-run', dest='dry_run', action='store_true', help='print the diff only')
+    p_config_render.add_argument('--apply', action='store_true', help='write the rendered config')
+    p_config_render.add_argument(
+        '--out',
+        default=None,
+        metavar='PATH',
+        help='config to rewrite (default: ~/.config/kioku-mesh/zenohd.json5)',
+    )
+    p_config_render.add_argument(
+        '--db',
+        default='',
+        metavar='PATH',
+        help='SQLite index scanned for scopes with no storage (default: the local index)',
+    )
+    p_config_render.add_argument(
+        '--transitional',
+        action='store_true',
+        help='also keep the pre-split agent_mem storage as the read-only mesh re-PUT source',
+    )
+    p_config_render.add_argument(
+        '--acknowledge-missing-scopes',
+        dest='acknowledge_missing_scopes',
+        action='store_true',
+        help='apply even though stored observations fall outside storage_scopes',
+    )
+    p_config_render.set_defaults(func=_cmd_config_render_storages)
 
     p_migrate = sub.add_parser(
         'migrate-visibility',

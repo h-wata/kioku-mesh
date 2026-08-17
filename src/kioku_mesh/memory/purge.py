@@ -44,11 +44,13 @@ from ..core.keyspace import broadcast_tomb_selector
 from ..core.keyspace import mirror_to_obs_key
 from ..core.keyspace import mirror_to_tomb_key
 from ..core.keyspace import obs_id_from_key
-from ..core.keyspace import OBS_READ_KEY_EXPR
-from ..core.keyspace import TOMB_READ_KEY_EXPR
 from ..core.models import Observation
 from ..core.models import Tombstone
+from ..core.scope import obs_read_selectors
+from ..core.scope import tomb_read_selectors
 from ..core.transport import _iter_ok_replies
+from ..core.transport import _iter_ok_replies_over
+from ..core.transport import _iter_replies_over
 from ..core.transport import _RETRYABLE_EXC
 from ..core.transport import with_retry
 from .local_index import LocalIndex
@@ -114,7 +116,7 @@ def _list_tombstones() -> list[tuple[str, Tombstone]]:
     """
     session = _store().get_session()
     out: list[tuple[str, Tombstone]] = []
-    for ok in _iter_ok_replies(session, TOMB_READ_KEY_EXPR):
+    for ok in _iter_ok_replies_over(session, tomb_read_selectors()):
         key = str(ok.key_expr)
         # Canonical gate (ADR-0019 Phase B): the broadened selector can match
         # off-shape keys; never feed those into the delete paths.
@@ -246,7 +248,7 @@ def _scan_obs_by_pc_id(
     """
     session = _store().get_session()
     out: list[tuple[str, str, str]] = []
-    for ok in _iter_ok_replies(session, OBS_READ_KEY_EXPR, timeout=30.0):
+    for ok in _iter_ok_replies_over(session, obs_read_selectors(), timeout=30.0):
         key_id = obs_id_from_key(str(ok.key_expr))
         if key_id is None:
             continue
@@ -708,7 +710,7 @@ def gc_expired_shadows(
         session = store.get_session()
         # ADR-0019 Phase A: re-verify against legacy + tiered namespaces so a
         # row that lives under mem/{mesh,user,team}/... is not wrongly purged.
-        for reply in session.get(OBS_READ_KEY_EXPR, timeout=30.0):  # type: ignore[attr-defined]
+        for reply in _iter_replies_over(session, obs_read_selectors(), timeout=30.0):
             if not reply.ok:
                 continue
             # Only a payload under a canonical key whose leaf id matches the

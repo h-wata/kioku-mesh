@@ -760,6 +760,175 @@ def check_tool_call_fragments(observations: list[Any] | None = None) -> CheckRes
 # ADR-0019 Phase D: legacy namespace preflight check.
 
 
+def _config_file_replication(config_path: Path) -> dict[str, Any]:
+    """Return ``{storage_name: replication_block}`` from the rendered zenohd config.
+
+    N2: the admin space exposes ``key_expr`` / ``strip_prefix`` / ``volume``
+    and nothing else — the ``replication`` block is simply not there
+    (measured against a production router). So replication settings are read
+    back from the file the renderer wrote; agreement between *peers* can only
+    be established by the two-node harness (design v3 task 4), never by this
+    check. Parsed with zenoh's own JSON5 reader so comments and trailing
+    commas in the generated config are handled.
+    """
+    try:
+        import zenoh as _zenoh  # noqa: PLC0415
+
+        cfg = _zenoh.Config.from_file(str(config_path))
+        raw = cfg.get_json('plugins/storage_manager/storages')
+        storages = json.loads(raw)
+    except Exception:  # noqa: BLE001 — an unreadable config is reported by check_config_file
+        return {}
+    if not isinstance(storages, dict):
+        return {}
+    return {name: body.get('replication') for name, body in storages.items() if isinstance(body, dict)}
+
+
+def check_storage_scopes(
+    *,
+    live: list[Any] | None = None,
+    config_path: Path | None = None,
+    endpoint: str | None = None,
+    blocked_pending: list[tuple[str, str]] | None = None,
+    embedded_router: bool | None = None,
+) -> CheckResult:
+    """Compare declared ``storage_scopes`` with this host's live zenohd storages.
+
+    FAIL means writes have (or will have) nowhere durable to land: a scope
+    declared but never rendered, a rendered storage never restarted into, a
+    wrong dir / strip prefix, or the pre-split broad ``agent_mem`` still
+    overlapping a scope. Peer storages are shown for diagnosis only —
+    durability is judged against self (design v3, B2).
+    """
+    from .core import scope as scope_mod  # noqa: PLC0415
+
+    details: dict[str, Any] = {}
+    try:
+        declared = scope_mod.resolve_storage_scopes()
+    except scope_mod.ScopeConfigError as e:
+        return CheckResult(
+            name='storage_scopes',
+            status=CheckStatus.FAIL,
+            summary=f'storage_scopes is invalid: {e}',
+            hint='Fix storage_scopes in ~/.config/kioku-mesh/config.yaml (entries: mesh, user/<id>, team/<id>).',
+        )
+    details['declared'] = [s.label for s in declared]
+
+    local_ok = scope_mod.local_router_endpoint_ok(endpoint)
+    details['local_router_endpoint'] = local_ok
+
+    if live is None:
+        try:
+            from .core.transport import get_session  # noqa: PLC0415
+
+            session = get_session()
+            if embedded_router is None:
+                embedded_router = scope_mod.is_storageless_embedded_router(session)
+            live = scope_mod.fetch_self_storages(session)
+        except Exception as e:  # noqa: BLE001
+            return CheckResult(
+                name='storage_scopes',
+                status=CheckStatus.FAIL,
+                summary=f'cannot read live storages from zenohd ({type(e).__name__})',
+                hint='Start zenohd (or fix ZENOH_CONNECT), then re-run `kioku-mesh doctor`.',
+                details={**details, 'error': str(e)},
+            )
+    details['live'] = [
+        {'name': s.name, 'key_expr': s.key_expr, 'strip_prefix': s.strip_prefix, 'volume_dir': s.volume_dir}
+        for s in live
+    ]
+    details['embedded_router'] = bool(embedded_router)
+
+    # Tier 1 (`kioku-mesh mesh start`): that router cannot hold a storage at
+    # all, so a mesh-only host is allowed to save through it. Say so plainly
+    # instead of reporting a storage set it can never have. Only for a local
+    # endpoint — a remote embedded router is not this host's quickstart, and
+    # the write gate refuses it (N6), so doctor must not advertise it as
+    # accepted either.
+    if embedded_router and local_ok and [s.label for s in declared] == ['mesh']:
+        return CheckResult(
+            name='storage_scopes',
+            status=CheckStatus.WARN,
+            summary='Tier 1 embedded router (mesh start): mesh-only saves are accepted but not stored durably',
+            hint=(
+                'Saves reach connected peers live and this process indexes them, but no storage keeps them. '
+                'Run zenohd (`kioku-mesh init` + start) for durable storage. '
+                'user/team scopes stay refused on this router.'
+            ),
+            details=details,
+        )
+
+    problems: list[str] = []
+    for spec in declared:
+        match = [s for s in live if s.key_expr == spec.key_expr and s.strip_prefix == spec.strip_prefix]
+        if not match:
+            problems.append(
+                f'{spec.label}: no live storage with key_expr={spec.key_expr} strip_prefix={spec.strip_prefix}'
+            )
+            continue
+        if len(match) > 1:
+            problems.append(f'{spec.label}: ambiguous — {len(match)} live storages claim it')
+        wrong_dir = [s for s in match if s.volume_dir != spec.volume_dir]
+        if wrong_dir:
+            problems.append(f'{spec.label}: volume dir is {wrong_dir[0].volume_dir!r}, expected {spec.volume_dir!r}')
+
+    declared_key_exprs = {s.key_expr for s in declared}
+    overlapping = [
+        s
+        for s in live
+        if s.key_expr not in declared_key_exprs and any(s.covers(f'{spec.key_prefix}/obs/probe') for spec in declared)
+    ]
+    if overlapping:
+        problems.append(
+            'broad/overlapping storage still present: ' + ', '.join(f'{s.name}({s.key_expr})' for s in overlapping)
+        )
+
+    cfg = config_path if config_path is not None else _default_config_path()
+    details['replication_from_config'] = _config_file_replication(cfg)
+    details['replication_source'] = (
+        f'{cfg} — the Zenoh admin space does not expose replication settings, so peer agreement '
+        'is verified by the two-node harness, not by doctor'
+    )
+
+    if blocked_pending is None:
+        try:
+            from .memory.pending_queue import scope_blocked_pending_puts  # noqa: PLC0415
+
+            blocked_pending = scope_blocked_pending_puts()
+        except Exception:  # noqa: BLE001
+            blocked_pending = []
+    if blocked_pending:
+        details['scope_blocked_pending_puts'] = [{'key_expr': k, 'reason': r} for k, r in blocked_pending]
+        problems.append(f'{len(blocked_pending)} queued put(s) are blocked by the scope preflight and stay queued')
+
+    if problems:
+        details['problems'] = problems
+        return CheckResult(
+            name='storage_scopes',
+            status=CheckStatus.FAIL,
+            summary=f'declared storage_scopes do not match the live zenohd ({len(problems)} problem(s))',
+            hint=(
+                'Run `kioku-mesh config render-storages --apply` and restart zenohd; '
+                'apply the same change on every host sharing the scope.'
+            ),
+            details=details,
+        )
+    if not local_ok:
+        return CheckResult(
+            name='storage_scopes',
+            status=CheckStatus.WARN,
+            summary='storage scopes match, but ZENOH_CONNECT is not a local router so "self" may be another host',
+            hint='Start the local zenohd and point ZENOH_CONNECT at it before trusting this check.',
+            details=details,
+        )
+    return CheckResult(
+        name='storage_scopes',
+        status=CheckStatus.PASS,
+        summary=f'live storages match declared storage_scopes ({", ".join(s.label for s in declared)})',
+        details=details,
+    )
+
+
 def check_legacy_namespace(
     session: Any | None = None,
     *,
@@ -1214,6 +1383,7 @@ _CHECK_ORDER: tuple[str, ...] = (
     'check_conflicting_latest',
     'check_tool_call_fragments',
     'check_legacy_namespace',
+    'check_storage_scopes',
     'check_identity',
 )
 

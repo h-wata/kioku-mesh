@@ -100,7 +100,7 @@ def test_subprocess_list_tools() -> None:
     MESH_MEM_MCP is None,
     reason='kioku-mesh-mcp console script not installed',
 )
-def test_subprocess_save_roundtrip_via_live_router(single_zenohd: Any) -> None:  # noqa: ARG001
+def test_subprocess_save_roundtrip_via_live_router(mesh_scope_zenohd: Any) -> None:  # noqa: ARG001
     """End-to-end smoke: subprocess saves, the parent process reads it back from the router."""
 
     async def _go() -> str:
@@ -836,7 +836,7 @@ def test_cli_bulk_delete_emits_local_index_hint(
     MESH_MEM_MCP is None,
     reason='kioku-mesh-mcp console script not installed',
 )
-def test_save_lint_generic_noise_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+def test_save_lint_generic_noise_via_subprocess(mesh_scope_zenohd: Any) -> None:  # noqa: ARG001
     """Subprocess MCP: GENERIC_NOISE warning appears in save_observation response for 'done'."""
     import json as _json
 
@@ -866,7 +866,7 @@ def test_save_lint_generic_noise_via_subprocess(single_zenohd: Any) -> None:  # 
     MESH_MEM_MCP is None,
     reason='kioku-mesh-mcp console script not installed',
 )
-def test_save_lint_done_content_save_succeeds_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+def test_save_lint_done_content_save_succeeds_via_subprocess(mesh_scope_zenohd: Any) -> None:  # noqa: ARG001
     """Subprocess MCP: 'done' content is still persisted despite GENERIC_NOISE warning."""
     import json as _json
 
@@ -900,7 +900,7 @@ def test_save_lint_done_content_save_succeeds_via_subprocess(single_zenohd: Any)
     MESH_MEM_MCP is None,
     reason='kioku-mesh-mcp console script not installed',
 )
-def test_save_lint_secret_pattern_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+def test_save_lint_secret_pattern_via_subprocess(mesh_scope_zenohd: Any) -> None:  # noqa: ARG001
     """Subprocess MCP: SECRET_PATTERN warning is emitted when content contains API key pattern."""
     import json as _json
 
@@ -930,7 +930,7 @@ def test_save_lint_secret_pattern_via_subprocess(single_zenohd: Any) -> None:  #
     MESH_MEM_MCP is None,
     reason='kioku-mesh-mcp console script not installed',
 )
-def test_save_lint_no_warning_normal_save_via_subprocess(single_zenohd: Any) -> None:  # noqa: ARG001
+def test_save_lint_no_warning_normal_save_via_subprocess(mesh_scope_zenohd: Any) -> None:  # noqa: ARG001
     """Subprocess MCP: normal, detailed content produces an empty warnings list."""
     import json as _json
 

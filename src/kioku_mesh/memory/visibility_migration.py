@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+from ..core import scope as scope_mod
 from ..core.config import get_team_id
 from ..core.config import get_user_id
 from ..core.keyspace import obs_id_from_key
@@ -476,6 +477,41 @@ def reconstruct_items_from_checkpoint(
     return items
 
 
+def preflight_migration_target(key_expr: str, session: Any) -> None:
+    """Gate one migration target key on live, exact target-scope storage.
+
+    Same contract as the normal save preflight
+    (:func:`core.scope.evaluate_write_key`): the target scope must be declared
+    in ``storage_scopes`` and served right now by a live storage whose
+    ``key_expr`` and ``strip_prefix`` match it exactly, with no overlapping
+    broad storage — and, via that function, with ``ZENOH_CONNECT`` pointing at
+    a local router (N6).
+
+    One deliberate difference from a normal save: the Tier 1 embedded-router
+    exception (``verdict.note``) is **refused** here. A normal save may
+    knowingly be accepted as non-durable; this migration DELETEs the legacy
+    source key right after the target PUT, so accepting a target with no
+    storage behind it would destroy the only copy.
+
+    Ordering also differs from a normal save, hence a separate gate rather
+    than :func:`core.scope.preflight_write_key`: the check runs once per
+    distinct target key at the *top of the batch*, before the PUT / verify /
+    DELETE / repair-PUT phases, so a refusal leaves the source keys, the
+    target keys and the checkpoint untouched — including on ``--resume``,
+    where the batch may consist only of pending repair PUTs.
+    """
+    verdict = scope_mod.evaluate_write_key(key_expr, session)
+    if not verdict.ok:
+        raise scope_mod.ScopePreflightError(f'migration refused: {verdict.reason} {verdict.hint}'.strip())
+    if verdict.note:
+        raise scope_mod.ScopePreflightError(
+            f'migration refused: {key_expr} would only be accepted by the Tier 1 embedded-router '
+            'exception, which keeps no durable copy while migration deletes the legacy source. '
+            'Start zenohd with the rendered scope storages (`kioku-mesh config render-storages '
+            '--apply`) before migrating.'
+        )
+
+
 def _execute_batch(
     batch: list[MigrationItem],
     chk: MigrationCheckpoint,
@@ -488,7 +524,16 @@ def _execute_batch(
 
     Each phase is guarded by the checkpoint state so a crash mid-batch
     can be resumed without repeating completed steps.
+
+    Raises ``ScopePreflightError`` before touching anything when a target key
+    has no live exact scope storage (see :func:`preflight_migration_target`).
     """
+    # Write gate for every target key in this batch — target PUT and, on
+    # resume, repair PUT. Refusing here means no PUT, no DELETE: the legacy
+    # source keys stay intact.
+    for target_key in dict.fromkeys(item.new_key for item in batch):
+        preflight_migration_target(target_key, session)
+
     # Phase: PUT target keys
     for item in batch:
         item_key = f'{item.observation_id}:{item.kind}'

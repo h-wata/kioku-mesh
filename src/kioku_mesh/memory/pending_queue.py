@@ -26,6 +26,9 @@ from types import ModuleType
 from ..core.identity import state_dir
 from ..core.models import Observation
 from ..core.models import Tombstone
+from ..core.scope import evaluate_write_key
+from ..core.scope import preflight_write_key
+from ..core.scope import ScopePreflightError
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +165,35 @@ def _count_pending_puts() -> int:
         conn.close()
 
 
+def scope_blocked_pending_puts(limit: int = 100) -> list[tuple[str, str]]:
+    """Return queued rows the scope preflight refuses, as ``(key_expr, reason)``.
+
+    Drain keeps such rows instead of dropping them (N4), so doctor needs a
+    way to surface them — otherwise they sit in the queue invisibly.
+    """
+    try:
+        conn = _open_pending_puts_db()
+    except (OSError, sqlite3.Error):
+        return []
+    try:
+        rows = conn.execute('SELECT key_expr FROM pending_puts ORDER BY queued_at ASC LIMIT ?', (limit,)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    store = _store()
+    try:
+        session = store.get_session()
+    except store._RETRYABLE_EXC:  # noqa: SLF001 — store collaborator, see _store()
+        session = None
+    blocked: list[tuple[str, str]] = []
+    for (key_expr,) in rows:
+        verdict = evaluate_write_key(key_expr, session)
+        if not verdict.ok:
+            blocked.append((key_expr, verdict.reason))
+    return blocked
+
+
 def _deserialize_pending_put(kind: str, observation_id: str, payload_json: str) -> Observation | Tombstone:
     """Validate and deserialize a queued row before replaying it to the mesh."""
     if kind == 'observation':
@@ -234,11 +266,19 @@ def _drain_pending_puts_once_locked(limit: int | None = None) -> int:
     for key_expr, kind, observation_id, payload_json in rows:
         try:
             replayed = _deserialize_pending_put(kind, observation_id, payload_json)
+            preflight_write_key(key_expr, session)
             session.put(key_expr, payload_json)
             store._record_put_result('ok')  # noqa: SLF001 — store collaborator, see _store()
             _apply_replayed_put_to_index(replayed)
             _delete_pending_put(key_expr)
             drained += 1
+        except ScopePreflightError as e:
+            # N4: the queue is the fourth write sink. A row whose scope left
+            # storage_scopes (or whose storage was never rendered) must stay
+            # queued — replaying it would publish into a mesh with no storage
+            # to hold it and then drop the only record that it is pending.
+            log.warning('pending_puts entry %s blocked by scope preflight, keeping it queued: %s', key_expr, e)
+            continue
         except store._RETRYABLE_EXC as e:  # noqa: SLF001 — store collaborator, see _store()
             store._record_put_result(f'error: {type(e).__name__}')  # noqa: SLF001 — store collaborator, see _store()
             log.warning('pending_puts drain stopped at %s: %s', key_expr, e)
