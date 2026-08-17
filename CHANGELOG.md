@@ -16,6 +16,15 @@ ADR-0030.
 
 ## [1.2.0] - 2026-08-17
 
+> **このリリースは後方非互換の変更を含む (minor bump だが安全な更新ではない)。**
+> `search_memory` と `recall_context` は、これまで無制限に返していた結果を
+> 20,000 UTF-8 バイトで打ち切るようになった。件数や内容量が多い既存の呼び出しは、
+> これまでと違って一部の結果しか受け取れなくなる場合がある。
+> ADR-0029 の semver 契約ではこの変更は major bump に相当するが、単一運用者
+> 期間中の例外を定める ADR-0030 の条件（CHANGELOG 冒頭・release notes 最上部への
+> 明記、upgrade notes の提示）を満たしたうえでユーザー判断により minor とした。
+> 更新前に下記 "Upgrade notes for v1.2" を必ず確認すること。
+
 ### Added
 
 - `save_observation`: content / subject / summary に MCP tool-call の断片
@@ -60,10 +69,11 @@ ADR-0030.
   the
   cursor case was already caught by an existing `and`-mode test but not
   against `or`/`and_or`.
-- `search_memory` / `recall_context`: four more read-side project alias groups
-  (`squad`, `kachaka-api-for-openrmf`, `portable-scanner`, `rmf`), so the
-  spelling variants found in the store resolve to one logical project the same
-  way `mesh-mem` / `kioku-mesh` already did (#309).
+- `search_memory` / `recall_context`: three more read-side project aliases
+  (`/home/gisen/work/mesh-mem` -> `kioku-mesh`, `portable_colorized_scanner` ->
+  `portable-scanner`, `rmf` -> `rmf_ws`), so the spelling variants found in the
+  store resolve to one logical project the same way `mesh-mem` -> `kioku-mesh`
+  already did (`PROJECT_ALIASES` now has 4 entries total) (#309).
 
 ### Changed
 
@@ -98,8 +108,8 @@ ADR-0030.
   set, and the encoded item is then re-measured against a 72 KiB per-message
   budget as a backstop. A new `withheld_fields` list plus the notice text name
   what was dropped, so nothing goes missing silently.
-- `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES` (20,000
-  UTF-8 bytes); when exceeded, results are dropped from the tail and a
+- **BREAKING**: `search_memory`: output is now capped at `SEARCH_OUTPUT_MAX_BYTES`
+  (20,000 UTF-8 bytes); when exceeded, results are dropped from the tail and a
   trailing `[truncated: showing N of M result(s); ...]` line is appended
   (#291, closes #277). The cap covers the *whole* returned text — any prefix
   banner, the entries, and the truncation notice itself — so
@@ -187,8 +197,8 @@ ADR-0030.
   releases (CHANGELOG-first disclosure + upgrade notes + release note
   placement required), and its failure condition once a third-party user
   exists. (#283)
-- `recall_context`: output is now capped at `RECALL_OUTPUT_MAX_BYTES` (20,000
-  UTF-8 bytes), reusing the `search_memory` cap helper. Results were previously
+- **BREAKING**: `recall_context`: output is now capped at `RECALL_OUTPUT_MAX_BYTES`
+  (20,000 UTF-8 bytes), reusing the `search_memory` cap helper. Results were previously
   concatenated in full, which made the median response ~25 KB and pushed 22.9%
   of calls past the client's tool-output limit, so the recalled context never
   reached the conversation at all. Entries are dropped from the tail with the
@@ -438,6 +448,17 @@ ADR-0030.
   repairable observations in the live store that audit surfaces 6 candidates
   before the fix (5 real mis-splits, 1 correct sentence end) and 2 after
   (0 mis-splits — both are correct first sentences whose content continues). (#284)
+
+### Upgrade notes for v1.2
+
+- `search_memory` / `recall_context` を呼ぶ側は、応答が 20,000 UTF-8 バイトを
+  超える場合に結果が末尾から打ち切られることを前提にすること。打ち切りが
+  発生すると末尾に `[truncated: showing N of M ...]` の通知行が付く。全件が
+  必要な場合は `limit` を絞って複数回呼ぶか、`get_memory` で個別の
+  observation_id を取得すること。単一の observation 自体が上限を超える場合は、
+  ヘッダと `<id=...>` を保持したまま本文のみ UTF-8 安全に切り詰められる。
+- 影響を受けるのは 1 回の応答が 20,000 バイトを超えるような大きめの検索・
+  想起のみで、通常サイズの呼び出しの挙動は変わらない。
 
 ## [1.1.0] - 2026-08-08
 
