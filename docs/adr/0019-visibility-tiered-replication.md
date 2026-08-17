@@ -459,3 +459,180 @@ v1.0 でこの escape hatch は削除される。
 | #TBD | Phase D PR(4): docs/tests cleanup (Closes #220) | this PR |
 
 Issue #220 はこの PR(4) のマージをもって close される。
+
+## Phase E Addendum: storage / subscriber scope enforcement と clean mesh dir への移行
+
+- Status: Accepted addendum
+- Date: 2026-08-17
+
+### Context
+
+本体は tier ごとの key prefix と storage 設定で replication scope を分けると決めたが、
+「この host がどの scope を保持するか」の宣言と、稼働中の zenohd が実際に持つ storage を
+突き合わせる仕組みが無かった。結果として次の失敗が起きうる。
+
+- config が user / team scope への書き込みを解決しても、その scope の storage が
+  render / restart されていなければ、save は成功を返しながらどこにも永続化されない。
+- read path（subscriber / rebuild scan / purge sweep）が宣言外の namespace を読み、
+  この host が保持しない scope の key を local index に取り込む。
+
+加えて、本体の Zenoh storage configuration 節にある `mesh_store` の例には、実機検証で
+判明した二つの落とし穴がある。
+
+1. `strip_prefix: "mem/mesh"` は、既存の on-disk key（`strip_prefix: "mem"` の broad
+   storage が `mesh/obs/...` として保存したもの）を `mem/mesh/mesh/obs/...` として
+   再構成する。移行前の key では読めなくなる。
+2. **Zenoh replication alignment は storage の key_expr 外であっても、その directory に
+   既にある key を peer へ配布し得る。** したがって scope 分割に既存 dir を再利用して
+   はならない。既存の broad な `agent_mem` dir を mesh storage に流用すると、key_expr が
+   `mem/mesh/**` だけであっても、その dir に残る user / team / legacy key が mesh
+   replica group の全 peer へ配られる。
+
+**本 addendum は、本体の Zenoh storage configuration 節にある `mesh_store` の例
+（`strip_prefix: "mem/mesh"`, `dir: "mesh"`）を置き換える。既存 mesh を運用中の host で
+その本体例を適用してはならない。**
+
+### Decision
+
+#### 1. host-global `storage_scopes` を単一の導出元にする
+
+各 host は保持・購読する scope を、project cwd から導出した単一 `team_id` ではなく
+host-global config の明示リストで宣言する。
+
+```yaml
+storage_scopes:
+  - mesh
+  - user/hwata
+  - team/sbgisen
+```
+
+許可値は `mesh` / `user/<user_id>` / `team/<team_id>` のみ。wildcard・legacy（un-tiered）・
+余分なセグメントは正規化せず拒否する（typo が保持範囲を黙って広げてはならない）。`mesh` は
+必須とする。zenohd storage 設定の render、read path の selector、save preflight は
+すべてこの一つの契約から導出し、互いに drift しない。project config は書き込み先 scope を
+決めてよいが、保持されるかどうかを決めるのは `storage_scopes` である。
+
+#### 2. save preflight は fail-closed
+
+publish 前に、書き込み先 scope が (a) `storage_scopes` に宣言され、かつ (b) **稼働中の
+local zenohd** が exact な storage（`key_expr` と `strip_prefix` が一致し、重複する broad
+storage が無い）で実際に serve していることを Zenoh admin space で毎回確認する。宣言だけでは
+根拠にならない。render されていない config 編集、render したが restart していない zenohd は
+どちらも「永続化先が無い」状態である。
+
+- 確認は self-scoped selector（`@/<self_zid>/...`）で行う。wildcard `@/*` は到達可能な
+  remote peer の生死に待たされるため save path には置かない（実測 median 8.0 ms /
+  max 221.5 ms 対 0.1 ms）。
+- キャッシュしない。長寿命 MCP process が config 編集・renderer apply・zenohd 再起動を
+  即座に反映できることを優先する。
+- WARN で通す flag は用意しない。warn して通した save は、まさにこの設計が消そうとして
+  いる「保存されたように見えて永続化されていない」状態である。
+- 判定は `session.put()` / SQLite upsert / pending-puts enqueue の前に行い、拒否された
+  save は痕跡を残さない。`drain_pending_puts` も同じ判定を通し、通らない entry は削除せず
+  queue に残して doctor に見せる（queue は 4 つ目の write sink であり、そこを素通りさせると
+  受け皿の無い put を発行して pending の記録だけが消える）。
+- `migrate-visibility` の target PUT / repair PUT も同じ live target scope の契約を通す
+  （5 つ目の write sink）。ただし migration では下記 Tier 1 例外を**認めない**。migration は
+  target PUT の直後に legacy source key を DELETE するため、永続 storage の無い target を
+  受理すると唯一の copy を失う。判定は batch の先頭で target key ごとに一度行い、拒否時は
+  source key・target key・checkpoint のいずれにも触れない。
+- ZENOH_CONNECT が local router を指していない場合は、admin space が "self" として返す
+  storage が他 host のものである可能性があるため拒否する。
+
+#### 3. read path も同じ scope 集合から導出する
+
+subscriber / rebuild scan / purge sweep の selector を `storage_scopes` から導出する。
+初回リリースの既定は `KIOKU_MESH_SCOPE_ISOLATION` 未設定 = 従来どおりの global selector で、
+`KIOKU_MESH_SCOPE_ISOLATION=enforce` で宣言 scope に絞る opt-in とする。この flag は read
+path 専用であり、上記の write preflight を緩めない。
+
+#### 4. mesh storage は新規の clean directory に置き、re-PUT で移す
+
+mesh storage は `key_expr: "mem/mesh/**"`、`strip_prefix: "mem"`、**新規の空 RocksDB
+directory**（`mesh`）で構成する。`strip_prefix` を `mem` に留めるのは既存の `mem/mesh/...`
+key が on-disk で `mesh/...` の形を保つためである。既存 `agent_mem` の `mem/mesh/**` key は
+write freeze 下で manifest 化し、key と payload を新 dir へ re-PUT する。旧 dir の
+user / team / legacy key を新 dir に移してはならない。
+
+新 dir + re-PUT を採ったのは、Context の 2 の性質があるためである。既存 dir を再利用すると
+key_expr の外にある user / team / legacy key が mesh replica group 経由で配布され続け、
+host-local な purge も相手側の alignment で書き戻される。dir を新規にすれば汚染経路そのものが
+消え、新 dir に入るのは `mem/mesh/**` に限定された re-PUT だけになる。
+
+同一 scope の replica は `key_expr` / `strip_prefix` / 全 replication parameter を同一にする。
+通常 host に wildcard の `mem/user/**` / `mem/team/**` storage は置かない。
+
+**半端な cutover は自己修復しない。** key_expr が異なる storage は別の replica group に
+なるため、旧 broad config のまま取り残された host は新 `mem/mesh/**` group と align できない。
+live publication は届くが、遅れている間の差分は後から埋まらない。全 peer に対して一つの
+maintenance window 内で適用し、部分変換のまま通常運用を再開しない。
+
+有効化手順は、全 MCP process 停止（save freeze）→ 全 peer の zenohd を transitional config →
+re-PUT → final config の順に揃え、digest と clean-dir inventory を検証してから MCP を起動する。
+MCP の selector flag と storage config の rollback は別操作であり、local purge 後の rollback には
+backup restore が必要である。
+
+#### 5. Tier 1（`kioku-mesh mesh start`）の非永続例外
+
+`mesh start` が開く in-process router は storage_manager plugin を読めず、admin space も
+storage も持たない。この router に対しては、**`storage_scopes` が `mesh` のみ、かつ接続先
+endpoint が local** のときに限り mesh scope の save を受理し、「peer には live に届くが
+storage は保持しない」ことを process 内で一度 log に出す。user / team scope の書き込みと、
+storage が render されていない実 zenohd に対する書き込みは従来どおり拒否する。remote endpoint
+はこの例外の対象外で、write は拒否される。doctor はこの状態を（local endpoint の Tier 1 に
+限って）WARN として「durable に保存されない」と明示し、それ以外で宣言と live storage が
+一致しない場合は FAIL とする。
+
+#### 6. doctor による照合
+
+doctor は宣言 `storage_scopes` と self の admin-space storage 定義（`key_expr` /
+`strip_prefix` / volume dir）を照合し、不一致・重複・宣言外の broad storage・scope preflight で
+止まっている queued put を FAIL として報告する。replication parameter は admin space が
+公開しないため、doctor は renderer が書いた config file 側と突き合わせ、peer 間の一致は
+two-node harness で担保する（doctor で見えると書いたまま実装すると、検出できない不一致が
+検出済みのつもりになる）。
+
+#### 7. legacy 移行と stale copy の扱い
+
+legacy `mem/{obs,tomb}/...` の visibility migration は storage 分割の**前に**、owner が
+target scope を明示して copy → verify → exact delete → repair PUT → checkpoint で完了させる。
+legacy scan の 0 件は、旧 storage がまだ legacy key を serve している時点で確認する。
+stale copy の cleanup は local inventory と backup、明示確認付きの host-local purge に限り、
+Zenoh key delete を publish してはならない。
+
+### Consequences
+
+- 良い点: 「保存できたが永続化されていない」が構造的に起きなくなる。書き込み先 storage の
+  存在が publish の前提条件になる。
+- 良い点: storage 設定・read selector・write gate が一つの宣言から導出されるため、config と
+  実挙動の drift が doctor で検出可能になる。
+- 悪い点: zenohd が停止している間は save が一切通らない。従来は SQLite + pending_puts で
+  受理されていたため、利用者から見た挙動変化は大きい（breaking change として告知する）。
+- 悪い点: storage cutover を終えていない host では全 save が拒否される。cutover は全 peer で
+  一つの window 内に完了させる必要があり、部分適用は自己修復しない。
+- 悪い点: mesh dir を作り直すため、移行には write freeze と re-PUT、および旧 dir を
+  rollback artifact として保持する運用が必要になる。
+- 限界: **他 host に既に配られた copy は、その host の owner が purge しない限り残る。**
+  本 addendum の enforcement は「これから配らない」ためのものであり、過去に配布済みの
+  データを回収しない。
+- 限界: **本決定は soft isolation のままであり、confidentiality boundary ではない。**
+  本体 Isolation model 節の記述はそのまま有効で、enforcement を入れても user / team scope が
+  秘密境界になるわけではない。機密性が必要なら別 mesh、mTLS/ACL、または別の
+  access-control ADR を採用する。
+
+### Phase E Implementation Status
+
+**Partially implemented** (2026-08-17)
+
+| task | 内容 | ステータス |
+|---|---|---|
+| 1 | scope 解決 API (`core/scope.py`)、fail-closed save preflight、drain / migration の同一 gate | implemented (PR #316) |
+| 2 | read path selector の scope 導出 (`KIOKU_MESH_SCOPE_ISOLATION`) | implemented (PR #316) |
+| 3 | zenohd storage renderer (`core/storage_render.py`, `config render-storages`) | implemented (PR #316) |
+| 4 | 二 node 統合テスト基盤（clean mesh dir への alignment 検証、replication parameter 一致） | 未実装 |
+| 5 | migration / host-local purge ツール（obs/tomb 別集計、backup、dry-run-first） | 未実装 |
+| 6 | release / runbook と breaking change 告知 | 未実装 |
+
+task 1+2+3 は main（merge commit `9eb57d6`）に入っている。上記のうち実機の cutover 手順・
+purge ツール・利用者告知（task 4/5/6）は未実装であり、この addendum は決定の記録であって
+「移行が完了した」ことを意味しない。
