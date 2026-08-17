@@ -340,6 +340,22 @@ def load_reput_checkpoint(path: Path) -> ReputCheckpoint:
     )
 
 
+def load_bound_checkpoint(path: Path, manifest: Manifest) -> ReputCheckpoint:
+    """Load ``path`` and refuse it unless it belongs to ``manifest``.
+
+    Shared by the real run and by ``--dry-run`` so both refuse the same
+    checkpoint for the same reason (review B1).
+    """
+    checkpoint = load_reput_checkpoint(path)
+    if checkpoint.manifest_digest != manifest.digest:
+        raise ScopeMigrationError(
+            f'checkpoint {path} belongs to manifest {checkpoint.manifest_digest[:12]} '
+            f'but this manifest is {manifest.digest[:12]}. Resume with the manifest the run started '
+            'from, or start a new run with a fresh checkpoint. Nothing was written.'
+        )
+    return checkpoint
+
+
 @dataclass
 class ReputResult:
     planned: int
@@ -370,13 +386,7 @@ def replay_manifest(
     (same key, same payload bytes), so redoing a batch is harmless.
     """
     if checkpoint_path.exists():
-        checkpoint = load_reput_checkpoint(checkpoint_path)
-        if checkpoint.manifest_digest != manifest.digest:
-            raise ScopeMigrationError(
-                f'checkpoint {checkpoint_path} belongs to manifest {checkpoint.manifest_digest[:12]} '
-                f'but this manifest is {manifest.digest[:12]}. Resume with the manifest the run started '
-                'from, or start a new run with a fresh checkpoint. Nothing was written.'
-            )
+        checkpoint = load_bound_checkpoint(checkpoint_path, manifest)
     else:
         checkpoint = ReputCheckpoint(manifest_digest=manifest.digest, updated_at=now_iso)
         save_reput_checkpoint(checkpoint, checkpoint_path)

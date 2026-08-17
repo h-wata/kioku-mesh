@@ -260,6 +260,72 @@ def test_verify_reports_missing_and_mismatched_keys() -> None:
     assert report.extra == ('mem/mesh/obs/proj/UNEXPECTED',)
 
 
+# -- re-PUT --dry-run (CLI) ----------------------------------------------------
+
+
+_BROAD_STORAGES = {'agent_mem': {'key_expr': 'mem/**', 'strip_prefix': 'mem', 'volume': {'dir': 'agent_mem'}}}
+
+
+def _reput_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session: _SourceSession, *, checkpoint: Path | None = None
+) -> int:
+    """Run ``scope-migrate re-put --dry-run`` against ``session``."""
+    import argparse
+
+    from kioku_mesh import __main__ as cli
+
+    manifest = sm.build_manifest(_two_peer_source(), expected_peers=2, now_iso='t')
+    manifest_path = tmp_path / 'manifest.json'
+    sm.write_manifest(manifest, manifest_path)
+    monkeypatch.setattr(cli, 'get_session', lambda: session)
+    args = argparse.Namespace(
+        manifest=str(manifest_path),
+        checkpoint=str(checkpoint) if checkpoint else None,
+        dry_run=True,
+        yes=True,
+        batch_size=100,
+    )
+    return cli._cmd_scope_migrate_reput(args)
+
+
+def test_reput_dry_run_fails_on_a_transitional_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """dry-run must not report success where the real run would hit the gate (B1)."""
+    session = _two_peer_source()
+    session.storages = _BROAD_STORAGES
+
+    rc = _reput_dry_run(tmp_path, monkeypatch, session)
+
+    assert rc == 1
+    assert 'migration refused' in capsys.readouterr().err
+    assert session.puts == [], 'a dry-run never writes'
+
+
+def test_reput_dry_run_passes_on_the_final_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session = _two_peer_source()
+
+    rc = _reput_dry_run(tmp_path, monkeypatch, session)
+
+    assert rc == 0
+    assert 'would re-PUT 3 key(s)' in capsys.readouterr().out
+    assert session.puts == []
+
+
+def test_reput_dry_run_fails_on_a_checkpoint_from_another_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkpoint = tmp_path / 'chk.json'
+    sm.save_reput_checkpoint(sm.ReputCheckpoint(manifest_digest='deadbeef', done=[]), checkpoint)
+
+    rc = _reput_dry_run(tmp_path, monkeypatch, _two_peer_source(), checkpoint=checkpoint)
+
+    assert rc == 1
+    assert 'belongs to manifest' in capsys.readouterr().err
+
+
 # -- inventory -----------------------------------------------------------------
 
 

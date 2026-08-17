@@ -1500,17 +1500,26 @@ def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
 
     _print_manifest_summary(manifest)
     if args.dry_run:
-        already = 0
-        if checkpoint_path.exists():
-            try:
-                already = len(set(_load_reput_done(checkpoint_path)) & {e.key for e in manifest.entries})
-            except ScopeMigrationError as e:
-                print(f'error: {e}', file=sys.stderr)
-                return 1
+        # The dry-run answers "would the real run go through?", so it runs the
+        # same two checks the real run stops on — checkpoint/manifest binding
+        # and the per-key gate — and never PUTs (review B1).
+        from .memory.scope_migration import load_bound_checkpoint
+        from .memory.visibility_migration import preflight_migration_target
+
+        done: set[str] = set()
+        try:
+            if checkpoint_path.exists():
+                done = set(load_bound_checkpoint(checkpoint_path, manifest).done) & {e.key for e in manifest.entries}
+            for key in dict.fromkeys(e.key for e in manifest.entries if e.key not in done):
+                preflight_migration_target(key, session)
+        except (ScopeMigrationError, ScopePreflightError) as e:
+            print(f'error: {e}', file=sys.stderr)
+            return 1
+        already = len(done)
         print('dry-run: nothing was written.')
         print(f'  checkpoint:  {checkpoint_path} ({already} key(s) already re-PUT)')
         print(f'  would re-PUT {len(manifest.entries) - already} key(s) into the live mesh storage')
-        print('  every key is gated on a live exact mesh storage before its PUT')
+        print('  every pending key passed the live exact mesh storage gate')
         print(f'  {LEGACY_SOURCE_DIR} is not touched (rollback artifact; never deleted here)')
         return 0
 
@@ -1563,12 +1572,6 @@ def _cmd_scope_migrate_reput(args: argparse.Namespace) -> int:
             print(f'  {label}: {len(keys)} — {", ".join(keys[:5])}', file=sys.stderr)
     print(f'  re-run `scope-migrate re-put --manifest {manifest_path}` after fixing the cause.', file=sys.stderr)
     return 1
-
-
-def _load_reput_done(checkpoint_path: Path) -> list[str]:
-    from .memory.scope_migration import load_reput_checkpoint
-
-    return load_reput_checkpoint(checkpoint_path).done
 
 
 def _cmd_scope_inventory(args: argparse.Namespace) -> int:
