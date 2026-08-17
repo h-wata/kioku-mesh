@@ -32,8 +32,9 @@ ADR-0030.
 
 - `save_observation`: content / subject / summary に MCP tool-call の断片
   (`</content>` 等の閉じタグに続く save_observation の既知パラメータ名の
-  開始/終了タグ、または name に既知パラメータ名を持つ `<parameter name="subject">`
-  のような `<parameter name="...">` 表記) が
+  開始/終了タグ（間に空白・改行・タブが入っていても検出される）、または name に
+  既知パラメータ名を持つ `<parameter name="subject">` のような
+  `<parameter name="...">` 表記) が
   混入している場合に ToolError で拒否する入力検証を追加した。クライアントが
   tool call を組み立てる際に文字列を終端し損ねると、本来 `memory_type` などへ
   渡るはずだった値が content 内に文字列として死蔵される (2026-06〜08 に 4 件、
@@ -471,8 +472,9 @@ ADR-0030.
   想起のみで、通常サイズの呼び出しの挙動は変わらない。
 - `save_observation` を呼ぶ側で、content / subject / summary に MCP
   tool-call のマークアップ（`</content>` 等の閉じタグに save_observation の
-  既知パラメータ名の開始/終了タグが続く形、または name に既知パラメータ名を
-  持つ `<parameter name="subject">` のような `<parameter name="...">` 表記）を
+  既知パラメータ名の開始/終了タグが続く形（間に空白・改行・タブが入っていても
+  検出される）、または name に既知パラメータ名を持つ `<parameter name="subject">`
+  のような `<parameter name="...">` 表記）を
   文中に引用している場合は ToolError で拒否されるようになった (#312, #314)。
   name の値が `...` や `parameter` のような非該当の文字列であれば拒否されない。
   該当箇所を「このタグを引用する」のではなく記述に言い換えれば通る。既存の
