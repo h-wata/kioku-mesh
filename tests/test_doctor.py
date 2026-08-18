@@ -417,6 +417,16 @@ def test_check_shadow_visibility_warn(tmp_path: 'Path') -> None:
     assert result.hint != ''
 
 
+def test_check_shadow_visibility_hint_references_real_command(tmp_path: 'Path') -> None:
+    """The hint must not point users at the nonexistent `gc --shadows` flag."""
+    from kioku_mesh.doctor import check_shadow_visibility  # noqa: PLC0415
+
+    idx = _make_index_with_shadowed(tmp_path, n_shadowed=2)
+    result = check_shadow_visibility(index=idx)
+    assert '--shadows' not in result.hint
+    assert '--no-shadow-prune' in result.hint
+
+
 def test_run_all_checks_includes_shadow() -> None:
     """run_all_checks must include a check named 'shadow_visibility'."""
     names = [r.name for r in doctor.run_all_checks()]

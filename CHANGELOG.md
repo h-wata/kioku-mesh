@@ -95,6 +95,12 @@ ADR-0030.
   無ければ copy も delete も行わずに拒否する。resume した repair PUT にも同じ判定が
   かかる (#316)
 
+### Fixed
+
+- `doctor` の `shadow_visibility` hint が実在しない `kioku-mesh gc --shadows` を
+  案内していたのを修正し、実際の既定挙動（`--no-shadow-prune` で無効化可能）を
+  案内するようにした。
+
 ### Upgrade notes for v1.3
 
 - **部分適用は自己修復しない。** key expression の異なる storage は別の replica group に

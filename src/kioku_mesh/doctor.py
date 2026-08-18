@@ -513,9 +513,10 @@ def check_shadow_visibility(index: object = None) -> CheckResult:
     Shadowed observations were present in the local index but not seen during
     the last ``rebuild_from_zenoh`` sweep. They are hidden from search and
     ranking but have not been physically deleted. A WARN means the index has
-    unresolved shadow state that may indicate a rebuild coverage gap; running
-    ``kioku-mesh gc --shadows`` or waiting for GC retention to expire will
-    eventually clean them up.
+    unresolved shadow state that may indicate a rebuild coverage gap; shadow
+    rows are physically deleted by default during ``kioku-mesh gc``'s
+    retention sweep (pass ``--no-shadow-prune`` to skip it), so waiting for
+    the next GC run will eventually clean them up.
     """
     from .memory.local_index import LocalIndex  # noqa: PLC0415
 
@@ -559,7 +560,8 @@ def check_shadow_visibility(index: object = None) -> CheckResult:
             '(missing from source-of-truth during rebuild, hidden from search, not yet physically deleted)'
         ),
         hint=(
-            'Shadowed rows are cleaned up automatically by `kioku-mesh gc --shadows`. '
+            "Shadowed rows are physically deleted by default during `kioku-mesh gc`'s "
+            'retention sweep (pass --no-shadow-prune to disable). '
             'If counts are unexpectedly high, re-run `rebuild_from_zenoh` or inspect '
             'with `kioku-mesh status --show-shadows`.'
         ),
