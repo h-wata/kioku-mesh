@@ -34,6 +34,7 @@ import os
 from pathlib import Path
 import sqlite3
 import threading
+import time
 from typing import Iterator
 
 from ..core.identity import state_dir
@@ -45,10 +46,11 @@ from ..core.project_alias import normalize_project_filter
 from ..core.scope import obs_read_selectors
 from ..core.scope import tomb_read_selectors
 from ..core.transport import _iter_replies_over
+from ..core.transport import collect_ok_replies_over
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ADR-0021: FTS5 capability levels (detected once per connection).
 _FTS_CAP_TRIGRAM = 'trigram'  # FTS5 with trigram tokenizer (supports Japanese substring match)
@@ -74,6 +76,53 @@ class RebuildStats:
     shadowed: int = 0
     unchanged: int = 0
     orphaned: int = 0
+
+
+#: ``repair_from_zenoh`` modes. ``tombstones`` scans tombstones only (cheap,
+#: frequent); ``full`` scans observations and tombstones.
+REPAIR_MODE_TOMB = 'tombstones'
+REPAIR_MODE_FULL = 'full'
+REPAIR_MODES = frozenset({REPAIR_MODE_TOMB, REPAIR_MODE_FULL})
+
+
+class RepairScanError(RuntimeError):
+    """A repair scan did not complete cleanly, so nothing may be applied."""
+
+
+@dataclasses.dataclass
+class RepairStats:
+    """Outcome of one :meth:`LocalIndex.repair_from_zenoh` run (ADR-0035)."""
+
+    mode: str = REPAIR_MODE_FULL
+    scanned_obs: int = 0
+    scanned_tomb: int = 0
+    added: int = 0
+    updated: int = 0
+    marked_deleted: int = 0
+    started_at: str = ''
+    completed_at: str = ''
+    failure_class: str = ''
+
+
+@dataclasses.dataclass(frozen=True)
+class AlignmentState:
+    """Persisted realignment metadata (diagnostics/cadence, not a data cursor)."""
+
+    last_tomb_repair_started_at: str = ''
+    last_tomb_repair_completed_at: str = ''
+    last_full_repair_started_at: str = ''
+    last_full_repair_completed_at: str = ''
+    last_failure_at: str = ''
+    last_failure_mode: str = ''
+    last_failure_class: str = ''
+    last_failure_message: str = ''
+    last_success_mode: str = ''
+    last_success_scanned_obs: int = 0
+    last_success_scanned_tomb: int = 0
+    last_success_added: int = 0
+    last_success_updated: int = 0
+    last_success_marked_deleted: int = 0
+    last_success_duration_ms: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -102,6 +151,25 @@ CREATE TABLE IF NOT EXISTS obs_index (
 );
 CREATE INDEX IF NOT EXISTS idx_project_created ON obs_index(project, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_created ON obs_index(created_at DESC);
+CREATE TABLE IF NOT EXISTS index_alignment_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  last_tomb_repair_started_at TEXT,
+  last_tomb_repair_completed_at TEXT,
+  last_full_repair_started_at TEXT,
+  last_full_repair_completed_at TEXT,
+  last_failure_at TEXT,
+  last_failure_mode TEXT,
+  last_failure_class TEXT,
+  last_failure_message TEXT,
+  last_success_mode TEXT,
+  last_success_scanned_obs INTEGER,
+  last_success_scanned_tomb INTEGER,
+  last_success_added INTEGER,
+  last_success_updated INTEGER,
+  last_success_marked_deleted INTEGER,
+  last_success_duration_ms INTEGER
+);
+INSERT OR IGNORE INTO index_alignment_state(id) VALUES (1);
 """
 
 _UPSERT_SQL = (
@@ -1530,6 +1598,266 @@ class LocalIndex:
 
         return RebuildStats(
             added=added, marked_deleted=marked_deleted, shadowed=shadowed, unchanged=unchanged, orphaned=orphaned
+        )
+
+    # ------------------------------------------------------------------
+    # ADR-0035: repair-only realignment
+    # ------------------------------------------------------------------
+
+    def repair_from_zenoh(self, session: object, *, mode: str = REPAIR_MODE_FULL) -> RepairStats:
+        """Apply positive source facts seen in Zenoh; never shadow or delete.
+
+        Unlike :meth:`rebuild_from_zenoh`, absence of a row from the scan means
+        nothing: local-only rows stay live, and a timed-out, errored or partial
+        scan applies zero changes instead of hiding data (ADR-0035). The whole
+        scan is collected and validated first, then applied in one transaction
+        together with the success metadata.
+
+        Raises :class:`RepairScanError` (scan problems) or :class:`sqlite3.Error`
+        (apply problems) after recording the failure in ``index_alignment_state``.
+        """
+        if mode not in REPAIR_MODES:
+            raise ValueError(f'mode must be one of {sorted(REPAIR_MODES)}, got {mode!r}')
+        stats = RepairStats(mode=mode, started_at=_now_iso())
+        if self._disabled or self._conn is None:
+            return stats
+        self._record_repair_started(mode, stats.started_at)
+        started_monotonic = time.monotonic()
+        try:
+            obs_list = self._scan_obs(session) if mode == REPAIR_MODE_FULL else []
+            tomb_ids = self._scan_tombs(session)
+        except Exception as e:
+            self._record_repair_failure(mode, e)
+            stats.failure_class = type(e).__name__
+            raise
+        stats.scanned_obs = len(obs_list)
+        stats.scanned_tomb = len(tomb_ids)
+        stats.completed_at = _now_iso()
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        try:
+            self._apply_repair(obs_list, tomb_ids, stats, duration_ms)
+        except Exception as e:
+            self._record_repair_failure(mode, e)
+            stats.failure_class = type(e).__name__
+            raise
+        return stats
+
+    def _scan_obs(self, session: object) -> list[Observation]:
+        """Collect every observation visible in Zenoh, or raise."""
+        obs_list: list[Observation] = []
+        for ok in collect_ok_replies_over(session, obs_read_selectors(), timeout=30.0):
+            key_str = str(ok.key_expr)
+            key_id = self._repair_key_id(key_str, 'obs')
+            if key_id is None:
+                continue
+            try:
+                obs = Observation.from_json(ok.payload.to_string())
+            except Exception as e:
+                raise RepairScanError(f'malformed obs payload for {key_str}: {e}') from e
+            if obs.observation_id != key_id:
+                raise RepairScanError(f'obs key/payload id mismatch: key={key_str} payload_id={obs.observation_id}')
+            obs_list.append(obs)
+        return obs_list
+
+    def _scan_tombs(self, session: object) -> dict[str, str]:
+        """Collect every tombstone visible in Zenoh, or raise."""
+        tomb_ids: dict[str, str] = {}
+        for ok in collect_ok_replies_over(session, tomb_read_selectors(), timeout=30.0):
+            key_str = str(ok.key_expr)
+            key_id = self._repair_key_id(key_str, 'tomb')
+            if key_id is None:
+                continue
+            try:
+                tomb = Tombstone.from_json(ok.payload.to_string())
+            except Exception as e:
+                raise RepairScanError(f'malformed tomb payload for {key_str}: {e}') from e
+            if tomb.observation_id != key_id:
+                raise RepairScanError(f'tomb key/payload id mismatch: key={key_str} payload_id={tomb.observation_id}')
+            tomb_ids[tomb.observation_id] = tomb.deleted_at
+        return tomb_ids
+
+    @staticmethod
+    def _repair_key_id(key_str: str, kind: str) -> str | None:
+        """Return the observation id for a canonical key, or None to skip it.
+
+        Keys outside the current namespace (ADR-0029 legacy, or off-shape keys
+        the broadened selector happens to match) are skipped, not failed: they
+        are not records this index owns. A *canonical* key whose payload does
+        not parse is a different matter and fails the scan.
+        """
+        if is_legacy_key(key_str):
+            log.debug('repair_from_zenoh skip legacy %s key: %s', kind, key_str)
+            return None
+        key_id = obs_id_from_key(key_str)
+        if key_id is None:
+            log.debug('repair_from_zenoh skip non-canonical %s key: %s', kind, key_str)
+        return key_id
+
+    def _apply_repair(
+        self,
+        obs_list: list[Observation],
+        tomb_ids: dict[str, str],
+        stats: RepairStats,
+        duration_ms: int,
+    ) -> None:
+        """Apply a completed scan and its success metadata in one transaction."""
+        with self._lock:
+            if self._conn is None:  # closed concurrently
+                return
+            try:
+                existing: dict[str, tuple[str | None, str | None, str]] = {
+                    row[0]: (row[1], row[2], row[3])
+                    for row in self._conn.execute(
+                        'SELECT observation_id, deleted_at, shadowed_at, payload_json FROM obs_index'
+                    ).fetchall()
+                }
+
+                upsert_rows = []
+                upserted_obs: list[Observation] = []
+                for obs in obs_list:
+                    payload_json = obs.to_json()
+                    current = existing.get(obs.observation_id)
+                    if current is not None and current[1] is None and current[2] == payload_json:
+                        continue
+                    upsert_rows.append(
+                        (
+                            obs.observation_id,
+                            obs.project,
+                            obs.created_at,
+                            obs.memory_type,
+                            obs.importance,
+                            obs.subject,
+                            obs.summary,
+                            payload_json,
+                            obs.expires_at or None,
+                        )
+                    )
+                    upserted_obs.append(obs)
+                    if current is None:
+                        stats.added += 1
+                    else:
+                        stats.updated += 1
+
+                mark_rows = []
+                seen_obs_ids = {obs.observation_id for obs in obs_list}
+                for obs_id, del_at in tomb_ids.items():
+                    # Same contract as mark_deleted(): a tombstone whose
+                    # observation is not indexed is a no-op here. Durable
+                    # orphan tombstones are TASK-451's (R5) scope.
+                    if obs_id not in existing and obs_id not in seen_obs_ids:
+                        continue
+                    if existing.get(obs_id, (None, None, ''))[0] is not None:
+                        continue
+                    mark_rows.append((del_at, obs_id))
+                    stats.marked_deleted += 1
+
+                self._conn.execute('BEGIN')
+                if upsert_rows:
+                    self._conn.executemany(_UPSERT_SQL, upsert_rows)
+                if mark_rows:
+                    self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
+                # superseded_by is set only from observations this scan saw; it
+                # is never reset globally, because a repair scan is not a
+                # complete view of the mesh.
+                for obs in upserted_obs:
+                    if obs.supersedes:
+                        placeholders = ','.join('?' for _ in obs.supersedes)
+                        self._conn.execute(
+                            f'UPDATE obs_index SET superseded_by = ? WHERE observation_id IN ({placeholders})',
+                            [obs.observation_id, *obs.supersedes],
+                        )
+                if self._fts_cap != _FTS_CAP_LIKE:
+                    for obs in upserted_obs:
+                        self._conn.execute(_FTS_DELETE_SQL, (obs.observation_id,))
+                        self._conn.execute(
+                            _FTS_UPSERT_SQL,
+                            (
+                                obs.observation_id,
+                                obs.content,
+                                obs.subject or '',
+                                obs.summary or '',
+                                ' '.join(obs.tags or []),
+                                obs.project or '',
+                            ),
+                        )
+                    for _, obs_id in mark_rows:
+                        self._conn.execute(_FTS_DELETE_SQL, (obs_id,))
+                completed_col = (
+                    'last_full_repair_completed_at'
+                    if stats.mode == REPAIR_MODE_FULL
+                    else 'last_tomb_repair_completed_at'
+                )
+                self._conn.execute(
+                    f'UPDATE index_alignment_state SET {completed_col} = ?, '  # noqa: S608 — column from a literal
+                    'last_success_mode = ?, last_success_scanned_obs = ?, last_success_scanned_tomb = ?, '
+                    'last_success_added = ?, last_success_updated = ?, last_success_marked_deleted = ?, '
+                    'last_success_duration_ms = ? WHERE id = 1',
+                    (
+                        stats.completed_at,
+                        stats.mode,
+                        stats.scanned_obs,
+                        stats.scanned_tomb,
+                        stats.added,
+                        stats.updated,
+                        stats.marked_deleted,
+                        duration_ms,
+                    ),
+                )
+                self._conn.execute('COMMIT')
+            except sqlite3.Error:
+                try:
+                    self._conn.execute('ROLLBACK')
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+
+    def _record_repair_started(self, mode: str, started_at: str) -> None:
+        column = 'last_full_repair_started_at' if mode == REPAIR_MODE_FULL else 'last_tomb_repair_started_at'
+        self._update_alignment_state(f'{column} = ?', (started_at,))
+
+    def _record_repair_failure(self, mode: str, exc: BaseException) -> None:
+        # Message only — no payload and no traceback (ADR-0035).
+        self._update_alignment_state(
+            'last_failure_at = ?, last_failure_mode = ?, last_failure_class = ?, last_failure_message = ?',
+            (_now_iso(), mode, type(exc).__name__, str(exc)[:500]),
+        )
+
+    def _update_alignment_state(self, assignments: str, params: tuple[object, ...]) -> None:
+        """Write alignment metadata outside the repair transaction, best-effort."""
+        if self._disabled or self._conn is None:
+            return
+        with self._lock:
+            try:
+                self._conn.execute(
+                    f'UPDATE index_alignment_state SET {assignments} WHERE id = 1',  # noqa: S608
+                    params,
+                )
+                self._conn.commit()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex alignment state update failed: %s', e)
+
+    def alignment_state(self) -> AlignmentState:
+        """Return the persisted realignment metadata (empty when disabled)."""
+        if self._disabled or self._conn is None:
+            return AlignmentState()
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    'SELECT last_tomb_repair_started_at, last_tomb_repair_completed_at, '
+                    'last_full_repair_started_at, last_full_repair_completed_at, '
+                    'last_failure_at, last_failure_mode, last_failure_class, last_failure_message, '
+                    'last_success_mode, last_success_scanned_obs, last_success_scanned_tomb, '
+                    'last_success_added, last_success_updated, last_success_marked_deleted, '
+                    'last_success_duration_ms FROM index_alignment_state WHERE id = 1'
+                ).fetchone()
+            except sqlite3.Error as e:
+                log.warning('LocalIndex.alignment_state failed: %s', e)
+                return AlignmentState()
+        if row is None:
+            return AlignmentState()
+        return AlignmentState(
+            *(str(v or '') for v in row[:9]),
+            *(int(v or 0) for v in row[9:]),
         )
 
     def rebuild_from_raw_records(

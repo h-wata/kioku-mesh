@@ -29,6 +29,13 @@ ADR-0030.
 
 ### Added
 
+- `LocalIndex.repair_from_zenoh(mode=...)`: zenoh で見えた observation / tombstone
+  だけを適用する非破壊の index 補修 primitive (schema v5 + `index_alignment_state`)。
+  scan を全件収集して完了を確認してから 1 transaction で適用し、scan に無い行を
+  shadow / delete しない (local-only 行が定期 data loss にならない)。失敗時は成功
+  時刻を進めず、失敗内容を `index_alignment_state` に残す。既存
+  `rebuild_from_zenoh` の shadow semantics は変更していない。定期 worker / doctor /
+  CLI への配線は後続 Phase (ADR-0035, TASK-450 Phase 1)
 - host-global config (`~/.config/kioku-mesh/config.yaml`) に `storage_scopes` を
   追加した。保持・購読する scope をこの一つのリストから導出する (`mesh` /
   `user/<id>` / `team/<id>` のみ、`mesh` 必須、wildcard と余分なセグメントは

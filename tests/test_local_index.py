@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 import time
+from typing import NoReturn
 
 import pytest
 
@@ -3222,5 +3223,219 @@ def test_rebuild_from_zenoh_always_skips_legacy_tomb(
         stats = idx.rebuild_from_zenoh(_FakeSession([], [tomb], legacy_tomb_keys=True))
         # The tomb is always skipped — marked_deleted stays 0 (no tombstone applied).
         assert stats.marked_deleted == 0, 'legacy tomb must never be ingested (v1.0 removed the read fallback)'
+    finally:
+        idx.close()
+
+
+# ---------------------------------------------------------------------------
+# repair_from_zenoh tests (ADR-0035: repair-only realignment)
+# ---------------------------------------------------------------------------
+
+
+class _FakeErrReply:
+    """Reply carrying an ``err`` (a storage/router refused the query)."""
+
+    ok = None
+
+    def __init__(self, message: str = 'boom') -> None:
+        self.err = _FakeOk(message, '')
+
+
+class _FailingSession(_FakeSession):
+    """FakeSession whose obs or tomb scan fails in a chosen way."""
+
+    def __init__(
+        self,
+        obs: list[Observation],
+        tombs: list[Tombstone],
+        *,
+        fail_on: str,
+        failure: str,
+    ) -> None:
+        super().__init__(obs, tombs)
+        self._fail_on = fail_on
+        self._failure = failure
+
+    def get(self, key_expr: str, **kwargs: object) -> list:  # type: ignore[override]
+        marker = 'obs' if '/obs/' in key_expr else 'tomb'
+        if marker != self._fail_on:
+            return super().get(key_expr, **kwargs)
+        if self._failure == 'err':
+            return [_FakeErrReply()]
+        if self._failure == 'timeout':
+            raise TimeoutError('scan timed out')
+        if self._failure == 'malformed':
+            # Canonical key with a corrupt payload — a record of ours that
+            # cannot be parsed, not an off-namespace key the scan may skip.
+            replies = self._obs_replies if marker == 'obs' else self._tomb_replies
+            return [_FakeReply('{not json', str(replies[0].ok.key_expr))]
+        raise AssertionError(f'unknown failure {self._failure}')
+
+
+def _live_ids(db_path: Path) -> set[str]:
+    with sqlite3.connect(str(db_path)) as raw:
+        return {
+            row[0]
+            for row in raw.execute(
+                'SELECT observation_id FROM obs_index WHERE deleted_at IS NULL AND shadowed_at IS NULL'
+            ).fetchall()
+        }
+
+
+def test_repair_keeps_local_only_rows_live(tmp_path: Path) -> None:
+    """The core safety property: absence from the scan means nothing."""
+    db = tmp_path / 'repair_local_only.db'
+    idx = LocalIndex.connect(str(db))
+    try:
+        local_only = _mk_obs('local only', project='r')
+        remote = _mk_obs('remote', project='r')
+        idx.upsert(local_only)
+
+        stats = idx.repair_from_zenoh(_FakeSession([remote], []))
+
+        assert stats.added == 1
+        assert _live_ids(db) == {local_only.observation_id, remote.observation_id}
+        assert idx.visibility_counts().shadowed == 0
+    finally:
+        idx.close()
+
+
+def test_repair_upserts_and_marks_tombstones(tmp_path: Path) -> None:
+    db = tmp_path / 'repair_apply.db'
+    idx = LocalIndex.connect(str(db))
+    try:
+        deleted = _mk_obs('will be deleted', project='r')
+        idx.upsert(deleted)
+        fresh = _mk_obs('fresh', project='r')
+        tomb = Tombstone(observation_id=deleted.observation_id, deleted_at='2026-04-30T00:00:00.000000Z')
+
+        stats = idx.repair_from_zenoh(_FakeSession([fresh], [tomb]))
+
+        assert (stats.added, stats.marked_deleted) == (1, 1)
+        assert _live_ids(db) == {fresh.observation_id}
+        state = idx.alignment_state()
+        assert state.last_full_repair_completed_at
+        assert state.last_success_mode == 'full'
+        assert state.last_failure_at == ''
+    finally:
+        idx.close()
+
+
+def test_repair_tombstones_mode_does_not_scan_observations(tmp_path: Path) -> None:
+    db = tmp_path / 'repair_tomb_mode.db'
+    idx = LocalIndex.connect(str(db))
+    try:
+        known = _mk_obs('known', project='r')
+        idx.upsert(known)
+        unseen = _mk_obs('not in index', project='r')
+        tomb = Tombstone(observation_id=known.observation_id, deleted_at='2026-04-30T00:00:00.000000Z')
+
+        stats = idx.repair_from_zenoh(_FakeSession([unseen], [tomb]), mode='tombstones')
+
+        assert stats.scanned_obs == 0
+        assert stats.added == 0
+        assert stats.marked_deleted == 1
+        assert _live_ids(db) == set()
+        state = idx.alignment_state()
+        assert state.last_tomb_repair_completed_at
+        assert state.last_full_repair_completed_at == ''
+    finally:
+        idx.close()
+
+
+@pytest.mark.parametrize('fail_on', ['obs', 'tomb'])
+@pytest.mark.parametrize('failure', ['err', 'timeout', 'malformed'])
+def test_repair_scan_failure_applies_nothing(tmp_path: Path, fail_on: str, failure: str) -> None:
+    """Err / timeout / malformed: no shadow, no apply, no success timestamp."""
+    db = tmp_path / f'repair_fail_{fail_on}_{failure}.db'
+    idx = LocalIndex.connect(str(db))
+    try:
+        local_only = _mk_obs('local only', project='r')
+        idx.upsert(local_only)
+        remote = _mk_obs('remote', project='r')
+        tomb = Tombstone(observation_id=local_only.observation_id, deleted_at='2026-04-30T00:00:00.000000Z')
+
+        with pytest.raises(Exception):  # noqa: B017 — class varies by failure mode
+            idx.repair_from_zenoh(_FailingSession([remote], [tomb], fail_on=fail_on, failure=failure))
+
+        assert _live_ids(db) == {local_only.observation_id}, 'failed repair must not apply or hide anything'
+        state = idx.alignment_state()
+        assert state.last_full_repair_completed_at == ''
+        assert state.last_failure_at
+        assert state.last_failure_mode == 'full'
+        assert state.last_failure_class
+    finally:
+        idx.close()
+
+
+def test_repair_sqlite_failure_rolls_back(tmp_path: Path) -> None:
+    db = tmp_path / 'repair_sqlite_fail.db'
+    idx = LocalIndex.connect(str(db))
+    try:
+        local_only = _mk_obs('local only', project='r')
+        idx.upsert(local_only)
+        remote = _mk_obs('remote', project='r')
+
+        real_conn = idx._conn
+
+        class _BrokenConn:
+            def __getattr__(self, name: str) -> object:
+                return getattr(real_conn, name)
+
+            def executemany(self, *args: object, **kwargs: object) -> NoReturn:
+                raise sqlite3.OperationalError('disk I/O error')
+
+        idx._conn = _BrokenConn()  # type: ignore[assignment]
+        with pytest.raises(sqlite3.OperationalError):
+            idx.repair_from_zenoh(_FakeSession([remote], []))
+        idx._conn = real_conn
+
+        assert _live_ids(db) == {local_only.observation_id}
+        state = idx.alignment_state()
+        assert state.last_full_repair_completed_at == ''
+        assert state.last_failure_class == 'OperationalError'
+    finally:
+        idx.close()
+
+
+def test_repair_does_not_change_rebuild_shadow_semantics(tmp_path: Path) -> None:
+    """Rebuild still shadows absent rows; repair on the same index does not."""
+    db = tmp_path / 'repair_vs_rebuild.db'
+    idx = LocalIndex.connect(str(db))
+    try:
+        local_only = _mk_obs('local only', project='r')
+        idx.upsert(local_only)
+        idx.repair_from_zenoh(_FakeSession([], []))
+        assert _live_ids(db) == {local_only.observation_id}
+
+        idx.rebuild_from_zenoh(_FakeSession([], []))
+        assert _live_ids(db) == set()
+        assert idx.visibility_counts().shadowed == 1
+    finally:
+        idx.close()
+
+
+def test_alignment_state_migration_preserves_existing_v4_db(tmp_path: Path) -> None:
+    """Opening a pre-v5 database adds the state table without losing rows."""
+    db = tmp_path / 'migrate_v5.db'
+    idx = LocalIndex.connect(str(db))
+    obs = _mk_obs('written at v4', project='r')
+    idx.upsert(obs)
+    idx.close()
+
+    # Simulate a database written before schema v5.
+    with sqlite3.connect(str(db)) as raw:
+        raw.execute('DROP TABLE index_alignment_state')
+        raw.execute('DELETE FROM schema_version')
+        raw.execute('INSERT INTO schema_version(version) VALUES (4)')
+
+    idx = LocalIndex.connect(str(db))
+    try:
+        assert {r.observation_id for r in idx.search(project='r')} == {obs.observation_id}
+        assert idx.alignment_state() == type(idx.alignment_state())()
+        with sqlite3.connect(str(db)) as raw:
+            assert raw.execute('SELECT version FROM schema_version').fetchone()[0] == SCHEMA_VERSION
+        idx.repair_from_zenoh(_FakeSession([obs], []))
+        assert idx.alignment_state().last_full_repair_completed_at
     finally:
         idx.close()

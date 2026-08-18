@@ -364,6 +364,21 @@ def _iter_ok_replies_over(
         yield from _iter_ok_replies(session, key_expr, timeout=timeout)
 
 
+def collect_ok_replies_over(
+    session: zenoh.Session,
+    key_exprs: tuple[str, ...] | list[str],
+    timeout: float = GET_TIMEOUT,
+) -> list[Any]:
+    """Collect every ``ok`` reply across ``key_exprs``; raise on any ``err``.
+
+    Collect-only counterpart of :func:`_iter_ok_replies_over` for callers that
+    must know the whole scan succeeded *before* touching local state (ADR-0035
+    repair-only realignment). A lazy iterator cannot express that: its consumer
+    has already seen part of the scan when the first ``err`` raises.
+    """
+    return list(_iter_ok_replies_over(session, key_exprs, timeout=timeout))
+
+
 def _iter_ok_replies(
     session: zenoh.Session,
     key_expr: str,
