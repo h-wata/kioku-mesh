@@ -165,14 +165,14 @@ def test_bridge_may_import_messaging_and_memory() -> None:
     for filename, imports in bridge_imports.items():
         for imp in imports:
             # bridge must not import from itself recursively in a way that loops
-            assert not (
-                imp.startswith(MEMORY_PKG) and imp.startswith(MESSAGING_PKG)
-            ), f'{filename}: impossible combined import {imp!r}'
+            assert not (imp.startswith(MEMORY_PKG) and imp.startswith(MESSAGING_PKG)), (
+                f'{filename}: impossible combined import {imp!r}'
+            )
 
     # Confirm message_memory.py is present and the bridge package is non-empty
-    assert (
-        SRC_ROOT / 'bridge' / 'message_memory.py'
-    ).exists(), 'bridge/message_memory.py が存在しません — Phase 4 bridge が実装されていません'
+    assert (SRC_ROOT / 'bridge' / 'message_memory.py').exists(), (
+        'bridge/message_memory.py が存在しません — Phase 4 bridge が実装されていません'
+    )
 
 
 # INV-7 gate policy (Issue #249): rather than an allowlist of known derived-view

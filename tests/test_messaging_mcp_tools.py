@@ -218,9 +218,9 @@ class TestCheckMessages:
             with patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path):
                 result = self._call(visibility=bad_vis)
             assert 'error' in result, f'Expected error key for visibility={bad_vis!r}, got {result!r}'
-            assert (
-                'unknown' in result.get('error', '').lower() or 'visibility' in result.get('error', '').lower()
-            ), f'Error message unclear for visibility={bad_vis!r}: {result!r}'
+            assert 'unknown' in result.get('error', '').lower() or 'visibility' in result.get('error', '').lower(), (
+                f'Error message unclear for visibility={bad_vis!r}: {result!r}'
+            )
 
     def test_tool_registered_in_mcp(self) -> None:
         async def _go() -> list[str]:
@@ -344,6 +344,6 @@ class TestAckMessage:
         for bad_vis in ('teem', 'all', 'private', 'MESH', 'User'):
             with patch('kioku_mesh.mcp_server.state_dir', return_value=tmp_path):
                 result = self._call(msg_id=unknown_msg_id, visibility=bad_vis)
-            assert (
-                'ack failed' in result or 'unknown' in result.lower()
-            ), f'Expected error for visibility={bad_vis!r}, got {result!r}'
+            assert 'ack failed' in result or 'unknown' in result.lower(), (
+                f'Expected error for visibility={bad_vis!r}, got {result!r}'
+            )

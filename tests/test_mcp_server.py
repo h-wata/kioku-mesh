@@ -997,9 +997,9 @@ def test_save_observation_rejects_invalid_memory_type(single_zenohd: Any) -> Non
         f'barrier {sentinel.observation_id} to appear in search',
     )
     leaked = store.search_observations(project='mcp-mt-validate', limit=10)
-    assert [r.observation_id for r in leaked] == [
-        sentinel.observation_id
-    ], 'invalid memory_type must not produce a stored obs'
+    assert [r.observation_id for r in leaked] == [sentinel.observation_id], (
+        'invalid memory_type must not produce a stored obs'
+    )
 
 
 def test_save_observation_backward_compat(single_zenohd: Any) -> None:  # noqa: ARG001

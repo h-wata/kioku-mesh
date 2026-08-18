@@ -171,9 +171,9 @@ def test_offline_diff_sync(dual_zenohd: Any) -> None:
     a.stop()
 
     results = _search_via(b, project='offline-diff')
-    assert obs.observation_id in [
-        r.observation_id for r in results
-    ], f'expected {obs.observation_id} in B after offline-diff sync, got {[r.observation_id for r in results]}'
+    assert obs.observation_id in [r.observation_id for r in results], (
+        f'expected {obs.observation_id} in B after offline-diff sync, got {[r.observation_id for r in results]}'
+    )
 
 
 def test_tombstone_propagates_across_split_brain(dual_zenohd: Any) -> None:
@@ -193,9 +193,9 @@ def test_tombstone_propagates_across_split_brain(dual_zenohd: Any) -> None:
 
     # Sanity: X is visible via B.
     pre = _search_via(b, project='split-tomb')
-    assert obs.observation_id in [
-        r.observation_id for r in pre
-    ], 'precondition failed: X did not replicate to B before split'
+    assert obs.observation_id in [r.observation_id for r in pre], (
+        'precondition failed: X did not replicate to B before split'
+    )
 
     # 2. Split: B goes down.
     b.stop()
@@ -215,6 +215,6 @@ def test_tombstone_propagates_across_split_brain(dual_zenohd: Any) -> None:
     a.stop()
 
     post = _search_via(b, project='split-tomb')
-    assert obs.observation_id not in [
-        r.observation_id for r in post
-    ], f'tombstone did not propagate: X still visible on B (results={[r.observation_id for r in post]})'
+    assert obs.observation_id not in [r.observation_id for r in post], (
+        f'tombstone did not propagate: X still visible on B (results={[r.observation_id for r in post]})'
+    )

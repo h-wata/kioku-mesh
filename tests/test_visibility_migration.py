@@ -1001,9 +1001,9 @@ def test_cmd_migrate_resume_repairs_after_source_deleted(
 
     assert rc == 0, f'expected exit 0, got {rc}'
     # repair PUT must have been called for the mesh key
-    assert any(
-        key == _MESH_OBS_KEY for key, _ in repair_put_calls
-    ), f'repair PUT for {_MESH_OBS_KEY!r} not found in {repair_put_calls}'
+    assert any(key == _MESH_OBS_KEY for key, _ in repair_put_calls), (
+        f'repair PUT for {_MESH_OBS_KEY!r} not found in {repair_put_calls}'
+    )
 
 
 # ---------------------------------------------------------------------------

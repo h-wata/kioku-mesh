@@ -285,9 +285,9 @@ def test_mesh_start_peer_hint_not_loopback_only(tmp_path: Path) -> None:
             )
 
     # Wildcard listen acknowledgement must appear
-    assert any(
-        '0.0.0.0' in ln or 'all interface' in ln.lower() for ln in lines
-    ), f'Expected wildcard listen acknowledgement.\nOutput:\n{stdout_text}'
+    assert any('0.0.0.0' in ln or 'all interface' in ln.lower() for ln in lines), (
+        f'Expected wildcard listen acknowledgement.\nOutput:\n{stdout_text}'
+    )
 
 
 def test_mesh_join_long_running(tmp_path: Path) -> None:
