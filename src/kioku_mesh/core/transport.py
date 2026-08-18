@@ -44,6 +44,14 @@ _session: zenoh.Session | None = None
 _mesh_first_probe_success: float | None = None
 _mesh_session_start_time: float | None = None
 _transport_status_lock = threading.Lock()
+# Serializes the whole session lifecycle: open / reset *and* the session-change
+# hook that re-declares the index subscribers. Without it two threads could each
+# open a session and declare a subscriber set, of which only the last one stays
+# reachable — the shadowed one leaks, never undeclared (PR #324 review B1).
+# Reentrant because the hook calls back into memory.store, which can reach
+# get_session() again on the same thread. It is the outermost lock: code holding
+# it may take _transport_status_lock (a leaf), never the reverse.
+_session_lifecycle_lock = threading.RLock()
 _zenoh_session_state = 'unknown'
 _last_put_at_iso = ''
 _last_put_status = 'never'
@@ -70,6 +78,41 @@ def register_pending_count(fn: Callable[[], int]) -> None:
     """
     global _pending_count_fn
     _pending_count_fn = fn
+
+
+# Callback for zenoh session lifecycle changes — registered by memory.store at
+# import time, same core → memory inversion as register_pending_count (ADR-0023).
+def _default_session_change(session: 'zenoh.Session | None') -> None:  # noqa: ARG001
+    return None
+
+
+_session_change_fn: Callable[['zenoh.Session | None'], None] = _default_session_change
+
+
+def register_session_change_hook(fn: Callable[['zenoh.Session | None'], None]) -> None:
+    """Register a callback fired whenever the cached session is dropped or reopened.
+
+    Called with ``None`` right after ``_reset_session()`` closes the session and
+    with the new session right after ``get_session()`` opens one. ``memory.store``
+    uses it to re-declare the index subscribers, whose lifetime is bound to the
+    session: without it a single retryable transport error muted the local index
+    for the rest of the process's life (#323).
+    """
+    global _session_change_fn
+    _session_change_fn = fn
+
+
+def _notify_session_change(session: 'zenoh.Session | None') -> None:
+    """Fire the session-change hook; a failing hook must not break transport."""
+    try:
+        _session_change_fn(session)
+    except Exception as e:  # noqa: BLE001
+        log.warning('session change hook failed: %s', e)
+
+
+def current_session() -> 'zenoh.Session | None':
+    """Return the cached session without opening one (diagnostics / doctor)."""
+    return _session
 
 
 @dataclass(frozen=True)
@@ -190,28 +233,34 @@ def _open_session() -> zenoh.Session:
 def _reset_session() -> None:
     """Drop the cached session so the next call reopens it."""
     global _session, _mesh_first_probe_success, _mesh_session_start_time
-    if _session is not None:
-        try:
-            _session.close()
-        except Exception:  # noqa: BLE001
-            pass
-    _session = None
-    _mesh_first_probe_success = None
-    _mesh_session_start_time = None
+    with _session_lifecycle_lock:
+        if _session is not None:
+            try:
+                _session.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _session = None
+        _mesh_first_probe_success = None
+        _mesh_session_start_time = None
+        # Subscribers declared on the closed session are dead; tell memory.store.
+        _notify_session_change(None)
 
 
 def get_session() -> zenoh.Session:
     """Return the cached Zenoh session, opening it on first use or after reset."""
     global _session, _mesh_session_start_time
-    if _session is None:
-        try:
-            _session = _open_session()
-        except _RETRYABLE_EXC:
-            _set_zenoh_session_state('disconnected')
-            raise
-        _mesh_session_start_time = time.monotonic()
-        _set_zenoh_session_state('connected')
-    return _session
+    with _session_lifecycle_lock:
+        if _session is None:
+            try:
+                _session = _open_session()
+            except _RETRYABLE_EXC:
+                _set_zenoh_session_state('disconnected')
+                raise
+            _mesh_session_start_time = time.monotonic()
+            _set_zenoh_session_state('connected')
+            # Re-declare anything bound to the previous session (index subscribers).
+            _notify_session_change(_session)
+        return _session
 
 
 def is_mesh_ready(min_ready_sec: float = 5.0) -> bool:

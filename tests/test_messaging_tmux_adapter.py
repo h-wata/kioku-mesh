@@ -158,6 +158,6 @@ class TestTmuxAdapterInjection:
         assert result is True
         mock_run.assert_called()
         # tmux_adapter must not expose or call ack_message.
-        assert not hasattr(
-            _adapter_module, 'ack_message'
-        ), 'tmux_adapter must not import or expose ack_message (注入 ≠ ack)'
+        assert not hasattr(_adapter_module, 'ack_message'), (
+            'tmux_adapter must not import or expose ack_message (注入 ≠ ack)'
+        )

@@ -614,9 +614,9 @@ def test_user_scope_never_reaches_a_peer_that_does_not_declare_it(
             timeout=ALIGN_TIMEOUT,
         )
         indexed = _indexed_ids(index, _PROJECT)
-        assert (
-            mesh_obs.observation_id in indexed
-        ), f'mesh obs never reached B index, so the absence proves nothing: {indexed}'
+        assert mesh_obs.observation_id in indexed, (
+            f'mesh obs never reached B index, so the absence proves nothing: {indexed}'
+        )
         assert user_obs.observation_id not in indexed, 'user-scope observation was indexed by a mesh-only peer'
     finally:
         for sub in subscribers:

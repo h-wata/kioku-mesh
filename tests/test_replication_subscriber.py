@@ -7,7 +7,9 @@ is a pure unit test and does not need a router.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
+import threading
 import time
 from typing import Any
 
@@ -424,9 +426,9 @@ def test_subscriber_ignores_delete_with_invalid_obs_id(
     finally:
         remote.close()
 
-    assert (
-        physical_delete_calls == []
-    ), f'malformed DELETE keys must not trigger physical_delete; got {physical_delete_calls}'
+    assert physical_delete_calls == [], (
+        f'malformed DELETE keys must not trigger physical_delete; got {physical_delete_calls}'
+    )
     # Real row untouched.
     assert obs.observation_id in {r.observation_id for r in idx.search(project='sub-bad-key')}
 
@@ -1032,3 +1034,366 @@ def test_rebuild_always_skips_legacy_obs(
 
     hits = store.search_observations(project='rebuild-gate-off')
     assert not hits, 'rebuild must never ingest legacy obs (v1.0 removed the read fallback)'
+
+
+# ---------------------------------------------------------------------------
+# Issue #323 — subscriber lifetime is bound to the zenoh session
+# ---------------------------------------------------------------------------
+
+
+def test_subscriber_rebinds_after_session_reset(single_zenohd: Any) -> None:
+    """A put published *after* a session reset still reaches the local index.
+
+    ``with_retry`` drops the session on any retryable transport error
+    (``transport._reset_session``), which kills the subscribers declared on it.
+    Pre-fix they were never re-declared — ``put``/``search`` kept working on the
+    new session while the index went permanently deaf, with no error and no log.
+
+    This exercises the real path end to end: real router, real session reset,
+    real remote publish, real SQLite index. Asserting that a hook fired would
+    not have caught the bug, because the hole was in the wiring, not the call.
+    """
+    idx = store.get_index()
+    assert not idx.disabled
+
+    # What a single retryable put failure does to the transport.
+    store._reset_session()
+    assert store._subscribers is None, 'subscribers declared on the closed session must be dropped'
+    # The next operation reopens the session; the subscribers must come back with it.
+    store.get_session()
+    assert store._subscribers, 'a reopened session must carry re-declared index subscribers'
+
+    obs = _mk_obs('published after session reset', project='sub-rebind')
+    remote = _remote_session(single_zenohd.endpoint, handshake_via='storage')
+    try:
+        _handshake_until(
+            lambda: remote.put(obs.key_expr, obs.to_json()),
+            lambda: obs.observation_id in _indexed_ids(idx, 'sub-rebind'),
+            'the index subscriber re-bound to the post-reset session',
+        )
+    finally:
+        remote.close()
+
+
+def test_subscriber_is_declared_before_the_startup_rebuild(
+    single_zenohd: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sample published *during* the startup rebuild scan is not lost (R2).
+
+    The scan takes up to 60s in production (obs + tomb, ``timeout=30.0`` each).
+    While it ran, the subscriber did not exist yet and the scan's snapshot was
+    already taken, so anything published in that window landed in neither path.
+    The publish here happens inside a stand-in for the scan, so the assertion
+    does not depend on the real scan being slow enough to race.
+    """
+    from kioku_mesh.local_index import LocalIndex
+
+    obs = _mk_obs('published during the rebuild scan', project='sub-during-rebuild')
+    remote = _remote_session(single_zenohd.endpoint, handshake_via='storage')
+    orig_rebuild = LocalIndex.rebuild_from_zenoh
+    indexed_during_scan: list[bool] = []
+
+    def publishing_rebuild(self: LocalIndex, session: object) -> Any:
+        # Stands where the real scan's ~60s window is: publish, then wait for
+        # the subscriber to mirror it while the "scan" is still running.
+        _handshake_until(
+            lambda: remote.put(obs.key_expr, obs.to_json()),
+            lambda: obs.observation_id in {r.observation_id for r in self.search(project='sub-during-rebuild')},
+            'the subscriber to be live during the rebuild scan',
+        )
+        indexed_during_scan.append(True)
+        return orig_rebuild(self, session)
+
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', publishing_rebuild)
+    monkeypatch.setenv('KIOKU_MESH_FORCE_REBUILD', '1')
+    try:
+        store._reset_index()  # simulate a fresh process: next get_index() rebuilds
+        idx = store.get_index()
+        assert indexed_during_scan, 'the rebuild scan must have run'
+        assert obs.observation_id in _indexed_ids(idx, 'sub-during-rebuild')
+    finally:
+        remote.close()
+
+
+def test_doctor_reports_index_subscriber_bound_to_current_session(single_zenohd: Any) -> None:  # noqa: ARG001
+    """``doctor``'s index_subscriber check PASSes on a live session and WARNs after a reset."""
+    from kioku_mesh import doctor
+
+    store.get_index()
+    bound = doctor.check_index_subscriber()
+    assert bound.status is doctor.CheckStatus.PASS, bound.summary
+    assert bound.details['declared'] > 0
+
+    store._reset_session()
+    # No get_session() here: this is the muted state the check exists to surface.
+    muted = doctor.check_index_subscriber()
+    assert muted.status is doctor.CheckStatus.WARN
+    assert muted.details['bound_to_current_session'] is False
+
+
+# ---------------------------------------------------------------------------
+# PR #324 review B1 / N1 — the session/subscriber lifecycle is serialized, and
+# every subscriber that leaves the cache is undeclared.
+#
+# These run on stub sessions/subscribers, no router: the subject is the
+# ordering of transport.get_session / _reset_session against
+# store._ensure_subscribers, and a stub is what makes the interleaving
+# deterministic instead of hoping to hit a microsecond window on a live path.
+# ---------------------------------------------------------------------------
+
+
+class _StubSubscriber:
+    """Stands in for a zenoh.Subscriber and counts its own undeclare()."""
+
+    def __init__(self, session: object) -> None:
+        self.session = session
+        self.undeclare_calls = 0
+
+    def undeclare(self) -> None:
+        self.undeclare_calls += 1
+
+
+class _StubSession:
+    def __init__(self, fail_put: bool = False) -> None:
+        self.fail_put = fail_put
+        self.put_calls: list[str] = []
+
+    def put(self, key_expr: str, payload: str) -> None:  # noqa: ARG002
+        self.put_calls.append(key_expr)
+        if self.fail_put:
+            raise ConnectionError('drain flap')
+
+    def close(self) -> None:
+        return None
+
+
+class _LifecycleHarness:
+    """Stub session/subscriber factories that can pause the first declare."""
+
+    def __init__(self) -> None:
+        self.sessions: list[_StubSession] = []
+        self.declared: list[list[_StubSubscriber]] = []
+        self.opening = threading.Event()
+        self.declaring = threading.Event()
+        self.release = threading.Event()
+        self.pause_open = False
+        self.pause_declare = False
+        self.reset_inside_first_declare = False
+        self.first_session_fails_put = False
+        self._lock = threading.Lock()
+
+    def open_session(self) -> _StubSession:
+        if self.pause_open and not self.opening.is_set():
+            self.opening.set()
+            self.release.wait(timeout=10.0)
+        session = _StubSession(fail_put=self.first_session_fails_put and not self.sessions)
+        with self._lock:
+            self.sessions.append(session)
+        return session
+
+    def start_subscriber(self, session: object) -> list[_StubSubscriber]:
+        if self.pause_declare and not self.declaring.is_set():
+            self.declaring.set()
+            self.release.wait(timeout=10.0)
+        if self.reset_inside_first_declare:
+            # Stands for the startup rebuild that get_index() runs from inside
+            # start_index_subscriber: a retryable put there resets the session
+            # on this same thread, so ``session`` is stale by the time we return.
+            self.reset_inside_first_declare = False
+            from kioku_mesh import transport
+
+            transport._reset_session()
+            transport.get_session()
+        subs = [_StubSubscriber(session), _StubSubscriber(session)]
+        with self._lock:
+            self.declared.append(subs)
+        return subs
+
+    def assert_no_leak(self) -> None:
+        """Every declared set is either the live cache or fully undeclared."""
+        cached = store._subscribers
+        for subs in self.declared:
+            if subs is cached:
+                continue
+            for sub in subs:
+                assert sub.undeclare_calls == 1, (
+                    'a subscriber that is not in the cache must have been undeclared exactly once, '
+                    f'got {sub.undeclare_calls}'
+                )
+
+
+@pytest.fixture
+def lifecycle_harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[_LifecycleHarness]:
+    """Install stub session/subscriber factories and an open index, no router."""
+    from kioku_mesh import transport
+    from kioku_mesh.local_index import LocalIndex
+
+    harness = _LifecycleHarness()
+    monkeypatch.setattr(transport, '_open_session', harness.open_session)
+    monkeypatch.setattr(store, 'start_index_subscriber', harness.start_subscriber)
+
+    store._reset_index()
+    store._index = LocalIndex.connect()
+    assert not store._index.disabled, 'the index must be open or _ensure_subscribers is a no-op'
+    transport._reset_session()
+    try:
+        yield harness
+    finally:
+        harness.release.set()
+        store._reset_subscribers()
+        transport._reset_session()
+        store._reset_index()
+
+
+def test_concurrent_session_open_declares_exactly_one_subscriber_set(
+    lifecycle_harness: _LifecycleHarness,
+) -> None:
+    """Two threads racing to open the session must declare one subscriber set, not two (B1).
+
+    Pre-fix ``get_session()`` checked the cached session, opened, and fired the
+    session-change hook with no exclusion, so both threads opened a session and
+    both declared subscribers; only the last write stayed reachable from
+    ``_subscribers``, and the shadowed set could never be undeclared again.
+    """
+    from kioku_mesh import transport
+
+    harness = lifecycle_harness
+    harness.pause_open = True
+
+    first = threading.Thread(target=transport.get_session, name='session-open-a')
+    first.start()
+    assert harness.opening.wait(timeout=10.0), 'the first open must have started'
+    second = threading.Thread(target=transport.get_session, name='session-open-b')
+    second.start()
+    # Give the second thread time to reach the open path (or block on the
+    # lifecycle lock, which is the whole point) before the first one finishes.
+    time.sleep(0.2)
+    harness.release.set()
+    for thread in (first, second):
+        thread.join(timeout=10.0)
+        assert not thread.is_alive(), f'{thread.name} did not finish'
+
+    assert len(harness.declared) == 1, f'exactly one subscriber set may be declared, got {len(harness.declared)}'
+    assert len(harness.sessions) == 1, f'exactly one session may be opened, got {len(harness.sessions)}'
+    cached = store._subscribers
+    assert cached is harness.declared[0]
+    assert all(sub.session is transport.current_session() for sub in cached)
+    harness.assert_no_leak()
+
+    # N1: teardown must actually undeclare — a no-op undeclare() leaks the
+    # subscription for the rest of the process's life and nothing else notices.
+    store._reset_subscribers()
+    for sub in cached:
+        assert sub.undeclare_calls == 1, (
+            f'each cached subscriber must be undeclared exactly once, got {sub.undeclare_calls}'
+        )
+
+
+def test_session_reset_during_declare_does_not_leak_subscribers(
+    lifecycle_harness: _LifecycleHarness,
+) -> None:
+    """A reset racing an in-flight declare must not leave a set outside the cache (B1).
+
+    This is the pending-drain shape: the drain thread calls ``_reset_session()``
+    while the MCP thread is mid-``start_index_subscriber``. Pre-fix the reset saw
+    an empty cache (the declare had not stored its result yet), so the in-flight
+    set was never undeclared, and the cache ended up holding subscribers bound to
+    the *closed* session.
+    """
+    from kioku_mesh import transport
+
+    harness = lifecycle_harness
+    harness.pause_declare = True
+
+    def reset_and_reopen() -> None:
+        transport._reset_session()
+        transport.get_session()
+
+    first = threading.Thread(target=transport.get_session, name='session-open')
+    first.start()
+    assert harness.declaring.wait(timeout=10.0), 'the first declare must have started'
+    second = threading.Thread(target=reset_and_reopen, name='session-reset')
+    second.start()
+    time.sleep(0.2)
+    harness.release.set()
+    for thread in (first, second):
+        thread.join(timeout=10.0)
+        assert not thread.is_alive(), f'{thread.name} did not finish'
+
+    cached = store._subscribers
+    assert cached, 'the reopened session must carry subscribers'
+    assert all(sub.session is transport.current_session() for sub in cached), (
+        'the cache must hold subscribers declared on the live session, not on a closed one'
+    )
+    harness.assert_no_leak()
+
+
+def test_session_reset_inside_declare_undeclares_the_stale_set(
+    lifecycle_harness: _LifecycleHarness,
+) -> None:
+    """A same-thread reset during the declare must not cache (or leak) the stale set (B1).
+
+    The lifecycle lock is reentrant, so the one path that can still swap the
+    session mid-declare is the declare itself: ``start_index_subscriber`` calls
+    ``get_index()``, whose startup rebuild can hit a retryable put and reset the
+    session. The post-declare ``current_session()`` re-check is what catches it.
+    """
+    from kioku_mesh import transport
+
+    harness = lifecycle_harness
+    harness.reset_inside_first_declare = True
+
+    transport.get_session()
+
+    assert len(harness.declared) == 2, 'the reentrant reset must have triggered a second declare'
+    # The inner (post-reset) declare finishes first, so order here is not identity.
+    current = transport.current_session()
+    live = [subs for subs in harness.declared if subs[0].session is current]
+    stale = [subs for subs in harness.declared if subs[0].session is not current]
+    assert len(live) == 1 and len(stale) == 1
+    assert store._subscribers is live[0], 'the cache must hold the set declared on the live session'
+    for sub in stale[0]:
+        assert sub.undeclare_calls == 1, (
+            f'the set declared on the reset session must be undeclared, got {sub.undeclare_calls}'
+        )
+    assert store.subscriber_status()['bound_to_current_session'] is True
+    harness.assert_no_leak()
+
+
+def test_pending_drain_retry_rebinds_the_index_subscriber(
+    lifecycle_harness: _LifecycleHarness,
+) -> None:
+    """The pending-drain reset path re-declares the subscribers too (#323 / PR #324).
+
+    ``drain_pending_puts`` resets the session on a retryable put — from the
+    background drain thread, not from the caller — which is the second way the
+    index went permanently deaf. The reset hook must undeclare the dead set and
+    the next session must carry a fresh one.
+    """
+    from kioku_mesh import transport
+
+    harness = lifecycle_harness
+    harness.first_session_fails_put = True
+
+    transport.get_session()
+    dead = store._subscribers
+    assert dead, 'the first session must carry subscribers'
+
+    obs = _mk_obs('queued while the router was down', project='drain-rebind')
+    store._enqueue_pending_put('observation', obs.key_expr, obs.observation_id, obs.to_json())
+    store.drain_pending_puts()
+
+    assert transport.current_session() is None, 'a retryable drain failure must drop the session'
+    for sub in dead:
+        assert sub.undeclare_calls == 1, (
+            f'subscribers of the dropped session must be undeclared, got {sub.undeclare_calls}'
+        )
+    assert store._subscribers is None, 'nothing may stay cached while there is no session'
+
+    transport.get_session()
+    fresh = store._subscribers
+    assert fresh and fresh is not dead, 'the reopened session must carry re-declared subscribers'
+    assert all(sub.session is transport.current_session() for sub in fresh)
+    assert store.subscriber_status()['bound_to_current_session'] is True
+    harness.assert_no_leak()

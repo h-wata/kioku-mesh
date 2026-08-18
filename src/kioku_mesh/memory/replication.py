@@ -39,6 +39,7 @@ from ..core.models import Observation
 from ..core.models import Tombstone
 from ..core.scope import obs_read_selectors
 from ..core.scope import tomb_read_selectors
+from ..core.transport import _now_iso_utc
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,20 @@ log = logging.getLogger(__name__)
 # ``--rebuild`` flag) outranks both env vars.
 _rebuild_on_init_default: bool = True
 _rebuild_explicit_override: bool | None = None
+
+# Last time any subscriber callback saw a sample. Liveness evidence for
+# ``doctor``: a subscriber can be declared and still be muted (#323).
+_last_sample_at_iso: str = ''
+
+
+def last_index_sample_at() -> str:
+    """ISO timestamp of the last sample any index subscriber received ('' if none)."""
+    return _last_sample_at_iso
+
+
+def _record_sample() -> None:
+    global _last_sample_at_iso
+    _last_sample_at_iso = _now_iso_utc()
 
 
 def _store() -> ModuleType:
@@ -169,6 +184,7 @@ def start_index_subscriber(session: zenoh.Session) -> list:
         return []
 
     def on_obs(sample: Any) -> None:
+        _record_sample()
         key_str = str(sample.key_expr)
         # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(key_str):
@@ -213,6 +229,7 @@ def start_index_subscriber(session: zenoh.Session) -> list:
             log.warning('index subscriber on_obs error: %s', e)
 
     def on_tomb(sample: Any) -> None:
+        _record_sample()
         key_str = str(sample.key_expr)
         # ADR-0029: legacy namespace is never read (v0.8.x read-fallback escape hatch removed in v1.0).
         if is_legacy_key(key_str):

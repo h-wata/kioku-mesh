@@ -251,9 +251,9 @@ def test_force_id_purges_unparseable_key(single_zenohd: Any) -> None:  # noqa: A
         'the wildcard broadcast to sweep the malformed key',
     )
     post = [str(r.ok.key_expr) for r in sess.get('mem/obs/**', timeout=2.0) if r.ok]
-    assert (
-        malformed_key not in post
-    ), f'wildcard broadcast should have swept {malformed_key}, but still present in {post}'
+    assert malformed_key not in post, (
+        f'wildcard broadcast should have swept {malformed_key}, but still present in {post}'
+    )
 
 
 def test_gc_skips_tomb_with_key_body_id_mismatch(single_zenohd: Any) -> None:  # noqa: ARG001

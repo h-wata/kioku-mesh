@@ -603,9 +603,9 @@ def test_search_via_zenoh_project_filter_short_circuits_before_keyword(
     )
     # Sanity check that the spy itself is wired correctly: the project-match
     # obs DOES go through the keyword filter at least once.
-    assert (
-        lower_calls.get(obs_match.observation_id, 0) >= 1
-    ), 'project-match obs never reached the keyword filter — spy is not wired correctly'
+    assert lower_calls.get(obs_match.observation_id, 0) >= 1, (
+        'project-match obs never reached the keyword filter — spy is not wired correctly'
+    )
 
 
 def test_search_via_zenoh_filters_skip_non_matching_early(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -671,9 +671,9 @@ def test_search_via_zenoh_cursor_strict_tuple_walks_same_timestamp(monkeypatch: 
         cursor_observation_id=cursor_row.observation_id,
     )
     strict_ids = [o.observation_id for o in strict]
-    assert strict_ids == [
-        r.observation_id for r in rows[3:]
-    ], 'cursor_observation_id must drop the boundary row and anything sorted before it'
+    assert strict_ids == [r.observation_id for r in rows[3:]], (
+        'cursor_observation_id must drop the boundary row and anything sorted before it'
+    )
 
 
 def test_search_via_zenoh_and_or_and_first_ordering(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -706,9 +706,9 @@ def test_search_via_zenoh_and_or_and_first_ordering(monkeypatch: pytest.MonkeyPa
     ids = [o.observation_id for o in results]
     assert and_obs.observation_id in ids, 'AND-matching obs must be in results'
     assert or_only_obs.observation_id in ids, 'OR-only obs must also be in results'
-    assert ids.index(and_obs.observation_id) < ids.index(
-        or_only_obs.observation_id
-    ), 'AND hit must appear before OR-only hit regardless of created_at order'
+    assert ids.index(and_obs.observation_id) < ids.index(or_only_obs.observation_id), (
+        'AND hit must appear before OR-only hit regardless of created_at order'
+    )
 
 
 def test_search_via_zenoh_and_or_fills_from_or_when_and_short(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -844,9 +844,9 @@ class TestSearchViaZenohBaseFilterSurvivesFallbackQueryMatch:
 
         ids = {o.observation_id for o in results}
         assert kept.observation_id in ids, 'non-tombstoned query match must survive the base filter'
-        assert (
-            tombstoned.observation_id not in ids
-        ), f'tombstoned obs must not resurface even though it matches the query in {search_mode!r} mode'
+        assert tombstoned.observation_id not in ids, (
+            f'tombstoned obs must not resurface even though it matches the query in {search_mode!r} mode'
+        )
 
     def test_since_until_excludes_out_of_range_query_matching_obs(
         self, monkeypatch: pytest.MonkeyPatch, search_mode: str
@@ -872,9 +872,9 @@ class TestSearchViaZenohBaseFilterSurvivesFallbackQueryMatch:
 
         ids = {o.observation_id for o in results}
         assert in_range.observation_id in ids, 'in-range query match must survive the base filter'
-        assert (
-            out_of_range.observation_id not in ids
-        ), f'out-of-range obs must not resurface even though it matches the query in {search_mode!r} mode'
+        assert out_of_range.observation_id not in ids, (
+            f'out-of-range obs must not resurface even though it matches the query in {search_mode!r} mode'
+        )
 
     def test_until_excludes_after_range_query_matching_obs_non_cursor(
         self, monkeypatch: pytest.MonkeyPatch, search_mode: str
@@ -901,9 +901,9 @@ class TestSearchViaZenohBaseFilterSurvivesFallbackQueryMatch:
 
         ids = {o.observation_id for o in results}
         assert in_range.observation_id in ids, 'in-range query match must survive the base filter'
-        assert (
-            after_until.observation_id not in ids
-        ), f'after-until obs must not resurface even though it matches the query in {search_mode!r} mode'
+        assert after_until.observation_id not in ids, (
+            f'after-until obs must not resurface even though it matches the query in {search_mode!r} mode'
+        )
 
     def test_cursor_excludes_boundary_query_matching_obs(
         self, monkeypatch: pytest.MonkeyPatch, search_mode: str
@@ -936,9 +936,9 @@ class TestSearchViaZenohBaseFilterSurvivesFallbackQueryMatch:
 
         ids = {o.observation_id for o in results}
         assert surviving.observation_id in ids, 'row past the cursor boundary must survive the base filter'
-        assert (
-            cursor_row.observation_id not in ids
-        ), f'cursor-boundary obs must not resurface even though it matches the query in {search_mode!r} mode'
+        assert cursor_row.observation_id not in ids, (
+            f'cursor-boundary obs must not resurface even though it matches the query in {search_mode!r} mode'
+        )
 
 
 # ---------------------------------------------------------------------------
