@@ -14,6 +14,103 @@ ADR-0030.
 
 ## [Unreleased]
 
+> **このリリースは後方非互換の変更を含む (minor bump だが安全な更新ではない)。**
+> 次のリリースは 1.3.0 (minor) を予定している。observation / tombstone の保存は、
+> 稼働中の local zenohd に書き込み先 scope の storage が実在することを毎回確認し、
+> 確認できなければ拒否するようになった (fail-closed)。**zenohd が停止している間は
+> ローカルにも記録が残らない**。従来は SQLite への upsert と pending_puts への
+> enqueue で受理されていたため、利用者から見た挙動変化は大きい。既存 host は
+> `kioku-mesh config render-storages --apply` と zenohd 再起動、および
+> `docs/scope-enforcement-cutover.md` の移行手順を終えるまで通常の save が全部
+> 拒否される。ADR-0029 の semver 契約ではこれらの変更は major bump に相当するが、
+> 単一運用者期間中の例外を定める ADR-0030 の条件 (CHANGELOG 冒頭・release notes
+> 最上部への明記、upgrade notes の提示) を満たしたうえでユーザー判断により minor
+> とした。更新前に下記 "Upgrade notes for v1.3" を必ず確認すること。
+
+### Added
+
+- host-global config (`~/.config/kioku-mesh/config.yaml`) に `storage_scopes` を
+  追加した。保持・購読する scope をこの一つのリストから導出する (`mesh` /
+  `user/<id>` / `team/<id>` のみ、`mesh` 必須、wildcard と余分なセグメントは
+  正規化せず拒否)。zenohd storage の render、read path の selector、save
+  preflight はすべてこの宣言から導出する (#316, ADR-0019 Phase E Addendum)
+- `kioku-mesh config render-storages`: 既存 zenohd config の storages block だけを
+  `storage_scopes` から render し直す。listen / connect / TLS / 手で足した設定は
+  保持する。`--dry-run` / `--apply` / `--transitional` (移行中だけ pre-split の
+  broad `agent_mem` を read-only の re-PUT source として残す) /
+  `--acknowledge-missing-scopes` (#316)
+- `kioku-mesh scope-migrate manifest` / `re-put`: pre-split の `mem/mesh/**` key を
+  新しい clean な mesh storage へ移す 2 段階の移行。manifest は immutable で、
+  `--expected-peers` に答えなかった router がある場合と、同じ key が異なる payload
+  digest で返った場合は fail-stop。re-PUT は checkpoint 付きで再開でき、key ごとに
+  live storage gate を通り、完了後に digest を verify する。`--dry-run` は本番実行が
+  止まる 3 つの判定 (checkpoint binding / key ごとの gate / 最終 verify の予測) を
+  実際に走らせる (#319)
+- `kioku-mesh scope-inventory`: この host が scope ごとに何を保持しているかを
+  読み取り専用で報告する (Zenoh directory probe + SQLite index)。tombstone は
+  observation 行とは別の source から数える (#319)
+- `kioku-mesh scope-purge`: 宣言していない scope の host-local copy を除去する。
+  Zenoh delete は発行せず、RocksDB directory は削除ではなく rename して退避する。
+  `agent_mem` (cutover の rollback artifact) と legacy 行は対象外 (#319)
+- `kioku-mesh doctor`: 宣言 `storage_scopes` と自 host の live storage を照合する
+  `storage_scopes` チェックを追加した。scope の欠落・volume dir や strip prefix の
+  不一致・重複した broad storage の残存・scope preflight で止まっている queued put を
+  FAIL として報告する。peer の storage は診断表示のみで、durability は自 host を
+  基準に判定する (#316)
+- 実 zenohd を 2 台使う統合テスト基盤。clean mesh dir への alignment と peer 間の
+  replication parameter 一致を検証する (#318)
+- 移行 runbook `docs/scope-enforcement-cutover.md`。freeze の範囲と期間、各ステップの
+  gate、新しい team scope を増やす日常運用、2 段階の rollback、回収できない限界を
+  記載した
+
+### Changed
+
+- **破壊的変更**: 通常の observation / tombstone save は、publish の前に自 host の
+  live storage を Zenoh admin space で毎回確認するようになった。次のいずれかで
+  拒否される: zenohd / admin storage を確認できない、`storage_scopes` が不正または
+  書き込み先 scope が未宣言、live zenohd に exact な scope storage が無い、同じ key を
+  受け取る broad storage が残っている、`ZENOH_CONNECT` が local router を指していない。
+  **拒否された save は SQLite への成功記録も新規の queue 行も作らない** (痕跡を残さない)。
+  WARN で通す flag は用意しない (#316)
+- **破壊的変更**: zenohd が停止している間は save が一切通らない。従来は SQLite upsert +
+  pending_puts で受理されていた (#316)
+- **破壊的変更**: 広い `agent_mem` storage のままの host は、
+  `config render-storages --apply` と zenohd 再起動を終えるまで通常の save が全部
+  拒否される (#316)
+- 既にキューにある書き込みで preflight に落ちるものは破棄されず queue に残り、
+  `doctor` に表示される (#316)
+- ローカルの mesh 単一 scope の `kioku-mesh mesh start` は、非永続の例外として mesh
+  scope の save を受理し、その旨を process 内で一度 log に出す。user / team scope の
+  書き込みは拒否する。**リモート endpoint は拒否**され、doctor もその状態を例外と
+  して扱わず FAIL とする (#316)
+- read isolation は既定 off。`KIOKU_MESH_SCOPE_ISOLATION=enforce` のときだけ
+  subscriber / rebuild / fallback / purge の selector が宣言 scope に絞られる。この
+  flag は read path 専用で、write preflight は緩めない (#316)
+- `kioku-mesh init` は `storage_scopes` から scoped storage を出力するようになった。
+  既存 host の変換は `init --force` ではなく `config render-storages` と移行 runbook で
+  行う (`init --force` は config を全文書き直すが、旧 `agent_mem` directory のデータは
+  移動しない)。`--apply` は SQLite inventory に observation があるのに render されない
+  scope があるとき、`--acknowledge-missing-scopes` なしでは適用を拒否する (#316)
+- `migrate-visibility` は target scope に live で exact、かつ重複しない durable storage が
+  無ければ copy も delete も行わずに拒否する。resume した repair PUT にも同じ判定が
+  かかる (#316)
+
+### Upgrade notes for v1.3
+
+- **部分適用は自己修復しない。** key expression の異なる storage は別の replica group に
+  なるため、旧 broad config のまま取り残された host は新しい `mem/mesh/**` group と
+  alignment できない。live publication は届くが、遅れている間の差分は後から埋まらない。
+  全 peer に対して一つの maintenance window 内で適用し、片側だけ適用した状態で通常運用を
+  再開しないこと。
+- 既存 host の移行手順は `docs/scope-enforcement-cutover.md` を参照する。freeze は
+  MCP process だけでなく **raw Zenoh writer を含み**、manifest 生成前から final verify
+  完了まで維持する必要がある (freeze 違反で失われた key は verify では検出できない)。
+- 新規 host は `kioku-mesh init` がそのまま scoped storage を出力するので、移行は要らない。
+- save が拒否されるようになった場合は、まず `kioku-mesh doctor` の `storage_scopes` を
+  見る。宣言と live storage の差分と、次に打つコマンドが表示される。
+- 旧 `agent_mem` directory は移行後も削除しない。cutover の rollback artifact であり、
+  `scope-purge` の対象にもならない。
+
 ## [1.2.0] - 2026-08-17
 
 > **このリリースは後方非互換の変更を含む (minor bump だが安全な更新ではない)。**

@@ -636,3 +636,70 @@ Zenoh key delete を publish してはならない。
 task 1+2+3 は main（merge commit `9eb57d6`）に入っている。上記のうち実機の cutover 手順・
 purge ツール・利用者告知（task 4/5/6）は未実装であり、この addendum は決定の記録であって
 「移行が完了した」ことを意味しない。
+
+## Phase E Addendum 2: cutover 順序の訂正と verify の検出限界
+
+- Status: Accepted follow-up
+- Date: 2026-08-18
+- 対象: 上記 Phase E Addendum の Decision 4 と Phase E Implementation Status
+- 本追補は既存の記述を書き換えない。下記の 1 は Decision 4 末尾の手順段落を
+  **置き換える**（ADR は append-only なので、原文はそのまま残る）。
+
+### 1. 有効化手順の順序訂正
+
+Phase E Addendum の Decision 4 末尾にある「有効化手順は、全 MCP process 停止
+（save freeze）→ 全 peer の zenohd を transitional config → re-PUT → final config
+の順に揃え、…」の一段落は、以下に置き換える。
+
+> 有効化手順は、legacy migration 完了（legacy count 0）→ 全 MCP process と raw
+> Zenoh writer の停止（save freeze）→ 全 peer の zenohd を transitional config →
+> **manifest 固定** → 全 peer に final config を適用して再起動 → **re-PUT** →
+> digest と clean-dir inventory の検証、の順に行う。検証が通るまで freeze を解かず、
+> その後に MCP を起動する。
+
+訂正の理由は、実装した write gate と transitional config が両立しないためである。
+transitional config は旧 broad `agent_mem` を `legacy_source_store`（`mem/**`,
+`strip_prefix: mem`）として残す。一方 save preflight は「宣言 scope の exact storage
+が live で、かつ**同じ key を受け取る重複した broad storage が無い**こと」を要求する
+（`core/scope.py` の `_verdict_against_live`）。re-PUT も同じ gate を通るため、
+transitional config が live な間は re-PUT が必ず拒否される。したがって re-PUT は
+final config を適用した後にしか実行できず、その source となる manifest は
+transitional config の下で先に固定しておく必要がある。
+
+gate を re-PUT に対してだけ緩める案は採らない。緩めれば旧 broad store が同じ PUT を
+受け取り、`mem/mesh/**` の値が broad な replica group を通じて配布される。これは
+Decision 4 が新 dir を導入して断とうとした汚染経路そのものである。手順の順序を変える
+ほうが、gate に例外を作るより安全である。
+
+### 2. freeze 違反は verify では検出できない
+
+manifest 固定後に raw Zenoh writer が旧 broad store へ `mem/mesh/...` を書いた場合、
+その key は失われ、しかも **`verify_reput` では検出できない**。
+
+- manifest は snapshot なので、その key は manifest に無い。
+- final config では旧 dir が unserved になるので、live query にも現れない。
+- `verify_reput` は manifest key 集合と live key 集合の差分しか見ない。上記の key は
+  `missing`（manifest にあって live に無い）にも `extra`（live にあって manifest に
+  無い）にも入らない（`src/kioku_mesh/memory/scope_migration.py`）。
+
+これは Zenoh storage の性質と snapshot 方式の組み合わせから来る構造的な限界であり、
+実装で埋められない（埋めるには「freeze 中に書かれた key」を知る必要があり、それは
+freeze が守られていれば存在しないものである）。したがって **freeze の範囲に raw
+Zenoh writer を含めること、および freeze を manifest 生成前から final verify 完了まで
+維持することは、運用上の release gate として扱う**。`verify: OK` は「freeze が守られた」
+ことの証明にはならない。
+
+### 3. Implementation Status の更新
+
+上記 Phase E Implementation Status の表は task 4/5/6 を未実装として記録している。
+2026-08-18 時点では以下のとおり全 task が main に入っている。
+
+| task | ステータス |
+|---|---|
+| 1-3 | implemented (PR #316, merge commit `9eb57d6`) |
+| 4 | implemented (PR #318, merge commit `2139d09`) — 二 node 統合テスト基盤 |
+| 5 | implemented (PR #319, merge commit `8dd0e91`) — `scope-migrate` / `scope-inventory` / `scope-purge` |
+| 6 | implemented — `docs/scope-enforcement-cutover.md` と CHANGELOG の breaking 告知 |
+
+実機の cutover 自体はまだ行っていない。実行手順は
+`docs/scope-enforcement-cutover.md` にある。
