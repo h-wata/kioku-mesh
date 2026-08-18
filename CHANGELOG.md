@@ -100,6 +100,9 @@ ADR-0030.
 - `doctor` の `shadow_visibility` hint が実在しない `kioku-mesh gc --shadows` を
   案内していたのを修正し、実際の既定挙動（`--no-shadow-prune` で無効化可能）を
   案内するようにした。
+- `tests/test_messaging_presence.py::test_no_config_no_scopes` がホストの
+  `~/.config/kioku-mesh/config.yaml` に `user_id` が設定済みの環境で必ず失敗して
+  いた問題を修正した。`XDG_CONFIG_HOME` を一時ディレクトリに隔離するようにした。
 
 ### Upgrade notes for v1.3
 
