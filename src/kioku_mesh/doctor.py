@@ -569,6 +569,64 @@ def check_shadow_visibility(index: object = None) -> CheckResult:
     )
 
 
+# Issue #323: index subscriber liveness.
+
+
+def check_index_subscriber() -> CheckResult:
+    """Report whether the local index subscriber is bound to the live zenoh session.
+
+    Subscribers die with the session they were declared on, and until #323 they
+    were never re-declared: one transient transport error left the index muted
+    for the rest of the process's life, with no error and no log. This check
+    makes that state visible — it opens the index (which declares the
+    subscriber) and then asks whether it is bound to the current session.
+    """
+    from .memory import store as store_mod  # noqa: PLC0415
+
+    try:
+        idx = store_mod.get_index()
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            name='index_subscriber',
+            status=CheckStatus.WARN,
+            summary=f'index subscriber check skipped: could not open local index ({type(e).__name__})',
+            hint='Check KIOKU_MESH_INDEX_DB or run `kioku-mesh init`.',
+        )
+    if getattr(idx, 'disabled', False):
+        return CheckResult(
+            name='index_subscriber',
+            status=CheckStatus.PASS,
+            summary='local index disabled (KIOKU_MESH_DISABLE_INDEX), no subscriber expected',
+            details={'declared': 0},
+        )
+    status = store_mod.subscriber_status()
+    details = {
+        'declared': status['declared'],
+        'bound_to_current_session': status['bound_to_current_session'],
+        'last_sample_at': status['last_sample_at'] or 'never',
+    }
+    if status['bound_to_current_session']:
+        return CheckResult(
+            name='index_subscriber',
+            status=CheckStatus.PASS,
+            summary=(
+                f'index subscriber bound to the current zenoh session ({status["declared"]} subscriptions, '
+                f'last sample {details["last_sample_at"]})'
+            ),
+            details=details,
+        )
+    return CheckResult(
+        name='index_subscriber',
+        status=CheckStatus.WARN,
+        summary='index subscriber not bound to a live zenoh session — the local index may be missing updates',
+        hint=(
+            'Usually the router is unreachable: check the zenohd_reachable result above and '
+            'start zenohd. Re-align this host afterwards with `kioku-mesh --rebuild status`.'
+        ),
+        details=details,
+    )
+
+
 # ADR-0026 §C: conflicting-latest check.
 
 # Upper bound on the live set this check scans. Mirrors the supersede
@@ -1382,6 +1440,7 @@ _CHECK_ORDER: tuple[str, ...] = (
     'check_tls_certs',
     'check_fts5',
     'check_shadow_visibility',
+    'check_index_subscriber',
     'check_conflicting_latest',
     'check_tool_call_fragments',
     'check_legacy_namespace',

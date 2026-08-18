@@ -97,6 +97,16 @@ ADR-0030.
 
 ### Fixed
 
+- zenoh session が再作成されると local SQLite index が二度と zenoh の更新を
+  受け取らなくなる問題を修正した。subscriber は宣言時の session と寿命を共にするが
+  `with_retry` / pending-put drain の `_reset_session()` 後に再宣言されず、put と
+  search は新 session で成功し続けるため完全に無症状だった。`core.transport` に
+  session 変更フックを追加し (`register_pending_count` と同じ core→memory 反転、
+  ADR-0023)、`memory.store` が session 再作成のたびに subscriber を張り直す。
+  併せて起動時の `rebuild_from_zenoh` スキャン (最大 60s) の**前**に subscribe する
+  ようにし、スキャン中の PUT/DELETE が両方の経路から漏れる窓を塞いだ。subscriber の
+  (再)宣言は INFO、失敗は WARN で記録し、`doctor` に現行 session への紐づきと
+  最終受信時刻を報告する `index_subscriber` チェックを追加した (#323)
 - `doctor` の `shadow_visibility` hint が実在しない `kioku-mesh gc --shadows` を
   案内していたのを修正し、実際の既定挙動（`--no-shadow-prune` で無効化可能）を
   案内するようにした。

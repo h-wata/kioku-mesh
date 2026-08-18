@@ -52,12 +52,14 @@ from ..core.transport import _reset_transport_status
 from ..core.transport import _RETRYABLE_EXC
 from ..core.transport import _set_pending_drain_in_progress  # noqa: F401  (façade re-export, #167)
 from ..core.transport import _set_zenoh_session_state  # noqa: F401  (façade re-export, #167)
+from ..core.transport import current_session
 from ..core.transport import get_session
 from ..core.transport import GET_TIMEOUT  # noqa: F401  (façade re-export, #167)
 from ..core.transport import get_transport_status  # noqa: F401  (façade re-export, #167)
 from ..core.transport import is_mesh_ready  # noqa: F401  (façade re-export, #167)
 from ..core.transport import mesh_ready_label  # noqa: F401  (façade re-export, #167)
 from ..core.transport import QueryErrorReply  # noqa: F401  (façade re-export, #167)
+from ..core.transport import register_session_change_hook
 from ..core.transport import TransportStatus  # noqa: F401  (façade re-export, #167)
 from ..core.transport import with_retry
 from .local_index import LocalIndex
@@ -85,6 +87,7 @@ from .purge import scan_obs_by_pc_id  # noqa: F401  (façade re-export, #167)
 from .replication import _empty_index_rebuild_allowed
 from .replication import _obs_id_from_key  # noqa: F401  (façade re-export, #167)
 from .replication import _should_rebuild_on_init
+from .replication import last_index_sample_at
 from .replication import reset_rebuild_policy
 from .replication import set_rebuild_on_init_default  # noqa: F401  (façade re-export, #167)
 from .replication import set_rebuild_on_init_explicit  # noqa: F401  (façade re-export, #167)
@@ -98,6 +101,9 @@ MAX_SEARCH = 10_000
 
 _index: LocalIndex | None = None
 _subscribers: list | None = None
+# The session ``_subscribers`` are declared on. Subscribers die with their
+# session, so this is what makes "are we still listening?" answerable (#323).
+_subscriber_session: Any | None = None
 
 
 def get_index() -> LocalIndex:
@@ -136,26 +142,69 @@ def get_index() -> LocalIndex:
                     counts = _index.visibility_counts()
                     if counts.live + counts.tombstoned + counts.shadowed == 0:
                         rebuild = True
+                # Subscribe *before* the rebuild scan: the scan takes up to a
+                # minute and anything published during it would otherwise land
+                # in neither path (#323). The callbacks are idempotent, so the
+                # overlap with the scan is safe (see replication docstring).
+                _ensure_subscribers(session)
                 if rebuild:
                     try:
                         stats = _index.rebuild_from_zenoh(session)
                         log.info('LocalIndex rebuild: %s', stats)
                     except Exception as e:  # noqa: BLE001
                         log.warning('LocalIndex rebuild failed (partial index): %s', e)
-                if _subscribers is None:
-                    _subscribers = start_index_subscriber(session)
             except Exception as e:  # noqa: BLE001
                 log.warning('LocalIndex zenoh init skipped (no session): %s', e)
     return _index
+
+
+def _ensure_subscribers(session: Any) -> None:
+    """Declare the index subscribers on ``session`` unless already bound to it.
+
+    Idempotent per session: repeated calls with the same session object are a
+    no-op, a call with a new one re-declares. Does nothing while no index is
+    open, so a process that only writes (no index) does not grow one as a side
+    effect of opening a session.
+    """
+    global _subscribers, _subscriber_session
+    if _index is None or _index.disabled:
+        return
+    if _subscriber_session is session and _subscribers:
+        return
+    _reset_subscribers()
+    # Set before declaring: start_index_subscriber calls back into get_index(),
+    # which calls this function again — the guard above must already hold.
+    _subscriber_session = session
+    try:
+        _subscribers = start_index_subscriber(session)
+    except Exception as e:  # noqa: BLE001
+        _subscriber_session = None
+        log.warning('index subscriber declaration failed (local index will not see zenoh updates): %s', e)
+        return
+    log.info('index subscriber declared on zenoh session (%d subscriptions)', len(_subscribers))
+
+
+def _on_session_change(session: Any) -> None:
+    """core.transport hook: re-bind the index subscribers to the live session.
+
+    ``session is None`` means the session was just closed (``_reset_session``),
+    so the subscribers declared on it are dead and must be dropped; otherwise a
+    new session was opened and they are re-declared on it.
+    """
+    if session is None:
+        _reset_subscribers()
+        return
+    _ensure_subscribers(session)
 
 
 def _reset_subscribers() -> None:
     """Undeclare zenoh subscribers and clear the cache.
 
     Called by _reset_index so that subscriber callbacks stop referencing
-    the about-to-be-closed LocalIndex instance.
+    the about-to-be-closed LocalIndex instance, and by _on_session_change
+    when the session they are declared on goes away.
     """
-    global _subscribers
+    global _subscribers, _subscriber_session
     if _subscribers:
         for sub in _subscribers:
             try:
@@ -163,6 +212,20 @@ def _reset_subscribers() -> None:
             except Exception:  # noqa: BLE001
                 pass
     _subscribers = None
+    _subscriber_session = None
+
+
+def subscriber_status() -> dict[str, Any]:
+    """Report whether the index subscribers are bound to the current session.
+
+    Diagnostics only (``doctor``): does not open a session or an index.
+    """
+    session = current_session()
+    return {
+        'declared': len(_subscribers or []),
+        'bound_to_current_session': bool(_subscribers) and session is not None and _subscriber_session is session,
+        'last_sample_at': last_index_sample_at(),
+    }
 
 
 def _reset_index() -> None:
@@ -534,3 +597,9 @@ def _find_by_id_via_zenoh(observation_id: str) -> Observation | None:
         if obs.observation_id == observation_id:
             return obs
     return None
+
+
+# ADR-0023: register the session-change callback with core.transport so the
+# index subscribers are re-declared whenever the zenoh session is recreated,
+# without core importing memory (#323).
+register_session_change_hook(_on_session_change)

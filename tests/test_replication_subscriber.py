@@ -1032,3 +1032,99 @@ def test_rebuild_always_skips_legacy_obs(
 
     hits = store.search_observations(project='rebuild-gate-off')
     assert not hits, 'rebuild must never ingest legacy obs (v1.0 removed the read fallback)'
+
+
+# ---------------------------------------------------------------------------
+# Issue #323 — subscriber lifetime is bound to the zenoh session
+# ---------------------------------------------------------------------------
+
+
+def test_subscriber_rebinds_after_session_reset(single_zenohd: Any) -> None:
+    """A put published *after* a session reset still reaches the local index.
+
+    ``with_retry`` drops the session on any retryable transport error
+    (``transport._reset_session``), which kills the subscribers declared on it.
+    Pre-fix they were never re-declared — ``put``/``search`` kept working on the
+    new session while the index went permanently deaf, with no error and no log.
+
+    This exercises the real path end to end: real router, real session reset,
+    real remote publish, real SQLite index. Asserting that a hook fired would
+    not have caught the bug, because the hole was in the wiring, not the call.
+    """
+    idx = store.get_index()
+    assert not idx.disabled
+
+    # What a single retryable put failure does to the transport.
+    store._reset_session()
+    assert store._subscribers is None, 'subscribers declared on the closed session must be dropped'
+    # The next operation reopens the session; the subscribers must come back with it.
+    store.get_session()
+    assert store._subscribers, 'a reopened session must carry re-declared index subscribers'
+
+    obs = _mk_obs('published after session reset', project='sub-rebind')
+    remote = _remote_session(single_zenohd.endpoint, handshake_via='storage')
+    try:
+        _handshake_until(
+            lambda: remote.put(obs.key_expr, obs.to_json()),
+            lambda: obs.observation_id in _indexed_ids(idx, 'sub-rebind'),
+            'the index subscriber re-bound to the post-reset session',
+        )
+    finally:
+        remote.close()
+
+
+def test_subscriber_is_declared_before_the_startup_rebuild(
+    single_zenohd: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sample published *during* the startup rebuild scan is not lost (R2).
+
+    The scan takes up to 60s in production (obs + tomb, ``timeout=30.0`` each).
+    While it ran, the subscriber did not exist yet and the scan's snapshot was
+    already taken, so anything published in that window landed in neither path.
+    The publish here happens inside a stand-in for the scan, so the assertion
+    does not depend on the real scan being slow enough to race.
+    """
+    from kioku_mesh.local_index import LocalIndex
+
+    obs = _mk_obs('published during the rebuild scan', project='sub-during-rebuild')
+    remote = _remote_session(single_zenohd.endpoint, handshake_via='storage')
+    orig_rebuild = LocalIndex.rebuild_from_zenoh
+    indexed_during_scan: list[bool] = []
+
+    def publishing_rebuild(self: LocalIndex, session: object) -> Any:
+        # Stands where the real scan's ~60s window is: publish, then wait for
+        # the subscriber to mirror it while the "scan" is still running.
+        _handshake_until(
+            lambda: remote.put(obs.key_expr, obs.to_json()),
+            lambda: obs.observation_id in {r.observation_id for r in self.search(project='sub-during-rebuild')},
+            'the subscriber to be live during the rebuild scan',
+        )
+        indexed_during_scan.append(True)
+        return orig_rebuild(self, session)
+
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', publishing_rebuild)
+    monkeypatch.setenv('KIOKU_MESH_FORCE_REBUILD', '1')
+    try:
+        store._reset_index()  # simulate a fresh process: next get_index() rebuilds
+        idx = store.get_index()
+        assert indexed_during_scan, 'the rebuild scan must have run'
+        assert obs.observation_id in _indexed_ids(idx, 'sub-during-rebuild')
+    finally:
+        remote.close()
+
+
+def test_doctor_reports_index_subscriber_bound_to_current_session(single_zenohd: Any) -> None:  # noqa: ARG001
+    """``doctor``'s index_subscriber check PASSes on a live session and WARNs after a reset."""
+    from kioku_mesh import doctor
+
+    store.get_index()
+    bound = doctor.check_index_subscriber()
+    assert bound.status is doctor.CheckStatus.PASS, bound.summary
+    assert bound.details['declared'] > 0
+
+    store._reset_session()
+    # No get_session() here: this is the muted state the check exists to surface.
+    muted = doctor.check_index_subscriber()
+    assert muted.status is doctor.CheckStatus.WARN
+    assert muted.details['bound_to_current_session'] is False
