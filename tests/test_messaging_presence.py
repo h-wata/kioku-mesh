@@ -141,7 +141,8 @@ class TestPresenceKey:
 
 
 class TestPublicationScopes:
-    def test_no_config_no_scopes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_config_no_scopes(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+        monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
         monkeypatch.delenv('KIOKU_MESH_USER_ID', raising=False)
         monkeypatch.delenv('KIOKU_MESH_TEAM_ID', raising=False)
         monkeypatch.delenv('KIOKU_MESH_MESSAGING_PRESENCE_MESH', raising=False)
