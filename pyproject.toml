@@ -45,7 +45,7 @@ Changelog = "https://github.com/h-wata/kioku-mesh/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3",
-    "ruff>=0.6",
+    "ruff==0.11.12",
 ]
 test = [
     "fastmcp>=0.2",
