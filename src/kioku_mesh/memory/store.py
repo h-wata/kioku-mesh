@@ -50,6 +50,7 @@ from ..core.transport import _record_put_result  # noqa: F401  (façade re-expor
 from ..core.transport import _reset_session  # noqa: F401  (façade re-export, #167)
 from ..core.transport import _reset_transport_status
 from ..core.transport import _RETRYABLE_EXC
+from ..core.transport import _session_lifecycle_lock
 from ..core.transport import _set_pending_drain_in_progress  # noqa: F401  (façade re-export, #167)
 from ..core.transport import _set_zenoh_session_state  # noqa: F401  (façade re-export, #167)
 from ..core.transport import current_session
@@ -165,23 +166,46 @@ def _ensure_subscribers(session: Any) -> None:
     no-op, a call with a new one re-declares. Does nothing while no index is
     open, so a process that only writes (no index) does not grow one as a side
     effect of opening a session.
+
+    Runs under ``transport._session_lifecycle_lock`` — the same lock that guards
+    session open/reset — so two threads cannot each declare a subscriber set and
+    leak the shadowed one (PR #324 review B1).
     """
     global _subscribers, _subscriber_session
-    if _index is None or _index.disabled:
-        return
-    if _subscriber_session is session and _subscribers:
-        return
-    _reset_subscribers()
-    # Set before declaring: start_index_subscriber calls back into get_index(),
-    # which calls this function again — the guard above must already hold.
-    _subscriber_session = session
-    try:
-        _subscribers = start_index_subscriber(session)
-    except Exception as e:  # noqa: BLE001
-        _subscriber_session = None
-        log.warning('index subscriber declaration failed (local index will not see zenoh updates): %s', e)
-        return
-    log.info('index subscriber declared on zenoh session (%d subscriptions)', len(_subscribers))
+    with _session_lifecycle_lock:
+        if _index is None or _index.disabled:
+            return
+        if _subscriber_session is session and _subscribers:
+            return
+        _reset_subscribers()
+        # Set before declaring: start_index_subscriber calls back into get_index(),
+        # which calls this function again — the guard above must already hold.
+        _subscriber_session = session
+        try:
+            declared = start_index_subscriber(session)
+        except Exception as e:  # noqa: BLE001
+            if _subscriber_session is session:
+                _subscriber_session = None
+            log.warning('index subscriber declaration failed (local index will not see zenoh updates): %s', e)
+            return
+        # Re-check under the same lock: the declare above calls back into
+        # get_index(), whose rebuild can hit a retryable put and reset the
+        # session on this very thread (the lock is reentrant, so it gets in).
+        # Subscribers bound to a session that is no longer current are already
+        # dead — undeclare them here or nothing ever will.
+        if current_session() is not session:
+            for sub in declared:
+                try:
+                    sub.undeclare()
+                except Exception:  # noqa: BLE001
+                    pass
+            log.warning('index subscriber declared on a stale session; undeclared instead of cached')
+            if _subscriber_session is session:
+                # Nothing re-bound us in the meantime, so nothing is listening.
+                _subscriber_session = None
+            return
+        _subscribers = declared
+        log.info('index subscriber declared on zenoh session (%d subscriptions)', len(_subscribers))
 
 
 def _on_session_change(session: Any) -> None:
@@ -202,17 +226,20 @@ def _reset_subscribers() -> None:
 
     Called by _reset_index so that subscriber callbacks stop referencing
     the about-to-be-closed LocalIndex instance, and by _on_session_change
-    when the session they are declared on goes away.
+    when the session they are declared on goes away. Takes the same
+    lifecycle lock as _ensure_subscribers so a reset cannot interleave with
+    a redeclare (PR #324 review B1).
     """
     global _subscribers, _subscriber_session
-    if _subscribers:
-        for sub in _subscribers:
-            try:
-                sub.undeclare()
-            except Exception:  # noqa: BLE001
-                pass
-    _subscribers = None
-    _subscriber_session = None
+    with _session_lifecycle_lock:
+        if _subscribers:
+            for sub in _subscribers:
+                try:
+                    sub.undeclare()
+                except Exception:  # noqa: BLE001
+                    pass
+        _subscribers = None
+        _subscriber_session = None
 
 
 def subscriber_status() -> dict[str, Any]:

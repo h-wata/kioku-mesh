@@ -107,6 +107,12 @@ ADR-0030.
   ようにし、スキャン中の PUT/DELETE が両方の経路から漏れる窓を塞いだ。subscriber の
   (再)宣言は INFO、失敗は WARN で記録し、`doctor` に現行 session への紐づきと
   最終受信時刻を報告する `index_subscriber` チェックを追加した (#323)
+- 上記の session / subscriber ライフサイクルを排他制御した。session の open / reset と
+  subscriber の reset / 再宣言を `core.transport` の単一 reentrant lock
+  (`_session_lifecycle_lock`) で直列化し、宣言後に `current_session()` が変わって
+  いないかを再確認して古い宣言は必ず undeclare する。pending-put drain の background
+  thread と MCP 本体が同時に session を張り直すと subscriber が二重宣言され、cache に
+  残らなかった側が undeclare されずに漏れていた (PR #324 cross-review B1/N1)
 - `doctor` の `shadow_visibility` hint が実在しない `kioku-mesh gc --shadows` を
   案内していたのを修正し、実際の既定挙動（`--no-shadow-prune` で無効化可能）を
   案内するようにした。
