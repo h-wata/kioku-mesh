@@ -78,7 +78,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 preview = true
-select = ["A", "ANN", "C4", "C90", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
+select = ["A", "ANN", "C4", "C90", "E", "F", "N", "Q", "W", "D", "D401", "SLF", "PLR0912", "PLR0915"]
 ignore = [
     "ANN002",
     "ANN003",
@@ -141,3 +141,7 @@ addopts = "-p no:launch_testing -p no:launch_ros"
 # (tests/test_two_node_scope_harness.py)。既定の `pytest tests/ -q` に含める。
 # これだけ回すなら `pytest -m integration`、外すなら `pytest -m "not integration"`。
 markers = ["integration: spawns real zenohd routers and waits for replication"]
+
+[tool.ruff.lint.pylint]
+max-branches = 20
+max-statements = 80

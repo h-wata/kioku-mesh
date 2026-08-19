@@ -440,7 +440,7 @@ def search_observations(
 
 
 @with_retry
-def _search_via_zenoh(  # noqa: C901
+def _search_via_zenoh(  # noqa: C901, PLR0912
     *,
     query: str,
     agent_family: str,

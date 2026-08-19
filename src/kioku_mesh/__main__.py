@@ -368,7 +368,7 @@ _LOCAL_INDEX_HINT = (
 )
 
 
-def _cmd_delete(args: argparse.Namespace) -> int:  # noqa: C901
+def _cmd_delete(args: argparse.Namespace) -> int:  # noqa: C901, PLR0912
     if args.observation_id and _delete_has_bulk_selector(args):
         print(
             'observation_id and bulk selector (--project/--pc-id/--since/--until) cannot be combined.',
@@ -1931,7 +1931,7 @@ def _cmd_init_local(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_init(args: argparse.Namespace) -> int:  # noqa: C901
+def _cmd_init(args: argparse.Namespace) -> int:  # noqa: C901, PLR0912
     if args.mode == 'local':
         if getattr(args, 'tls', False):
             print('error: --tls applies only to --mode hub / spoke.', file=sys.stderr)
@@ -2656,7 +2656,7 @@ def _cmd_zenohd_install(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     parser = argparse.ArgumentParser(prog='kioku-mesh', description='kioku-mesh CLI')
     parser.add_argument('--version', action='version', version=f'kioku-mesh {__version__}')
     parser.add_argument(
