@@ -58,6 +58,10 @@ ADR-0030.
   (`_split_tombstone_actions`) 経由で保持する (tombstones-only mode は observation
   を scan しないため orphan 判定を行わない)。定期 worker / doctor /
   CLI への配線は後続 Phase (ADR-0035, TASK-450 Phase 1)
+- `kioku-mesh realign-index [--mode full|tombstones]`: CLI-only host 向けの明示 opt-in
+  補修コマンド。`LocalIndex.repair_from_zenoh` を一回呼ぶだけで、通常 CLI 操作の
+  startup rebuild skip (#38) は変更しない。timer/cron での定期実行例は `--help` に
+  記載するのみで、installer は何も設置しない (ADR-0035, TASK-450 Phase 3)。
 - host-global config (`~/.config/kioku-mesh/config.yaml`) に `storage_scopes` を
   追加した。保持・購読する scope をこの一つのリストから導出する (`mesh` /
   `user/<id>` / `team/<id>` のみ、`mesh` 必須、wildcard と余分なセグメントは

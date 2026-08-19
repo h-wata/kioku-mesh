@@ -670,11 +670,15 @@ def test_check_index_realignment_warns_when_failure_is_newer_than_success(
     assert result.details['last_failure_mode'] == 'tombstones'
 
 
-def test_check_index_realignment_hint_only_names_existing_commands(
+def test_check_index_realignment_hint_names_realign_index(
     tmp_path: 'Path',
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Phase 3's `realign-index` does not exist yet — the hint must not name it."""
+    """Phase 3's `realign-index` exists now — the hint must point CLI-only hosts at it.
+
+    The `--rebuild` shadow-semantics caveat must stay: it warns that
+    `--rebuild` (unlike repair) shadows rows missing from the scan.
+    """
     idx = _index_with_alignment(tmp_path)
     try:
         _patch_index(monkeypatch, idx)
@@ -682,8 +686,9 @@ def test_check_index_realignment_hint_only_names_existing_commands(
     finally:
         idx.close()
 
-    assert 'realign-index' not in result.hint
+    assert 'realign-index' in result.hint
     assert 'kioku-mesh --rebuild status' in result.hint
+    assert 'shadows rows missing from the scan' in result.hint
     assert 'kioku-mesh-mcp' in result.hint
 
 

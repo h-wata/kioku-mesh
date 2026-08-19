@@ -57,6 +57,8 @@ from .identity import resolve_client_id
 from .local_index import LocalIndex
 from .mcp_install import MCPClient
 from .memory.local_index import _resolve_db_path as local_index_db_path
+from .memory.local_index import REPAIR_MODE_FULL
+from .memory.local_index import REPAIR_MODES
 from .memory.metadata import derive_subject
 from .memory.metadata import derive_summary
 from .memory.metadata import is_missing
@@ -1685,6 +1687,37 @@ def _cmd_scope_purge(args: argparse.Namespace) -> int:
     for src, dst in result.dirs_renamed:
         print(f'renamed {src} -> {dst}')
     print(PURGE_LIMIT_NOTE)
+    return 0
+
+
+def _cmd_realign_index(args: argparse.Namespace) -> int:
+    """One-shot repair-only Zenoh scan for CLI-only hosts (ADR-0035, R3 Phase 3).
+
+    Unlike ``--rebuild`` (``rebuild_from_zenoh``), this never shadows or
+    deletes a row because it was absent from the scan — it only applies
+    positive facts (upsert observations, apply tombstones) seen in Zenoh.
+    Normal one-shot commands never call this implicitly (#38); it exists so
+    a host that only ever runs the CLI (no long-lived MCP worker) has an
+    explicit, operator-scheduled catch-up path.
+    """
+    if get_backend().get_status().mode != 'zenoh':
+        print('realign-index requires the zenoh backend (this host is in local mode).', file=sys.stderr)
+        return 2
+    idx = get_index()
+    if idx.disabled:
+        print('realign-index requires the local index (KIOKU_MESH_DISABLE_INDEX is set).', file=sys.stderr)
+        return 2
+    try:
+        stats = idx.repair_from_zenoh(get_session(), mode=args.mode)
+    except Exception as e:  # noqa: BLE001 — surface any scan/transport/SQLite failure, never swallow (ADR-0035)
+        print(f'realign-index failed: {type(e).__name__}: {e}', file=sys.stderr)
+        return 1
+    print(
+        f'realign-index ({stats.mode}) ok: scanned obs={stats.scanned_obs} tomb={stats.scanned_tomb}, '
+        f'added={stats.added} updated={stats.updated} marked_deleted={stats.marked_deleted} '
+        f'orphaned={stats.orphaned}'
+    )
+    print(f'started={stats.started_at} completed={stats.completed_at}')
     return 0
 
 
@@ -3474,6 +3507,42 @@ def _build_parser() -> argparse.ArgumentParser:
     p_migrate.add_argument('--checkpoint', default='', help='checkpoint file path (auto-created if not given)')
     p_migrate.add_argument('--backup-dir', dest='backup_dir', default='', help='backup directory (auto-created)')
     p_migrate.set_defaults(func=_cmd_migrate_visibility)
+
+    p_realign = sub.add_parser(
+        'realign-index',
+        help='One-shot repair-only Zenoh scan for CLI-only hosts (opt-in catch-up; never shadows/deletes)',
+        description=(
+            'Applies positive source facts seen in Zenoh to the local SQLite index: upserts '
+            'observations and applies tombstones seen in the scan. Unlike --rebuild, it never '
+            'shadows or deletes a row because it was absent from the scan (ADR-0035).\n\n'
+            'Normal one-shot commands (search, doctor, save, ...) never run this scan implicitly '
+            '(#38): the per-command cost of a full mesh scan is unacceptable for everyday use. A '
+            'long-lived MCP server instead repairs itself periodically in the background. A host '
+            'that only ever runs the CLI has no such background worker, so this command exists as '
+            'its explicit, operator-scheduled catch-up path.\n\n'
+            'kioku-mesh does not install a timer or systemd unit for you. Example systemd user '
+            'timer (adjust paths; 6h+ is a reasonable interval):\n\n'
+            '  # ~/.config/systemd/user/kioku-mesh-realign.service\n'
+            '  [Service]\n'
+            '  Type=oneshot\n'
+            '  ExecStart=%h/.local/bin/kioku-mesh realign-index\n\n'
+            '  # ~/.config/systemd/user/kioku-mesh-realign.timer\n'
+            '  [Timer]\n'
+            '  OnUnitActiveSec=6h\n'
+            '  [Install]\n'
+            '  WantedBy=timers.target\n\n'
+            '  $ systemctl --user enable --now kioku-mesh-realign.timer\n\n'
+            'Or cron: 0 */6 * * * kioku-mesh realign-index >> ~/.local/state/kioku-mesh/realign.log 2>&1'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_realign.add_argument(
+        '--mode',
+        choices=sorted(REPAIR_MODES),
+        default=REPAIR_MODE_FULL,
+        help='tombstones = cheap tombstone-only scan; full = observations + tombstones (default: full)',
+    )
+    p_realign.set_defaults(func=_cmd_realign_index)
 
     return parser
 
