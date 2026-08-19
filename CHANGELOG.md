@@ -160,6 +160,12 @@ ADR-0030.
   いた。分割前に先行固定しておいたゴールデンテスト (`test_every_subcommand_binds_a_func`)
   がこの誤削除を red として検出し、作業ツリーを分割 commit の状態へ戻して復旧した
   （このため復旧 commit に `src/` の差分は含まれない）
+- `_build_parser` 分割時のゴールデンテストが `completer` フィールドをホスト依存の
+  ため構造 golden から除いていたが、代替の不変条件テストが無く、`_attach_completer(...)`
+  呼び出しが誤って削除されても検出できなかった (PR #333 cross-review B1)。
+  `tests/test_cli_completion.py` に、argcomplete 有効時に project / pc-id 系の
+  全 Action が期待どおりの completer 関数へ接続されていることを検証する決定的な
+  テストを追加した
 - `rebuild_from_zenoh` が、obs 本体が zenoh にもローカル index にも無い tombstone を
   無条件で捨てていた (orphan skip) 問題を修正した。捨てるとその observation_id は
   index から完全に消え、後から obs だけが zenoh に再出現した際に delete 状態を失って
