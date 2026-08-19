@@ -193,6 +193,9 @@ RAW_AND_INFRA_MODULES = {
     'pending_queue.py': 'transient outbox queue for pending puts — not a persisted view',
     'purge.py': 'gc/tombstone physical purge over the raw store — not a persisted view',
     'replication.py': 'replication bookkeeping — not a persisted view',
+    'realignment.py': (
+        'scheduler for LocalIndex.repair_from_zenoh — owns a thread and its cadence, no persisted state of its own'
+    ),
     'metadata.py': 'stateless required-metadata rules and derivation helpers — not a persisted view',
     'save_lint.py': 'stateless save-time lint checks — not a persisted view',
     'supersede.py': 'supersede/tombstone logic operating on the raw store — not a persisted view',

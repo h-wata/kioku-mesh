@@ -364,10 +364,15 @@ def _iter_ok_replies_over(
         yield from _iter_ok_replies(session, key_expr, timeout=timeout)
 
 
+class ScanCancelled(RuntimeError):
+    """A caller asked to abandon a scan before it finished."""
+
+
 def collect_ok_replies_over(
     session: zenoh.Session,
     key_exprs: tuple[str, ...] | list[str],
     timeout: float = GET_TIMEOUT,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[Any]:
     """Collect every ``ok`` reply across ``key_exprs``; raise on any ``err``.
 
@@ -375,8 +380,29 @@ def collect_ok_replies_over(
     must know the whole scan succeeded *before* touching local state (ADR-0035
     repair-only realignment). A lazy iterator cannot express that: its consumer
     has already seen part of the scan when the first ``err`` raises.
+
+    ``should_stop`` makes a long scan abandonable: it is polled before each
+    selector, after each reply, and — crucially — after each selector finishes,
+    and :class:`ScanCancelled` is raised as soon as it returns True. Raising —
+    rather than returning what was collected so far — is what stops a cancelled
+    scan from being mistaken for a complete one. The check *after* a selector is
+    what covers a selector that ends with zero replies: the per-reply check
+    never runs there, so without it a stop arriving while the last selector
+    waited would return a partial scan as a complete one (PR #328 B2).
+    Cancellation is cooperative: a ``session.get()`` that a peer accepted but
+    never answers still blocks until its own ``timeout`` elapses.
     """
-    return list(_iter_ok_replies_over(session, key_exprs, timeout=timeout))
+    collected: list[Any] = []
+    for key_expr in key_exprs:
+        if should_stop is not None and should_stop():
+            raise ScanCancelled(f'scan cancelled before {key_expr}')
+        for ok in _iter_ok_replies(session, key_expr, timeout=timeout):
+            collected.append(ok)
+            if should_stop is not None and should_stop():
+                raise ScanCancelled(f'scan cancelled during {key_expr}')
+        if should_stop is not None and should_stop():
+            raise ScanCancelled(f'scan cancelled after {key_expr}')
+    return collected
 
 
 def _iter_ok_replies(

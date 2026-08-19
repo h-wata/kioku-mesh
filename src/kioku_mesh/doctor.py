@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
+from datetime import timezone
 from enum import Enum
 import json
 import logging
@@ -622,6 +624,102 @@ def check_index_subscriber() -> CheckResult:
         hint=(
             'Usually the router is unreachable: check the zenohd_reachable result above and '
             'start zenohd. Re-align this host afterwards with `kioku-mesh --rebuild status`.'
+        ),
+        details=details,
+    )
+
+
+# ADR-0035: repair-only realignment state (separate from the subscriber check
+# above on purpose — the subscriber answers "are we listening now?", this one
+# answers "when did a repair scan last complete?", and a host can fail either
+# one while passing the other).
+
+#: A full repair older than this (or never completed) is reported as stale.
+_REALIGNMENT_STALE_SEC = 24 * 60 * 60
+
+_REALIGNMENT_HINT = (
+    'Periodic repair only runs inside the long-lived MCP server '
+    '(`kioku-mesh-mcp`) on the zenoh backend; a CLI-only host never realigns '
+    'on its own. To realign once from the CLI, run `kioku-mesh --rebuild status` '
+    '(note: unlike repair, a rebuild also shadows rows missing from the scan).'
+)
+
+
+def _iso_age_sec(value: str) -> float | None:
+    """Seconds since ``value`` (ISO 8601), or None when unset/unparsable."""
+    from .memory.store import _parse_iso  # noqa: PLC0415
+
+    dt = _parse_iso(value)
+    if dt is None:
+        return None
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
+
+def check_index_realignment() -> CheckResult:
+    """Report the repair-only realignment state and its worker (ADR-0035)."""
+    from .memory import store as store_mod  # noqa: PLC0415
+
+    try:
+        idx = store_mod.get_index()
+    except Exception as e:  # noqa: BLE001
+        return CheckResult(
+            name='index_realignment',
+            status=CheckStatus.WARN,
+            summary=f'index realignment check skipped: could not open local index ({type(e).__name__})',
+            hint='Check KIOKU_MESH_INDEX_DB or run `kioku-mesh init`.',
+        )
+    if getattr(idx, 'disabled', False):
+        return CheckResult(
+            name='index_realignment',
+            status=CheckStatus.PASS,
+            summary='local index disabled (KIOKU_MESH_DISABLE_INDEX), no realignment expected',
+        )
+    state = idx.alignment_state()
+    worker = store_mod.realignment_status()
+    details: dict[str, Any] = {
+        'last_tomb_repair_completed_at': state.last_tomb_repair_completed_at or 'never',
+        'last_full_repair_completed_at': state.last_full_repair_completed_at or 'never',
+        'last_failure_at': state.last_failure_at or 'never',
+        'last_failure_mode': state.last_failure_mode,
+        'last_failure_class': state.last_failure_class,
+        'worker_enabled': worker['enabled'],
+        'worker_running': worker['running'],
+    }
+
+    last_success = max(state.last_tomb_repair_completed_at, state.last_full_repair_completed_at)
+    if state.last_failure_at and state.last_failure_at > last_success:
+        return CheckResult(
+            name='index_realignment',
+            status=CheckStatus.WARN,
+            summary=(
+                f'last index repair failed ({state.last_failure_mode or "?"}: '
+                f'{state.last_failure_class or "?"} at {state.last_failure_at}) with no later success'
+            ),
+            hint=_REALIGNMENT_HINT,
+            details=details,
+        )
+
+    full_age = _iso_age_sec(state.last_full_repair_completed_at)
+    if full_age is None or full_age > _REALIGNMENT_STALE_SEC:
+        never = full_age is None
+        return CheckResult(
+            name='index_realignment',
+            status=CheckStatus.WARN,
+            summary=(
+                'no full index repair has completed on this host'
+                if never
+                else f'last full index repair completed {full_age / 3600:.1f}h ago (stale)'
+            ),
+            hint=_REALIGNMENT_HINT,
+            details=details,
+        )
+
+    return CheckResult(
+        name='index_realignment',
+        status=CheckStatus.PASS,
+        summary=(
+            f'last full index repair {full_age / 3600:.1f}h ago, '
+            f'tombstone repair {details["last_tomb_repair_completed_at"]}'
         ),
         details=details,
     )
@@ -1441,6 +1539,7 @@ _CHECK_ORDER: tuple[str, ...] = (
     'check_fts5',
     'check_shadow_visibility',
     'check_index_subscriber',
+    'check_index_realignment',
     'check_conflicting_latest',
     'check_tool_call_fragments',
     'check_legacy_namespace',

@@ -866,6 +866,79 @@ def test_main_starts_and_stops_pending_drain_around_run(monkeypatch: pytest.Monk
     assert calls == ['start', 'run', 'stop']
 
 
+def test_main_owns_realignment_around_run_without_touching_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0035: MCP grants ownership, and revokes it on exit.
+
+    The index and the zenoh session stay untouched: an MCP process whose
+    client never calls a memory tool must not grow either as a side effect.
+    """
+    from kioku_mesh.memory import realignment
+    from kioku_mesh.memory import store as store_mod
+
+    seen: list[dict] = []
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module, 'start_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'stop_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: seen.append(realignment.realignment_status()))
+
+    mcp_server_module.main()
+
+    assert seen == [{'enabled': True, 'running': False}]
+    assert realignment.realignment_status() == {'enabled': False, 'running': False}
+    assert store_mod._index is None
+
+
+def test_main_warns_and_skips_teardown_when_the_worker_does_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The shutdown result is checked (B1), and teardown is skipped (B2 review).
+
+    reset_backend closes the backend and resets the zenoh session; running it
+    while the worker is still inside session.get would tear the session down
+    underneath that thread. The process is exiting anyway.
+    """
+    reset_calls: list[str] = []
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module, 'start_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'stop_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'disable_realignment', lambda: False)
+    monkeypatch.setattr(mcp_server_module, 'reset_backend', lambda: reset_calls.append('reset'))
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: None)
+
+    mcp_server_module.main()
+
+    assert 'index realignment worker did not stop before shutdown' in capsys.readouterr().err
+    assert reset_calls == []
+
+
+def test_main_tears_the_backend_down_when_the_worker_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_calls: list[str] = []
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module, 'start_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'stop_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'reset_backend', lambda: reset_calls.append('reset'))
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: None)
+
+    mcp_server_module.main()
+
+    assert reset_calls == ['reset']
+
+
+def test_main_does_not_own_realignment_on_the_local_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kioku_mesh.memory import realignment
+
+    seen: list[dict] = []
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: seen.append(realignment.realignment_status()))
+
+    mcp_server_module.main()
+
+    assert seen == [{'enabled': False, 'running': False}]
+
+
 def test_main_warns_when_zenoh_connect_unreachable(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,

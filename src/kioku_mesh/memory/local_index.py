@@ -35,7 +35,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
-from typing import Iterator
+from typing import Callable, Iterator
 
 from ..core.identity import state_dir
 from ..core.keyspace import is_legacy_key
@@ -47,6 +47,7 @@ from ..core.scope import obs_read_selectors
 from ..core.scope import tomb_read_selectors
 from ..core.transport import _iter_replies_over
 from ..core.transport import collect_ok_replies_over
+from ..core.transport import ScanCancelled
 
 log = logging.getLogger(__name__)
 
@@ -1628,7 +1629,13 @@ class LocalIndex:
     # ADR-0035: repair-only realignment
     # ------------------------------------------------------------------
 
-    def repair_from_zenoh(self, session: object, *, mode: str = REPAIR_MODE_FULL) -> RepairStats:
+    def repair_from_zenoh(
+        self,
+        session: object,
+        *,
+        mode: str = REPAIR_MODE_FULL,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> RepairStats:
         """Apply positive source facts seen in Zenoh; never shadow or delete.
 
         Unlike :meth:`rebuild_from_zenoh`, absence of a row from the scan means
@@ -1637,8 +1644,16 @@ class LocalIndex:
         scan is collected and validated first, then applied in one transaction
         together with the success metadata.
 
-        Raises :class:`RepairScanError` (scan problems) or :class:`sqlite3.Error`
-        (apply problems) after recording the failure in ``index_alignment_state``.
+        ``should_stop`` lets a caller abandon a long scan (MCP shutdown): the
+        scan raises :class:`ScanCancelled`, nothing is applied, and — unlike a
+        real failure — no failure state is recorded, because being asked to stop
+        says nothing about the mesh. A cancelled repair never advances a
+        completion timestamp either, so the next process still sees the work as
+        outstanding.
+
+        Raises :class:`ScanCancelled` (cancelled), :class:`RepairScanError`
+        (scan problems) or :class:`sqlite3.Error` (apply problems); the latter
+        two after recording the failure in ``index_alignment_state``.
         """
         if mode not in REPAIR_MODES:
             raise ValueError(f'mode must be one of {sorted(REPAIR_MODES)}, got {mode!r}')
@@ -1648,8 +1663,12 @@ class LocalIndex:
         self._record_repair_started(mode, stats.started_at)
         started_monotonic = time.monotonic()
         try:
-            obs_list = self._scan_obs(session) if mode == REPAIR_MODE_FULL else []
-            tomb_ids = self._scan_tombs(session)
+            obs_list = self._scan_obs(session, should_stop) if mode == REPAIR_MODE_FULL else []
+            tomb_ids = self._scan_tombs(session, should_stop)
+        except ScanCancelled as e:
+            log.info('repair_from_zenoh %s cancelled: %s', mode, e)
+            stats.failure_class = type(e).__name__
+            raise
         except Exception as e:
             self._record_repair_failure(mode, e)
             stats.failure_class = type(e).__name__
@@ -1666,10 +1685,10 @@ class LocalIndex:
             raise
         return stats
 
-    def _scan_obs(self, session: object) -> list[Observation]:
+    def _scan_obs(self, session: object, should_stop: Callable[[], bool] | None = None) -> list[Observation]:
         """Collect every observation visible in Zenoh, or raise."""
         obs_list: list[Observation] = []
-        for ok in collect_ok_replies_over(session, obs_read_selectors(), timeout=30.0):
+        for ok in collect_ok_replies_over(session, obs_read_selectors(), timeout=30.0, should_stop=should_stop):
             key_str = str(ok.key_expr)
             key_id = self._repair_key_id(key_str, 'obs')
             if key_id is None:
@@ -1683,10 +1702,10 @@ class LocalIndex:
             obs_list.append(obs)
         return obs_list
 
-    def _scan_tombs(self, session: object) -> dict[str, str]:
+    def _scan_tombs(self, session: object, should_stop: Callable[[], bool] | None = None) -> dict[str, str]:
         """Collect every tombstone visible in Zenoh, or raise."""
         tomb_ids: dict[str, str] = {}
-        for ok in collect_ok_replies_over(session, tomb_read_selectors(), timeout=30.0):
+        for ok in collect_ok_replies_over(session, tomb_read_selectors(), timeout=30.0, should_stop=should_stop):
             key_str = str(ok.key_expr)
             key_id = self._repair_key_id(key_str, 'tomb')
             if key_id is None:
