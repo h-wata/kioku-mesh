@@ -31,6 +31,9 @@ from collections.abc import Iterator
 import contextlib
 import os
 from pathlib import Path
+import sys
+
+import pytest
 
 from kioku_mesh.__main__ import _build_parser
 
@@ -38,25 +41,43 @@ _GOLDEN_DIR = Path(__file__).parent / 'data'
 _HELP_GOLDEN = _GOLDEN_DIR / 'cli_help.txt'
 _STRUCTURE_GOLDEN = _GOLDEN_DIR / 'cli_parser_structure.txt'
 
-# argparse derives its wrap width from the terminal, so pin it or the golden
-# only matches on whatever terminal happened to generate it.
-_HELP_COLUMNS = '100'
+# Rendered help is Python-version specific: 3.13 prints "-p, --project PROJECT"
+# where 3.12 prints "-p PROJECT, --project PROJECT", and the reflowing cascades
+# from there. The help golden is therefore generated under, and only asserted
+# on, the version CI pins. The structure golden below is raw argparse
+# attributes, is identical on both versions, and is what actually guarantees
+# behaviour -- so nothing goes unchecked on other interpreters.
+_HELP_GOLDEN_PYTHON = (3, 12)
 
 _REGEN_ENV = 'KIOKU_MESH_REGEN_CLI_GOLDEN'
 
+# Everything the parser reads from the environment while it is being built or
+# rendered. argparse takes its wrap width from the terminal, and ``init --out``
+# bakes a default path derived from XDG_CONFIG_HOME / HOME into its help string.
+# Unpinned, the golden records whoever generated it and fails on every other
+# machine. The home is deliberately a path that does not exist, so
+# ``resolve_app_dir`` takes its "fresh host" branch rather than depending on
+# which config directories happen to be present.
+_PINNED_ENV = {
+    'COLUMNS': '100',
+    'HOME': '/nonexistent-golden-home',
+    'XDG_CONFIG_HOME': '/nonexistent-golden-home/.config',
+}
+
 
 @contextlib.contextmanager
-def _fixed_terminal_width() -> Iterator[None]:
-    """Pin ``COLUMNS`` so ``format_help`` wraps identically everywhere."""
-    previous = os.environ.get('COLUMNS')
-    os.environ['COLUMNS'] = _HELP_COLUMNS
+def _pinned_environment() -> Iterator[None]:
+    """Pin every environment value the parser bakes into its help text."""
+    previous = {name: os.environ.get(name) for name in _PINNED_ENV}
+    os.environ.update(_PINNED_ENV)
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop('COLUMNS', None)
-        else:
-            os.environ['COLUMNS'] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _subparsers_action(parser: argparse.ArgumentParser) -> argparse._SubParsersAction | None:
@@ -111,33 +132,44 @@ def _describe_action(action: argparse.Action) -> str:
             f'metavar={action.metavar!r}',
             f'type={type_name}',
             f'help={action.help!r}',
-            f'completer={hasattr(action, "completer")}',
         ]
     )
+    # Deliberately not recorded: whether an argcomplete completer is attached.
+    # ``_attach_completer`` is a no-op unless the optional ``completion`` extra
+    # is installed, so the value tracks the developer's virtualenv rather than
+    # the parser, and would fail this golden for an unrelated reason.
+    # tests/test_cli_completion.py covers the completion plumbing itself.
 
 
 def _node_title(path: tuple[str, ...]) -> str:
     return ' '.join(('kioku-mesh', *path))
 
 
-def _render_help_dump(parser: argparse.ArgumentParser) -> str:
+def _render_help_dump() -> str:
+    """Render ``--help`` for every parser node under the pinned environment.
+
+    The parser is built inside the pinned environment too, not just rendered
+    there: argparse resolves ``default=`` when the argument is added, so
+    ``init --out``'s path is baked in at build time.
+    """
     lines: list[str] = []
-    with _fixed_terminal_width():
-        for path, node in _iter_nodes(parser):
+    with _pinned_environment():
+        for path, node in _iter_nodes(_build_parser()):
             lines.append(f'### {_node_title(path)}')
             lines.append(node.format_help())
     return '\n'.join(lines) + '\n'
 
 
-def _render_structure_dump(parser: argparse.ArgumentParser) -> str:
+def _render_structure_dump() -> str:
     lines: list[str] = []
-    for path, node in _iter_nodes(parser):
-        lines.append(f'### {_node_title(path)}')
-        func = node.get_default('func')
-        lines.append(f'func={getattr(func, "__name__", _stable_repr(func))}')
-        lines.append(f'description={node.description!r}')
-        for action in node._actions:
-            lines.append(f'  {_describe_action(action)}')
+    with _pinned_environment():
+        for path, node in _iter_nodes(_build_parser()):
+            lines.append(f'### {_node_title(path)}')
+            func = node.get_default('func')
+            lines.append(f'func={getattr(func, "__name__", _stable_repr(func))}')
+            lines.append(f'description={node.description!r}')
+            for action in node._actions:
+                lines.append(f'  {_describe_action(action)}')
     return '\n'.join(lines) + '\n'
 
 
@@ -168,7 +200,15 @@ def _check_against_golden(path: Path, actual: str, what: str) -> None:
 
 def test_help_output_matches_golden() -> None:
     """Pin ``--help`` for the top-level parser and every subcommand."""
-    _check_against_golden(_HELP_GOLDEN, _render_help_dump(_build_parser()), 'CLI help output')
+    if sys.version_info[:2] != _HELP_GOLDEN_PYTHON:
+        running = '.'.join(str(part) for part in sys.version_info[:2])
+        pinned = '.'.join(str(part) for part in _HELP_GOLDEN_PYTHON)
+        pytest.skip(
+            f'help rendering differs between Python versions; golden is pinned to {pinned}, '
+            f'running {running}. test_parser_structure_matches_golden still covers this '
+            f'version-independently.'
+        )
+    _check_against_golden(_HELP_GOLDEN, _render_help_dump(), 'CLI help output')
 
 
 def test_parser_structure_matches_golden() -> None:
@@ -178,7 +218,7 @@ def test_parser_structure_matches_golden() -> None:
     ``--help`` byte-identical while rebinding an argument. This golden is what
     makes "no behaviour change" checkable.
     """
-    _check_against_golden(_STRUCTURE_GOLDEN, _render_structure_dump(_build_parser()), 'CLI parser structure')
+    _check_against_golden(_STRUCTURE_GOLDEN, _render_structure_dump(), 'CLI parser structure')
 
 
 def test_every_subcommand_binds_a_func() -> None:

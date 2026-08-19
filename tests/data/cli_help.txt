@@ -226,15 +226,16 @@ options:
   --listen ENDPOINT     listen endpoint (repeatable, e.g. tcp/0.0.0.0:7447). Interactive picker if
                         omitted.
   --connect ENDPOINT    connect endpoint (repeatable). Required for --mode spoke.
-  --out OUT             output path (default: /home/gisen/.config/kioku-mesh/zenohd.json5)
+  --out OUT             output path (default: /nonexistent-golden-home/.config/kioku-
+                        mesh/zenohd.json5)
   --tls                 emit an mTLS config (tls/ endpoints + transport.link.tls). hub/spoke only;
                         requires certs provisioned via `kioku-mesh tls` first.
   --force               overwrite if the target file exists
   --print               write to stdout instead of file
-  --install-systemd     also install a user-scope systemd unit at
-                        /home/gisen/.config/systemd/user/kioku-mesh-zenohd.service that runs
-                        `zenohd -c <out>` on login. Linux only; macOS / Windows / non-systemd
-                        hosts get a clear error.
+  --install-systemd     also install a user-scope systemd unit at /nonexistent-golden-
+                        home/.config/systemd/user/kioku-mesh-zenohd.service that runs `zenohd -c
+                        <out>` on login. Linux only; macOS / Windows / non-systemd hosts get a
+                        clear error.
 
 ### kioku-mesh doctor
 usage: kioku-mesh doctor [-h] [--json] [--check-legacy-namespace] [--check-tool-call-fragments]

@@ -154,6 +154,12 @@ ADR-0030.
 
 ### Fixed
 
+- `_build_parser` を分割した commit (`18bd309`) 自体には `drain` サブコマンドの
+  `set_defaults(func=_cmd_drain)` は存在していたが、その後の未コミット作業ツリー上で
+  誤って削除され、`kioku-mesh drain` 実行時に AttributeError で落ちる状態になって
+  いた。分割前に先行固定しておいたゴールデンテスト (`test_every_subcommand_binds_a_func`)
+  がこの誤削除を red として検出し、作業ツリーを分割 commit の状態へ戻して復旧した
+  （このため復旧 commit に `src/` の差分は含まれない）
 - `rebuild_from_zenoh` が、obs 本体が zenoh にもローカル index にも無い tombstone を
   無条件で捨てていた (orphan skip) 問題を修正した。捨てるとその observation_id は
   index から完全に消え、後から obs だけが zenoh に再出現した際に delete 状態を失って
