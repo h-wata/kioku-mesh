@@ -29,9 +29,10 @@ ADR-0030.
 
 ### Added
 
-- ruff: PLR0912/PLR0915 (分岐過多・文過多) を有効化し、既存違反を per-file-ignores で可視化
-  (max-branches=25, max-statements=120。詳細:
-  `queue/projects/kioku-mesh/reports/details/TASK-469_plr_violations.md`)
+- ruff: PLR0912/PLR0915 (分岐過多・文過多) を有効化 (max-branches=25, max-statements=120)。
+  既存違反は `# noqa: PLR0912` / `# noqa: PLR0915` を関数単位で個別付与して抑制し
+  (ファイル単位の一括抑制はしない)、同じファイルでの新規違反は引き続き検出される。詳細:
+  `queue/projects/kioku-mesh/reports/details/TASK-469_plr_violations.md`
 - 長寿命 MCP server の定期 index 再アラインメント worker。`kioku-mesh-mcp` が
   zenoh backend で起動したときだけ所有権を取り、実際に local index が開いた後に
   daemon thread を 1 本だけ起動する (memory tool を使わない MCP process は index も

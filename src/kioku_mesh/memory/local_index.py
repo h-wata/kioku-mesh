@@ -647,7 +647,7 @@ class LocalIndex:
         """
         return self.search(project=project, limit=limit)
 
-    def search(  # noqa: C901
+    def search(  # noqa: C901, PLR0912, PLR0915
         self,
         *,
         project: str | Sequence[str] = '',

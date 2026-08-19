@@ -111,11 +111,6 @@ max-complexity = 15
 "tests/**" = ["SLF001"]
 # One-off PIL-based image/GIF generator scripts, not shipped package code.
 "docs/assets/gen_*.py" = ["ANN", "D", "N802", "N806"]
-# PLR0912/PLR0915 existing violations at the adopted threshold (max-branches=25,
-# max-statements=120), tracked here rather than fixed (TASK-469). Do not add new
-# entries without lowering the function below threshold instead.
-"src/kioku_mesh/__main__.py" = ["PLR0915"]  # _build_parser: 221 statements (argparse subcommand wiring)
-"src/kioku_mesh/memory/local_index.py" = ["PLR0912", "PLR0915"]  # LocalIndex.search: 56 branches / 177 statements
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = "single"

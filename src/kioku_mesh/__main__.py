@@ -2656,7 +2656,7 @@ def _cmd_zenohd_install(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     parser = argparse.ArgumentParser(prog='kioku-mesh', description='kioku-mesh CLI')
     parser.add_argument('--version', action='version', version=f'kioku-mesh {__version__}')
     parser.add_argument(
