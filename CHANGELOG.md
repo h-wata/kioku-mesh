@@ -58,6 +58,17 @@ ADR-0030.
   (`_split_tombstone_actions`) 経由で保持する (tombstones-only mode は observation
   を scan しないため orphan 判定を行わない)。定期 worker / doctor /
   CLI への配線は後続 Phase (ADR-0035, TASK-450 Phase 1)
+- 実 zenohd を使う repair の回帰テスト (`tests/test_index_repair_zenoh.py`): subscriber を
+  止めている間の remote publish / tombstone を repair が補うこと、完全応答でも部分失敗
+  (scan 途中で `RepairScanError`) でも local-only 行を shadow / delete しないこと、
+  orphan tombstone (R5) の placeholder が後着 observation で resurrect しないことを
+  end-to-end で検証する。`memory` volume の router を使うため CI でも実行される
+  (RocksDB backend が要る two-node harness は CI では skip のまま) (#325, TASK-450 Phase 4)
+- doctor の hint が挙げる CLI サブコマンド / フラグ / `kioku-mesh-*` エントリポイントが
+  実在することを argparse ツリーと `pyproject.toml` に突き合わせて検証するガードを
+  追加した。特定コマンド名のべた書き assert ではなく hint 文字列から抽出するので、
+  過去の `kioku-mesh gc --shadows` (#321) のような実在しない案内の再発を検出する
+  (PR #329 review NB1)
 - `kioku-mesh realign-index [--mode full|tombstones]`: CLI-only host 向けの明示 opt-in
   補修コマンド。`LocalIndex.repair_from_zenoh` を一回呼ぶだけで、通常 CLI 操作の
   startup rebuild skip (#38) は変更しない。timer/cron での定期実行例は `--help` に
