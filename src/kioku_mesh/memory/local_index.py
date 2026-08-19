@@ -277,6 +277,435 @@ def _validate_search_mode(search_mode: str) -> str:
     return search_mode
 
 
+@dataclasses.dataclass(frozen=True)
+class _QueryPlan:
+    """How one ``search`` call splits and ranks its query terms.
+
+    ``fts_terms`` go to the FTS5 MATCH expression, ``like_terms`` become
+    ``payload_json LIKE`` predicates. ``use_fts`` records whether the FTS
+    path is taken at all; the ORDER BY fragments differ per mode because
+    the OR path LEFT JOINs and therefore has to sort NULL ranks last.
+    """
+
+    fts_terms: list[str]
+    like_terms: list[str]
+    use_fts: bool
+    imp_plain: str
+    fts_and_order: str
+    fts_or_order: str
+
+
+def _plan_query(query: str, *, cursor_observation_id: str, fts_cap: str) -> _QueryPlan:
+    """Decide the FTS/LIKE term split and the ranking keys for ``query``."""
+    # ADR-0021: 3-stage query fallback. Split multi-term queries into
+    # AND semantics; trigram cannot match terms shorter than 3 chars, so
+    # those terms are added as payload_json LIKE filters.
+    query_terms = query.split()
+    if fts_cap == _FTS_CAP_LIKE:
+        fts_terms: list[str] = []
+        like_terms = query_terms
+    else:
+        fts_terms = [term for term in query_terms if len(term) >= 3]
+        like_terms = [term for term in query_terms if len(term) < 3]
+
+    # ADR-0027: importance-aware ranking. When the caller expressed intent
+    # with a query, importance is the PRIMARY ranking key and the relevance
+    # signal (bm25 / recency) breaks ties within an importance level, so a
+    # critical decision is not buried under a trivial note that merely
+    # mentions the term. Importance-primary (rather than a weighted blend)
+    # is deliberate: SQLite trigram bm25 ranks are ~1e-6 and corpus-
+    # dependent, so no fixed additive weight is stable across stores — but
+    # a 1-5 importance bucket is. Two deliberate exclusions:
+    #   - no-query *browse* listings stay purely chronological (recency is
+    #     the contract of a query-less search; reordering would surprise).
+    #   - cursor pagination (bulk-delete, #66) must keep its
+    #     (created_at, observation_id) ordering or the strict-tuple cursor
+    #     walk skips/repeats rows — never inject importance there.
+    rank_by_importance = bool(query_terms) and not cursor_observation_id
+    if rank_by_importance:
+        # importance first, then bm25 relevance as the in-bucket tiebreak.
+        fts_and_order = 'importance DESC, rank'
+        fts_or_order = '(rank IS NULL), importance DESC, rank'
+    else:
+        fts_and_order = 'rank'
+        fts_or_order = '(rank IS NULL), rank'
+    return _QueryPlan(
+        fts_terms=fts_terms,
+        like_terms=like_terms,
+        use_fts=bool(fts_terms),
+        imp_plain='importance DESC, ' if rank_by_importance else '',
+        fts_and_order=fts_and_order,
+        fts_or_order=fts_or_order,
+    )
+
+
+def _append_visibility_filters(
+    where: list[str],
+    params: list[object],
+    *,
+    include_deleted: bool,
+    include_expired: bool,
+    include_superseded: bool,
+    resolved_now: str,
+) -> None:
+    """Add the clauses that hide rows the caller did not ask to see."""
+    if not include_deleted:
+        where.append('deleted_at IS NULL')
+        where.append('shadowed_at IS NULL')
+    # Issue #272: a disposable observation whose lifetime elapsed is stale
+    # in exactly the same way a tombstoned one is, so it drops out of the
+    # default result set even before gc physically tombstones it.
+    if not include_expired:
+        where.append(_NOT_EXPIRED_SQL)
+        params.append(resolved_now)
+    # ADR-0021: existence-based supersedes filter. Superseder must be live
+    # (not deleted AND not shadowed) to keep the superseded row hidden.
+    # "Live" has to mean the same thing on both sides of the filter: a
+    # lapsed superseder is already excluded from this result set, so
+    # letting it keep its predecessor hidden would drop both rows and
+    # return nothing for content the writer never marked disposable
+    # (PR #273 review B3). The clause is conditioned on
+    # ``include_expired`` so that an explicitly expiry-inclusive query
+    # still sees the superseder and keeps hiding what it replaced.
+    if not include_superseded:
+        superseder_live = 'deleted_at IS NULL AND shadowed_at IS NULL'
+        if not include_expired:
+            superseder_live += f' AND {_NOT_EXPIRED_SQL}'
+        where.append(
+            '(superseded_by IS NULL OR superseded_by NOT IN '
+            f'(SELECT observation_id FROM obs_index WHERE {superseder_live}))'
+        )
+        if not include_expired:
+            params.append(resolved_now)
+
+
+def _append_json_array_filter(
+    where: list[str],
+    params: list[object],
+    *,
+    json_path: str,
+    values: list[str] | None,
+) -> None:
+    """Match rows whose ``payload_json`` array at ``json_path`` holds any value."""
+    if not values:
+        return
+    clean = [v for v in values if v]
+    if not clean:
+        return
+    placeholders = ','.join('?' for _ in clean)
+    where.append(f"EXISTS (SELECT 1 FROM json_each(payload_json, '{json_path}') WHERE value IN ({placeholders}))")
+    params.extend(clean)
+
+
+def _append_attribute_filters(
+    where: list[str],
+    params: list[object],
+    *,
+    project: str | Sequence[str],
+    agent_family: str,
+    client_id: str,
+    pc_id: str,
+    session_id: str,
+    memory_type: str,
+    memory_types: list[str] | None,
+    source_files: list[str] | None,
+    references: list[str] | None,
+) -> None:
+    """Add the project / identity / memory_type / plural-list equality clauses."""
+    # Issue #278: ``project`` may carry several literal values that belong
+    # to the same logical project (a rename leaves history under the old
+    # name). One ``IN`` list keeps that a single query, so results stay
+    # ordered and deduplicated by construction.
+    project_values = normalize_project_filter(project)
+    if project_values:
+        placeholders = ', '.join('?' * len(project_values))
+        where.append(f'project IN ({placeholders})')
+        params.extend(project_values)
+    # Identity lives in payload_json rather than dedicated columns (see the
+    # module docstring); the extraction cost is acceptable at PoC scale.
+    for field, value in (
+        ('agent_family', agent_family),
+        ('client_id', client_id),
+        ('pc_id', pc_id),
+        ('session_id', session_id),
+    ):
+        if value:
+            where.append(f"json_extract(payload_json, '$.{field}') = ?")
+            params.append(value)
+    if memory_type:
+        # ADR-0026: exact memory_type filter. ``memory_type`` is a real
+        # column on obs_index, so this composes with the secondary index
+        # cheaply (used by supersede-candidate detection).
+        where.append('memory_type = ?')
+        params.append(memory_type)
+    # ADR-0028 Phase4: additive plural filters for recall_context.
+    if memory_types:
+        clean_types = [t for t in memory_types if t]
+        if clean_types:
+            placeholders = ','.join('?' for _ in clean_types)
+            where.append(f'memory_type IN ({placeholders})')
+            params.extend(clean_types)
+    _append_json_array_filter(where, params, json_path='$.source_files', values=source_files)
+    _append_json_array_filter(where, params, json_path='$.references', values=references)
+
+
+def _append_time_filters(
+    where: list[str],
+    params: list[object],
+    *,
+    since_iso: str,
+    until_iso: str,
+    cursor_observation_id: str,
+) -> None:
+    """Add the created_at range bounds and the strict-tuple cursor bound."""
+    if since_iso:
+        where.append('created_at >= ?')
+        params.append(since_iso)
+    if until_iso and cursor_observation_id:
+        # Strict-tuple cursor for bulk-delete pagination (#66): exclude
+        # the boundary row itself so iteration walks past timestamp
+        # ties even when their count exceeds ``limit``.
+        where.append('(created_at < ? OR (created_at = ? AND observation_id < ?))')
+        params.extend([until_iso, until_iso, cursor_observation_id])
+    elif until_iso:
+        where.append('created_at <= ?')
+        params.append(until_iso)
+
+
+def _build_search_filters(
+    *,
+    include_deleted: bool,
+    include_expired: bool,
+    include_superseded: bool,
+    resolved_now: str,
+    project: str | Sequence[str],
+    agent_family: str,
+    client_id: str,
+    pc_id: str,
+    session_id: str,
+    memory_type: str,
+    memory_types: list[str] | None,
+    source_files: list[str] | None,
+    references: list[str] | None,
+    since_iso: str,
+    until_iso: str,
+    cursor_observation_id: str,
+) -> tuple[list[str], list[object]]:
+    """Return the AND-combined WHERE fragments and their bound parameters.
+
+    These are the base filters of :meth:`LocalIndex.search`: they apply in
+    every search mode and are never OR-ed with query terms. Empty-string
+    filters are skipped so callers can pass unset values through. Clause
+    order is part of the contract — ``params`` is positional.
+    """
+    where: list[str] = []
+    params: list[object] = []
+    _append_visibility_filters(
+        where,
+        params,
+        include_deleted=include_deleted,
+        include_expired=include_expired,
+        include_superseded=include_superseded,
+        resolved_now=resolved_now,
+    )
+    _append_attribute_filters(
+        where,
+        params,
+        project=project,
+        agent_family=agent_family,
+        client_id=client_id,
+        pc_id=pc_id,
+        session_id=session_id,
+        memory_type=memory_type,
+        memory_types=memory_types,
+        source_files=source_files,
+        references=references,
+    )
+    _append_time_filters(
+        where,
+        params,
+        since_iso=since_iso,
+        until_iso=until_iso,
+        cursor_observation_id=cursor_observation_id,
+    )
+    return where, params
+
+
+def _build_and_mode_sql(
+    plan: _QueryPlan,
+    where: list[str],
+    params: list[object],
+    limit: int,
+) -> tuple[str, list[object]]:
+    """Build the AND-mode query. Appends the short LIKE terms to ``where``/``params``.
+
+    The mutation is deliberate and load-bearing: the runtime LIKE fallback
+    reuses the same lists and must see the short terms already folded in
+    (it only needs to add the FTS terms on top).
+    """
+    for term in plan.like_terms:
+        where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
+        params.append(f'%{_escape_like(term.lower())}%')
+
+    if plan.use_fts:
+        # FTS5 path: CTE join for bm25 ranking. ``obs_fts`` can hold
+        # more than one row per observation_id (legacy duplicate rows
+        # from before the upsert() dedupe fix), so the JOIN could
+        # otherwise surface the same observation more than once;
+        # ``ranked`` collapses each observation_id to its single
+        # best-ranked row (``rn = 1``) before ORDER BY/LIMIT apply.
+        fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
+        match_expr = ' AND '.join(_quote_fts_term(term) for term in plan.fts_terms)
+        sql = (
+            'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?), '
+            'ranked AS ('
+            'SELECT o.payload_json, o.created_at, o.observation_id, o.importance, f.rank, '
+            'ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY f.rank) AS rn '
+            'FROM obs_index o '
+            'JOIN fts_match f ON f.observation_id = o.observation_id'
+            f'{fts_where}'
+            ') '
+            'SELECT payload_json FROM ranked WHERE rn = 1 '
+            f'ORDER BY {plan.fts_and_order}, created_at DESC, observation_id DESC LIMIT ?'
+        )
+        return sql, [match_expr, *params, max(1, limit)]
+
+    sql = 'SELECT payload_json FROM obs_index'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
+    # sort key gives a total, stable order for cursor pagination over
+    # rows that share the same ``created_at`` (#66). ``imp_plain`` is
+    # empty on the cursor / browse paths (see rank_by_importance).
+    sql += f' ORDER BY {plan.imp_plain}created_at DESC, observation_id DESC LIMIT ?'
+    return sql, [*params, max(1, limit)]
+
+
+def _build_or_mode_sql(
+    plan: _QueryPlan,
+    where: list[str],
+    params: list[object],
+    limit: int,
+) -> tuple[str, list[object]]:
+    """Build the OR-mode query: query terms OR-ed, base filters still AND-ed."""
+    like_or_preds: list[str] = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in plan.like_terms]
+    like_or_params: list[object] = [f'%{_escape_like(t.lower())}%' for t in plan.like_terms]
+
+    if plan.use_fts:
+        match_expr = ' OR '.join(_quote_fts_term(term) for term in plan.fts_terms)
+        # LEFT JOIN so LIKE-only rows (not in obs_fts) are also returned.
+        term_preds = ['f.observation_id IS NOT NULL', *like_or_preds]
+        term_or = '(' + ' OR '.join(term_preds) + ')'
+        if where:
+            combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
+        else:
+            combined_where = ' WHERE ' + term_or
+        # Same ROW_NUMBER dedupe rationale as the 'and' FTS branch above:
+        # the LEFT JOIN can surface one observation_id more than once
+        # if obs_fts holds duplicate rows for it.
+        sql = (
+            'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?), '
+            'ranked AS ('
+            'SELECT o.payload_json, o.created_at, o.observation_id, o.importance, f.rank, '
+            'ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY (f.rank IS NULL), f.rank) AS rn '
+            'FROM obs_index o '
+            'LEFT JOIN fts_match f ON f.observation_id = o.observation_id'
+            f'{combined_where}'
+            ') '
+            'SELECT payload_json FROM ranked WHERE rn = 1 '
+            f'ORDER BY {plan.fts_or_order}, created_at DESC, observation_id DESC LIMIT ?'
+        )
+        return sql, [match_expr, *params, *like_or_params, max(1, limit)]
+
+    if like_or_preds:
+        term_or = '(' + ' OR '.join(like_or_preds) + ')'
+        if where:
+            combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
+        else:
+            combined_where = ' WHERE ' + term_or
+    else:
+        # No query terms: recency search (same as 'and' with empty query).
+        combined_where = (' WHERE ' + ' AND '.join(where)) if where else ''
+    sql = 'SELECT payload_json FROM obs_index'
+    sql += combined_where
+    sql += f' ORDER BY {plan.imp_plain}created_at DESC, observation_id DESC LIMIT ?'
+    return sql, [*params, *like_or_params, max(1, limit)]
+
+
+def _build_like_fallback_sql(
+    search_mode: str,
+    plan: _QueryPlan,
+    where: list[str],
+    params: list[object],
+    limit: int,
+) -> tuple[str, list[object]]:
+    """Re-express a failed FTS query as a pure LIKE query, preserving semantics.
+
+    ``where``/``params`` are the lists handed to the original builder, so in
+    AND mode they already carry the short LIKE terms and only the FTS terms
+    still need folding in.
+    """
+    if search_mode == 'and':
+        # AND fallback: fts_terms become AND LIKE (where already has like_terms).
+        like_where = [*where]
+        like_params: list[object] = [*params]
+        for term in plan.fts_terms:
+            like_where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
+            like_params.append(f'%{_escape_like(term.lower())}%')
+        like_sql = 'SELECT payload_json FROM obs_index'
+        if like_where:
+            like_sql += ' WHERE ' + ' AND '.join(like_where)
+        like_sql += f' ORDER BY {plan.imp_plain}created_at DESC, observation_id DESC LIMIT ?'
+        like_params.append(max(1, limit))
+        return like_sql, like_params
+
+    # 'or' fallback: all terms become OR LIKE.
+    all_or_terms = [*plan.fts_terms, *plan.like_terms]
+    or_fallback_preds = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in all_or_terms]
+    or_fallback_p: list[object] = [f'%{_escape_like(t.lower())}%' for t in all_or_terms]
+    like_sql = 'SELECT payload_json FROM obs_index'
+    if where and or_fallback_preds:
+        like_sql += ' WHERE ' + ' AND '.join(where) + ' AND (' + ' OR '.join(or_fallback_preds) + ')'
+    elif where:
+        like_sql += ' WHERE ' + ' AND '.join(where)
+    elif or_fallback_preds:
+        like_sql += ' WHERE (' + ' OR '.join(or_fallback_preds) + ')'
+    like_sql += f' ORDER BY {plan.imp_plain}created_at DESC, observation_id DESC LIMIT ?'
+    return like_sql, [*params, *or_fallback_p, max(1, limit)]
+
+
+def _rows_to_observations(rows: Sequence[tuple[str]], limit: int) -> list[Observation]:
+    """Decode payload rows into Observations, stopping at ``limit``.
+
+    Defense-in-depth dedupe (PR #270 Codex review, R1): the FTS-JOIN
+    branches already dedupe by observation_id in SQL via the ``ranked``
+    CTE, and the non-FTS branches read straight from the PRIMARY
+    KEY-unique ``obs_index`` table, so ``rows`` should already be unique
+    per id. The ``seen_ids`` check is a cheap backstop against any future
+    regression or unforeseen join path, not the primary dedupe mechanism —
+    it must never need to shrink the result below ``limit``, since dedupe
+    already happened before the SQL LIMIT.
+    """
+    out: list[Observation] = []
+    seen_ids: set[str] = set()
+    for (payload,) in rows:
+        try:
+            obs = Observation.from_json(payload)
+        except Exception as e:  # noqa: BLE001 — malformed payload should not crash search
+            log.warning('LocalIndex skip malformed payload: %s', e)
+            continue
+        if obs.observation_id in seen_ids:
+            log.warning(
+                'LocalIndex.search unexpected duplicate observation_id after SQL dedupe: %s', obs.observation_id
+            )
+            continue
+        seen_ids.add(obs.observation_id)
+        out.append(obs)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _disabled_via_env() -> bool:
     return os.environ.get('KIOKU_MESH_DISABLE_INDEX', '').strip() == '1'
 
@@ -647,7 +1076,22 @@ class LocalIndex:
         """
         return self.search(project=project, limit=limit)
 
-    def search(  # noqa: C901, PLR0912, PLR0915
+    def _search_and_or(self, *, limit: int, common: dict[str, object]) -> list[Observation]:
+        """Run the strict AND phase, then top it up with OR-phase hits.
+
+        Two passes rather than one query so the AND hits keep their own
+        ranking and the broader OR hits only fill the slots the AND phase
+        left empty. ``common`` carries every filter both phases share.
+        """
+        strict = self.search(limit=limit, search_mode='and', **common)  # type: ignore[arg-type]
+        if len(strict) >= limit:
+            return strict[:limit]
+        internal_or_limit = min(10_000, max(limit * 2, limit + 20))
+        broad = self.search(limit=internal_or_limit, search_mode='or', **common)  # type: ignore[arg-type]
+        seen = {obs.observation_id for obs in strict}
+        return [*strict, *(obs for obs in broad if obs.observation_id not in seen)][:limit]
+
+    def search(
         self,
         *,
         project: str | Sequence[str] = '',
@@ -724,348 +1168,70 @@ class LocalIndex:
             return []
         search_mode = _validate_search_mode(search_mode)
         if search_mode == 'and_or':
-            strict = self.search(
-                project=project,
-                agent_family=agent_family,
-                client_id=client_id,
-                pc_id=pc_id,
-                session_id=session_id,
-                memory_type=memory_type,
-                query=query,
-                since_iso=since_iso,
-                until_iso=until_iso,
-                cursor_observation_id=cursor_observation_id,
+            return self._search_and_or(
                 limit=limit,
-                include_deleted=include_deleted,
-                include_superseded=include_superseded,
-                search_mode='and',
-                memory_types=memory_types,
-                source_files=source_files,
-                references=references,
-                include_expired=include_expired,
-                now_iso=now_iso,
+                common={
+                    'project': project,
+                    'agent_family': agent_family,
+                    'client_id': client_id,
+                    'pc_id': pc_id,
+                    'session_id': session_id,
+                    'memory_type': memory_type,
+                    'query': query,
+                    'since_iso': since_iso,
+                    'until_iso': until_iso,
+                    'cursor_observation_id': cursor_observation_id,
+                    'include_deleted': include_deleted,
+                    'include_superseded': include_superseded,
+                    'memory_types': memory_types,
+                    'source_files': source_files,
+                    'references': references,
+                    'include_expired': include_expired,
+                    'now_iso': now_iso,
+                },
             )
-            if len(strict) >= limit:
-                return strict[:limit]
-            internal_or_limit = min(10_000, max(limit * 2, limit + 20))
-            broad = self.search(
-                project=project,
-                agent_family=agent_family,
-                client_id=client_id,
-                pc_id=pc_id,
-                session_id=session_id,
-                memory_type=memory_type,
-                query=query,
-                since_iso=since_iso,
-                until_iso=until_iso,
-                cursor_observation_id=cursor_observation_id,
-                limit=internal_or_limit,
-                include_deleted=include_deleted,
-                include_superseded=include_superseded,
-                search_mode='or',
-                memory_types=memory_types,
-                source_files=source_files,
-                references=references,
-                include_expired=include_expired,
-                now_iso=now_iso,
-            )
-            seen = {obs.observation_id for obs in strict}
-            return [*strict, *(obs for obs in broad if obs.observation_id not in seen)][:limit]
 
-        where: list[str] = []
-        params: list[object] = []
-        if not include_deleted:
-            where.append('deleted_at IS NULL')
-            where.append('shadowed_at IS NULL')
-        # Issue #272: a disposable observation whose lifetime elapsed is stale
-        # in exactly the same way a tombstoned one is, so it drops out of the
-        # default result set even before gc physically tombstones it.
-        resolved_now = now_iso or _now_iso()
-        if not include_expired:
-            where.append(_NOT_EXPIRED_SQL)
-            params.append(resolved_now)
-        # ADR-0021: existence-based supersedes filter. Superseder must be live
-        # (not deleted AND not shadowed) to keep the superseded row hidden.
-        # "Live" has to mean the same thing on both sides of the filter: a
-        # lapsed superseder is already excluded from this result set, so
-        # letting it keep its predecessor hidden would drop both rows and
-        # return nothing for content the writer never marked disposable
-        # (PR #273 review B3). The clause is conditioned on
-        # ``include_expired`` so that an explicitly expiry-inclusive query
-        # still sees the superseder and keeps hiding what it replaced.
-        if not include_superseded:
-            superseder_live = 'deleted_at IS NULL AND shadowed_at IS NULL'
-            if not include_expired:
-                superseder_live += f' AND {_NOT_EXPIRED_SQL}'
-            where.append(
-                '(superseded_by IS NULL OR superseded_by NOT IN '
-                f'(SELECT observation_id FROM obs_index WHERE {superseder_live}))'
-            )
-            if not include_expired:
-                params.append(resolved_now)
-        # Issue #278: ``project`` may carry several literal values that belong
-        # to the same logical project (a rename leaves history under the old
-        # name). One ``IN`` list keeps that a single query, so results stay
-        # ordered and deduplicated by construction.
-        project_values = normalize_project_filter(project)
-        if project_values:
-            placeholders = ', '.join('?' * len(project_values))
-            where.append(f'project IN ({placeholders})')
-            params.extend(project_values)
-        if agent_family:
-            where.append("json_extract(payload_json, '$.agent_family') = ?")
-            params.append(agent_family)
-        if client_id:
-            where.append("json_extract(payload_json, '$.client_id') = ?")
-            params.append(client_id)
-        if pc_id:
-            where.append("json_extract(payload_json, '$.pc_id') = ?")
-            params.append(pc_id)
-        if session_id:
-            where.append("json_extract(payload_json, '$.session_id') = ?")
-            params.append(session_id)
-        if memory_type:
-            # ADR-0026: exact memory_type filter. ``memory_type`` is a real
-            # column on obs_index, so this composes with the secondary index
-            # cheaply (used by supersede-candidate detection).
-            where.append('memory_type = ?')
-            params.append(memory_type)
-        # ADR-0028 Phase4: additive plural filters for recall_context.
-        if memory_types:
-            clean_types = [t for t in memory_types if t]
-            if clean_types:
-                placeholders = ','.join('?' for _ in clean_types)
-                where.append(f'memory_type IN ({placeholders})')
-                params.extend(clean_types)
-        if source_files:
-            clean_sf = [f for f in source_files if f]
-            if clean_sf:
-                placeholders = ','.join('?' for _ in clean_sf)
-                where.append(
-                    f"EXISTS (SELECT 1 FROM json_each(payload_json, '$.source_files') WHERE value IN ({placeholders}))"
-                )
-                params.extend(clean_sf)
-        if references:
-            clean_refs = [r for r in references if r]
-            if clean_refs:
-                placeholders = ','.join('?' for _ in clean_refs)
-                where.append(
-                    f"EXISTS (SELECT 1 FROM json_each(payload_json, '$.references') WHERE value IN ({placeholders}))"
-                )
-                params.extend(clean_refs)
-        if since_iso:
-            where.append('created_at >= ?')
-            params.append(since_iso)
-        if until_iso and cursor_observation_id:
-            # Strict-tuple cursor for bulk-delete pagination (#66): exclude
-            # the boundary row itself so iteration walks past timestamp
-            # ties even when their count exceeds ``limit``.
-            where.append('(created_at < ? OR (created_at = ? AND observation_id < ?))')
-            params.extend([until_iso, until_iso, cursor_observation_id])
-        elif until_iso:
-            where.append('created_at <= ?')
-            params.append(until_iso)
+        where, params = _build_search_filters(
+            include_deleted=include_deleted,
+            include_expired=include_expired,
+            include_superseded=include_superseded,
+            resolved_now=now_iso or _now_iso(),
+            project=project,
+            agent_family=agent_family,
+            client_id=client_id,
+            pc_id=pc_id,
+            session_id=session_id,
+            memory_type=memory_type,
+            memory_types=memory_types,
+            source_files=source_files,
+            references=references,
+            since_iso=since_iso,
+            until_iso=until_iso,
+            cursor_observation_id=cursor_observation_id,
+        )
 
-        # ADR-0021: 3-stage query fallback. Split multi-term queries into
-        # AND semantics; trigram cannot match terms shorter than 3 chars, so
-        # those terms are added as payload_json LIKE filters.
-        query_terms = query.split()
-        if self._fts_cap == _FTS_CAP_LIKE:
-            fts_terms: list[str] = []
-            like_terms = query_terms
-        else:
-            fts_terms = [term for term in query_terms if len(term) >= 3]
-            like_terms = [term for term in query_terms if len(term) < 3]
-        use_fts = bool(fts_terms)
-
-        # ADR-0027: importance-aware ranking. When the caller expressed intent
-        # with a query, importance is the PRIMARY ranking key and the relevance
-        # signal (bm25 / recency) breaks ties within an importance level, so a
-        # critical decision is not buried under a trivial note that merely
-        # mentions the term. Importance-primary (rather than a weighted blend)
-        # is deliberate: SQLite trigram bm25 ranks are ~1e-6 and corpus-
-        # dependent, so no fixed additive weight is stable across stores — but
-        # a 1-5 importance bucket is. Two deliberate exclusions:
-        #   - no-query *browse* listings stay purely chronological (recency is
-        #     the contract of a query-less search; reordering would surprise).
-        #   - cursor pagination (bulk-delete, #66) must keep its
-        #     (created_at, observation_id) ordering or the strict-tuple cursor
-        #     walk skips/repeats rows — never inject importance there.
-        rank_by_importance = bool(query_terms) and not cursor_observation_id
-        imp_plain = 'importance DESC, ' if rank_by_importance else ''
-
-        # PR #270 Codex review (R1): a fixed-multiple over-fetch-then-dedupe-
-        # in-Python cannot honor the public ``limit`` (up to ``MAX_SEARCH``)
-        # contract — it silently caps every query at the over-fetch ceiling,
-        # and provides no correctness guarantee once duplicate obs_fts rows
-        # for one observation_id outnumber the multiple. Instead, the two
-        # FTS-JOIN branches below dedupe *inside* SQL with a
-        # ``ROW_NUMBER() OVER (PARTITION BY observation_id ...)`` CTE that
-        # keeps only the best-ranked row per id, so ``ORDER BY``/``LIMIT``
-        # apply to already-unique rows — dedupe happens before limit is
-        # applied, with no over-fetch or duplicate-count assumption needed.
-        # The non-FTS branches read straight from ``obs_index``
-        # (``observation_id`` PRIMARY KEY), which can never contain
-        # duplicate rows for one id, so they use ``limit`` directly too.
-        if rank_by_importance:
-            # importance first, then bm25 relevance as the in-bucket tiebreak.
-            fts_and_order = 'importance DESC, rank'
-            fts_or_order = '(rank IS NULL), importance DESC, rank'
-        else:
-            fts_and_order = 'rank'
-            fts_or_order = '(rank IS NULL), rank'
-
+        plan = _plan_query(query, cursor_observation_id=cursor_observation_id, fts_cap=self._fts_cap)
         if search_mode == 'and':
-            for term in like_terms:
-                where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
-                params.append(f'%{_escape_like(term.lower())}%')
-
-            if use_fts:
-                # FTS5 path: CTE join for bm25 ranking. ``obs_fts`` can hold
-                # more than one row per observation_id (legacy duplicate rows
-                # from before the upsert() dedupe fix), so the JOIN could
-                # otherwise surface the same observation more than once;
-                # ``ranked`` collapses each observation_id to its single
-                # best-ranked row (``rn = 1``) before ORDER BY/LIMIT apply.
-                fts_where = (' WHERE ' + ' AND '.join(where)) if where else ''
-                match_expr = ' AND '.join(_quote_fts_term(term) for term in fts_terms)
-                sql = (
-                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?), '
-                    'ranked AS ('
-                    'SELECT o.payload_json, o.created_at, o.observation_id, o.importance, f.rank, '
-                    'ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY f.rank) AS rn '
-                    'FROM obs_index o '
-                    'JOIN fts_match f ON f.observation_id = o.observation_id'
-                    f'{fts_where}'
-                    ') '
-                    'SELECT payload_json FROM ranked WHERE rn = 1 '
-                    f'ORDER BY {fts_and_order}, created_at DESC, observation_id DESC LIMIT ?'
-                )
-                rows_params: list[object] = [match_expr, *params, max(1, limit)]
-            else:
-                sql = 'SELECT payload_json FROM obs_index'
-                if where:
-                    sql += ' WHERE ' + ' AND '.join(where)
-                # ``observation_id`` is the PRIMARY KEY, so adding it as a secondary
-                # sort key gives a total, stable order for cursor pagination over
-                # rows that share the same ``created_at`` (#66). ``imp_plain`` is
-                # empty on the cursor / browse paths (see rank_by_importance).
-                sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                rows_params = [*params, max(1, limit)]
-
+            sql, rows_params = _build_and_mode_sql(plan, where, params, limit)
         else:  # search_mode == 'or'
-            # OR behavior: query terms combined with OR; base filters remain AND.
-            like_or_preds: list[str] = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in like_terms]
-            like_or_params: list[object] = [f'%{_escape_like(t.lower())}%' for t in like_terms]
-
-            if use_fts:
-                match_expr = ' OR '.join(_quote_fts_term(term) for term in fts_terms)
-                # LEFT JOIN so LIKE-only rows (not in obs_fts) are also returned.
-                term_preds = ['f.observation_id IS NOT NULL', *like_or_preds]
-                term_or = '(' + ' OR '.join(term_preds) + ')'
-                if where:
-                    combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
-                else:
-                    combined_where = ' WHERE ' + term_or
-                # Same ROW_NUMBER dedupe rationale as the 'and' FTS branch above:
-                # the LEFT JOIN can surface one observation_id more than once
-                # if obs_fts holds duplicate rows for it.
-                sql = (
-                    'WITH fts_match AS (SELECT observation_id, rank FROM obs_fts WHERE obs_fts MATCH ?), '
-                    'ranked AS ('
-                    'SELECT o.payload_json, o.created_at, o.observation_id, o.importance, f.rank, '
-                    'ROW_NUMBER() OVER (PARTITION BY o.observation_id ORDER BY (f.rank IS NULL), f.rank) AS rn '
-                    'FROM obs_index o '
-                    'LEFT JOIN fts_match f ON f.observation_id = o.observation_id'
-                    f'{combined_where}'
-                    ') '
-                    'SELECT payload_json FROM ranked WHERE rn = 1 '
-                    f'ORDER BY {fts_or_order}, created_at DESC, observation_id DESC LIMIT ?'
-                )
-                rows_params = [match_expr, *params, *like_or_params, max(1, limit)]
-            else:
-                if like_or_preds:
-                    term_or = '(' + ' OR '.join(like_or_preds) + ')'
-                    if where:
-                        combined_where = ' WHERE ' + ' AND '.join(where) + ' AND ' + term_or
-                    else:
-                        combined_where = ' WHERE ' + term_or
-                else:
-                    # No query terms: recency search (same as 'and' with empty query).
-                    combined_where = (' WHERE ' + ' AND '.join(where)) if where else ''
-                sql = 'SELECT payload_json FROM obs_index'
-                sql += combined_where
-                sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                rows_params = [*params, *like_or_params, max(1, limit)]
+            sql, rows_params = _build_or_mode_sql(plan, where, params, limit)
 
         with self._lock:
             try:
                 rows = self._conn.execute(sql, rows_params).fetchall()
             except sqlite3.Error as e:
-                if use_fts:
-                    # FTS query failed (e.g. unsupported syntax); fall back to LIKE.
-                    log.debug('LocalIndex.search FTS failed, falling back to LIKE: %s', e)
-                    if search_mode == 'and':
-                        # AND fallback: fts_terms become AND LIKE (where already has like_terms).
-                        like_where = [*where]
-                        like_params: list[object] = [*params]
-                        for term in fts_terms:
-                            like_where.append("LOWER(payload_json) LIKE ? ESCAPE '\\'")
-                            like_params.append(f'%{_escape_like(term.lower())}%')
-                        like_sql = 'SELECT payload_json FROM obs_index'
-                        if like_where:
-                            like_sql += ' WHERE ' + ' AND '.join(like_where)
-                        like_sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                        like_params.append(max(1, limit))
-                    else:  # 'or' fallback: all terms become OR LIKE.
-                        all_or_terms = [*fts_terms, *like_terms]
-                        or_fallback_preds = ["LOWER(payload_json) LIKE ? ESCAPE '\\'" for _ in all_or_terms]
-                        or_fallback_p: list[object] = [f'%{_escape_like(t.lower())}%' for t in all_or_terms]
-                        like_sql = 'SELECT payload_json FROM obs_index'
-                        if where and or_fallback_preds:
-                            like_sql += (
-                                ' WHERE ' + ' AND '.join(where) + ' AND (' + ' OR '.join(or_fallback_preds) + ')'
-                            )
-                        elif where:
-                            like_sql += ' WHERE ' + ' AND '.join(where)
-                        elif or_fallback_preds:
-                            like_sql += ' WHERE (' + ' OR '.join(or_fallback_preds) + ')'
-                        like_sql += f' ORDER BY {imp_plain}created_at DESC, observation_id DESC LIMIT ?'
-                        like_params = [*params, *or_fallback_p, max(1, limit)]
-                    try:
-                        rows = self._conn.execute(like_sql, like_params).fetchall()
-                    except sqlite3.Error as e2:
-                        log.warning('LocalIndex.search LIKE fallback failed: %s', e2)
-                        return []
-                else:
+                if not plan.use_fts:
                     log.warning('LocalIndex.search failed: %s', e)
                     return []
-        out: list[Observation] = []
-        # Defense-in-depth dedupe (PR #270 Codex review, R1): the FTS-JOIN
-        # branches above already dedupe by observation_id in SQL via the
-        # ``ranked`` CTE, and the non-FTS branches read straight from the
-        # PRIMARY KEY-unique ``obs_index`` table, so ``rows`` should already
-        # be unique per id. This loop is a cheap backstop against any future
-        # regression or unforeseen join path, not the primary dedupe
-        # mechanism — it must never need to shrink the result below
-        # ``limit``, since dedupe already happened before the SQL LIMIT.
-        seen_ids: set[str] = set()
-        for (payload,) in rows:
-            try:
-                obs = Observation.from_json(payload)
-            except Exception as e:  # noqa: BLE001 — malformed payload should not crash search
-                log.warning('LocalIndex skip malformed payload: %s', e)
-                continue
-            if obs.observation_id in seen_ids:
-                log.warning(
-                    'LocalIndex.search unexpected duplicate observation_id after SQL dedupe: %s', obs.observation_id
-                )
-                continue
-            seen_ids.add(obs.observation_id)
-            out.append(obs)
-            if len(out) >= limit:
-                break
-        return out
+                # FTS query failed (e.g. unsupported syntax); fall back to LIKE.
+                log.debug('LocalIndex.search FTS failed, falling back to LIKE: %s', e)
+                like_sql, like_params = _build_like_fallback_sql(search_mode, plan, where, params, limit)
+                try:
+                    rows = self._conn.execute(like_sql, like_params).fetchall()
+                except sqlite3.Error as e2:
+                    log.warning('LocalIndex.search LIKE fallback failed: %s', e2)
+                    return []
+        return _rows_to_observations(rows, limit)
 
     def physical_delete(self, observation_id: str) -> None:
         """Hard-DELETE the row matching ``observation_id``. No-op on miss.
