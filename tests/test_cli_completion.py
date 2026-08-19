@@ -13,6 +13,7 @@ Tests stay at the pure-SQLite layer; no zenohd fixture required.
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 from unittest import mock
 
@@ -137,3 +138,40 @@ def test_attach_completer_no_op_without_argcomplete(monkeypatch: pytest.MonkeyPa
     # No completer attribute is set when argcomplete is absent — argcomplete's
     # contract is "any unspecified action falls back to default completion".
     assert not hasattr(action, 'completer')
+
+
+def test_full_parser_binds_expected_completers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every project/pc-id Action across the built parser binds its completer.
+
+    Regression test for PR #333 cross-review B1: the parser-tree and func-binding
+    goldens in ``test_cli_parser_golden.py`` stopped describing the ``completer``
+    attribute (host-venv dependent), so an accidentally dropped
+    ``_attach_completer(...)`` call (e.g. swapped for a bare ``add_argument(...)``)
+    passed both goldens and every other test in this file unnoticed. This walks the
+    real parser tree and checks completer *identity*, not just presence, against
+    every call site in ``_build_parser``.
+    """
+    monkeypatch.setattr(cli_module, 'argcomplete', mock.Mock())
+    parser = cli_module._build_parser()
+
+    expected = {
+        ('save', '--project'): cli_module._complete_project,
+        ('search', '--pc-id'): cli_module._complete_pc_id,
+        ('search', '--project'): cli_module._complete_project,
+        ('delete', '--project'): cli_module._complete_project,
+        ('delete', '--pc-id'): cli_module._complete_pc_id,
+        ('backfill-metadata', '--project'): cli_module._complete_project,
+        ('gc', '--project'): cli_module._complete_project,
+        ('gc', '--by-pc-id'): cli_module._complete_pc_id,
+        ('gc-observations', '--project'): cli_module._complete_project,
+    }
+
+    sub_action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))  # noqa: SLF001
+    actual = {}
+    for name, subparser in sub_action.choices.items():
+        for action in subparser._actions:  # noqa: SLF001
+            completer = getattr(action, 'completer', None)
+            if completer is not None:
+                actual[(name, action.option_strings[-1])] = completer
+
+    assert actual == expected

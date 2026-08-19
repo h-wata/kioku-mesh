@@ -147,9 +147,25 @@ ADR-0030.
 - ruff lint に C901 (循環的複雑度, max-complexity=15) を追加。既存 13 箇所の違反は
   `# noqa: C901` を関数単位で個別付与して抑制し (ファイル単位の一括抑制はしない)、
   今後同じファイルに追加される高複雑度の新規関数は引き続き検出される
+- CLI の `_build_parser` (889 行 / 221 statements / 51 locals) をサブコマンド族ごとの
+  登録関数 14 個に分割し、本体を登録関数を順に呼ぶだけの 33 行にした。CLI の外部から
+  見た挙動は不変で、`--help` 出力・引数の dest/default/choices/metavar・
+  `set_defaults(func=...)` の対応をゴールデンテストで固定している
 
 ### Fixed
 
+- `_build_parser` を分割した commit (`18bd309`) 自体には `drain` サブコマンドの
+  `set_defaults(func=_cmd_drain)` は存在していたが、その後の未コミット作業ツリー上で
+  誤って削除され、`kioku-mesh drain` 実行時に AttributeError で落ちる状態になって
+  いた。分割前に先行固定しておいたゴールデンテスト (`test_every_subcommand_binds_a_func`)
+  がこの誤削除を red として検出し、作業ツリーを分割 commit の状態へ戻して復旧した
+  （このため復旧 commit に `src/` の差分は含まれない）
+- `_build_parser` 分割時のゴールデンテストが `completer` フィールドをホスト依存の
+  ため構造 golden から除いていたが、代替の不変条件テストが無く、`_attach_completer(...)`
+  呼び出しが誤って削除されても検出できなかった (PR #333 cross-review B1)。
+  `tests/test_cli_completion.py` に、argcomplete 有効時に project / pc-id 系の
+  全 Action が期待どおりの completer 関数へ接続されていることを検証する決定的な
+  テストを追加した
 - `rebuild_from_zenoh` が、obs 本体が zenoh にもローカル index にも無い tombstone を
   無条件で捨てていた (orphan skip) 問題を修正した。捨てるとその observation_id は
   index から完全に消え、後から obs だけが zenoh に再出現した際に delete 状態を失って
