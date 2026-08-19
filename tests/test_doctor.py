@@ -6,12 +6,18 @@ suite stays deterministic on hosts that may or may not have zenohd installed.
 
 from __future__ import annotations
 
+import argparse
+import ast
+from importlib import import_module
 import json
 from pathlib import Path
+import re
+import tomllib
 
 import pytest
 
 from kioku_mesh import doctor
+from kioku_mesh.__main__ import _build_parser
 from kioku_mesh.__main__ import main as cli_main
 from kioku_mesh.doctor import _default_config_path
 from kioku_mesh.doctor import _parse_zenoh_endpoint
@@ -690,6 +696,131 @@ def test_check_index_realignment_hint_names_realign_index(
     assert 'kioku-mesh --rebuild status' in result.hint
     assert 'shadows rows missing from the scan' in result.hint
     assert 'kioku-mesh-mcp' in result.hint
+
+
+# -- Every command doctor names in a hint must exist (PR #329 review NB1) ------
+#
+# Asserting a hint *contains* a command name only proves the string is there:
+# rename or delete the command and the assertion still passes. Doctor has
+# shipped a hint for something that never existed before (`kioku-mesh gc
+# --shadows`, PR #321), so the guard resolves what the hints say against the
+# real CLI parser instead of against a hard-coded name.
+
+
+def _doctor_commands() -> set[str]:
+    """Every backticked ``kioku-mesh …`` command in a doctor string literal.
+
+    Source-level rather than by running the checks: a check only emits its hint
+    on the state that triggers it, so covering them all by execution would be
+    its own (silently incomplete) test matrix. Python folds implicit string
+    concatenation at parse time, so a hint split across source lines is a single
+    constant here and its backtick pairs survive.
+    """
+    source = Path(doctor.__file__).read_text()
+    commands: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            continue
+        for quoted in re.findall(r'`([^`]+)`', ' '.join(node.value.split())):
+            if quoted.split()[:1] == ['kioku-mesh']:
+                commands.add(quoted)
+    return commands
+
+
+def _unknown_tokens(command: str) -> list[str]:
+    """Tokens of ``command`` that the real CLI parser would not accept.
+
+    Walks the argparse tree: bare tokens resolve subcommands (``tls request``),
+    ``-``-prefixed tokens must be an option of whichever parser is current —
+    that is what catches a hint inventing a flag. Once a subcommand has been
+    resolved and an option seen, later bare tokens are option values, not
+    commands (``--from legacy``), and placeholders (``<id>``, ``a|b``) are
+    skipped for the same reason.
+    """
+
+    def choices(parser: argparse.ArgumentParser) -> dict:
+        for action in parser._actions:  # noqa: SLF001 — argparse has no public tree walk
+            if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
+                return action.choices
+        return {}
+
+    def options(parser: argparse.ArgumentParser) -> set[str]:
+        return {opt for action in parser._actions for opt in action.option_strings}  # noqa: SLF001
+
+    current = _build_parser()
+    unknown: list[str] = []
+    resolved_command = False
+    saw_option = False
+    for token in command.split()[1:]:
+        if token.startswith('<') or '|' in token:
+            continue
+        if token.startswith('-'):
+            saw_option = True
+            if token not in options(current):
+                unknown.append(token)
+            continue
+        if resolved_command and saw_option:
+            continue
+        sub = choices(current)
+        if token in sub:
+            current = sub[token]
+            resolved_command = True
+        else:
+            unknown.append(token)
+    return unknown
+
+
+def test_doctor_hints_only_name_commands_the_cli_actually_has() -> None:
+    """Every command doctor's hints name must resolve in the CLI parser.
+
+    Covers ``realign-index`` without naming it: delete or rename any command a
+    hint mentions and this goes red, which the string-only assertion above never
+    would. ``kioku-mesh-mcp`` is checked separately — it is a console script,
+    not a subcommand.
+    """
+    commands = _doctor_commands()
+    assert 'kioku-mesh realign-index' in commands, 'the realignment hint must still point CLI-only hosts at a command'
+    broken = {command: tokens for command in commands if (tokens := _unknown_tokens(command))}
+    assert not broken, f'doctor hints name commands/flags the CLI does not have: {broken}'
+
+
+def test_unknown_token_detector_rejects_what_the_cli_does_not_have() -> None:
+    """The guard above is only worth having if it fails on a bad hint.
+
+    ``gc --shadows`` is the real historical example (PR #321): an invented flag
+    on a command that does exist. Without this, a detector that silently matched
+    nothing would look exactly like a clean run.
+    """
+    assert _unknown_tokens('kioku-mesh gc --shadows') == ['--shadows']
+    assert _unknown_tokens('kioku-mesh realgn-index') == ['realgn-index']
+    assert _unknown_tokens('kioku-mesh tls conjure') == ['conjure']
+    # Shapes that must stay green, or the guard would just be noise.
+    assert _unknown_tokens('kioku-mesh realign-index --help') == []
+    assert _unknown_tokens('kioku-mesh --rebuild status') == []
+    assert _unknown_tokens('kioku-mesh migrate-visibility --from legacy --to <user|team|mesh>') == []
+
+
+def test_doctor_hints_name_console_scripts_that_exist() -> None:
+    """Every ``kioku-mesh-*`` program doctor names must be a declared console script.
+
+    The other half of the realignment hint: "periodic repair only runs inside
+    `kioku-mesh-mcp`" is useless advice if that entry point was renamed away.
+    ``pyproject.toml`` rather than installed metadata, because the suite runs
+    from ``src`` via ``pythonpath`` and does not require an installed dist; the
+    declaration is the source of truth either way. The target is imported too,
+    so a script pointing at a function that no longer exists also fails.
+    """
+    source = Path(doctor.__file__).read_text()
+    named = set(re.findall(r'kioku-mesh-[a-z0-9-]+', source))
+    if not named:
+        pytest.skip('no doctor text references a kioku-mesh-* program')
+
+    pyproject = tomllib.loads((Path(__file__).parents[1] / 'pyproject.toml').read_text())
+    scripts = pyproject['project']['scripts']
+    assert named <= set(scripts), f'doctor names programs pyproject does not declare: {sorted(named - set(scripts))}'
+    for name in sorted(named):
+        module_path, _, attr = scripts[name].partition(':')
+        assert hasattr(import_module(module_path), attr), f'{name} points at a missing {scripts[name]}'
 
 
 def test_check_index_realignment_is_a_separate_check_from_the_subscriber() -> None:
