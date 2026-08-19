@@ -3663,3 +3663,83 @@ def test_search_returns_empty_when_non_fts_query_fails(tmp_path: Path) -> None:
         assert failing.fts_attempts == 0, 'no query terms means no FTS attempt'
     finally:
         idx.close()
+
+
+def test_search_mode_and_or_keeps_and_hits_first_against_or_ranking(tmp_path: Path) -> None:
+    """AND hits lead even when the OR phase would rank an OR-only hit above them.
+
+    ADR-0027 makes ``importance`` the primary ranking key, so a high-importance
+    single-term row outranks a low-importance both-terms row *inside* the OR
+    phase. The 'and_or' contract still puts the AND hit first, which only holds
+    because the two phases are concatenated rather than re-sorted together.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'andor_rank.db'))
+    try:
+        both = Observation(
+            content='alpha beta present together',
+            project='andor-rank',
+            importance=1,
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        alpha_only = Observation(
+            content='alpha without the other word',
+            project='andor-rank',
+            importance=5,
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        for obs in (both, alpha_only):
+            idx.upsert(obs)
+
+        # The OR phase alone ranks the high-importance single-term row first ...
+        or_ids = [
+            r.observation_id
+            for r in idx.search(query='alpha beta', project='andor-rank', include_superseded=True, search_mode='or')
+        ]
+        assert or_ids.index(alpha_only.observation_id) < or_ids.index(both.observation_id)
+
+        # ... but 'and_or' must still surface the AND hit ahead of it.
+        ids = [
+            r.observation_id
+            for r in idx.search(
+                query='alpha beta', project='andor-rank', include_superseded=True, search_mode='and_or', limit=10
+            )
+        ]
+        assert ids.index(both.observation_id) < ids.index(alpha_only.observation_id)
+        assert ids == list(dict.fromkeys(ids)), 'no duplicate observation_ids across the two phases'
+    finally:
+        idx.close()
+
+
+def test_search_skips_malformed_payload_instead_of_crashing(tmp_path: Path) -> None:
+    """A corrupt payload_json row is dropped from results, not raised to the caller.
+
+    A single unreadable row must not take the whole search down: the sidecar
+    index is best-effort (see the module docstring), so decoding failures are
+    logged and skipped while the healthy rows still come back.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'malformed.db'))
+    try:
+        healthy = _mk_obs('healthy row survives', project='corrupt')
+        broken = _mk_obs('this row gets corrupted', project='corrupt')
+        for obs in (healthy, broken):
+            idx.upsert(obs)
+
+        idx._conn.execute(  # noqa: SLF001
+            'UPDATE obs_index SET payload_json = ? WHERE observation_id = ?',
+            ('{not valid json', broken.observation_id),
+        )
+        idx._conn.commit()  # noqa: SLF001
+
+        hits = idx.search(project='corrupt')
+
+        assert {h.observation_id for h in hits} == {healthy.observation_id}
+    finally:
+        idx.close()
