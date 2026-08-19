@@ -1,10 +1,17 @@
-"""Realignment worker lifecycle and cadence (ADR-0035, TASK-450 Phase 2).
+"""Realignment worker lifecycle and cadence (ADR-0035, TASK-450 Phase 2/3).
 
 The cadence tests drive :func:`_run_worker` with a fake clock and a fake
 ``wait`` so a 15-minute / 6-hour schedule is exercised in microseconds. The
 lifecycle tests instead run the *real* thread and assert it starts and stops,
 because "the thread is alive" is exactly what a mock-only test cannot show.
+
+The tail of this file (from ``_mk_obs`` on) covers Phase 3: the explicit
+``realign-index`` CLI subcommand. ``test_normal_cli_never_calls_repair_or_rebuild``
+pins the #38 contract this subcommand must not break: ordinary one-shot
+commands never trigger a Zenoh scan implicitly.
 """
+
+from __future__ import annotations
 
 import threading
 import time
@@ -12,6 +19,11 @@ from typing import Any
 
 import pytest
 
+from kioku_mesh.__main__ import main as cli_main
+from kioku_mesh.local_index import LocalIndex
+from kioku_mesh.local_index import RebuildStats
+from kioku_mesh.local_index import RepairScanError
+from kioku_mesh.local_index import RepairStats
 from kioku_mesh.memory import realignment
 from kioku_mesh.memory import store
 
@@ -234,8 +246,6 @@ def test_no_worker_when_the_index_is_disabled(owned: Any, monkeypatch: pytest.Mo
 
 def test_cli_run_leaves_realignment_off(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
     """Regression: a one-shot CLI invocation must not own or start a worker."""
-    from kioku_mesh.__main__ import main as cli_main
-
     monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
     from kioku_mesh.backend import reset_backend
 
@@ -313,9 +323,9 @@ def test_shutdown_stops_a_worker_that_is_inside_a_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """B1: the thread must be gone when shutdown returns, not left as a daemon."""
-    from kioku_mesh.memory.local_index import LocalIndex
+    from kioku_mesh.memory.local_index import LocalIndex as _LocalIndex
 
-    idx = LocalIndex.connect(str(tmp_path / 'shutdown.db'))
+    idx = _LocalIndex.connect(str(tmp_path / 'shutdown.db'))
     try:
         session = _start_worker_in_repair(monkeypatch, idx)
         started = time.monotonic()
@@ -352,9 +362,9 @@ def test_cancelled_scan_raises_instead_of_returning_partial_results() -> None:
 
 def test_repair_cancellation_applies_nothing_and_advances_no_timestamp(tmp_path: Any) -> None:
     from kioku_mesh.core.transport import ScanCancelled
-    from kioku_mesh.memory.local_index import LocalIndex
+    from kioku_mesh.memory.local_index import LocalIndex as _LocalIndex
 
-    idx = LocalIndex.connect(str(tmp_path / 'cancel.db'))
+    idx = _LocalIndex.connect(str(tmp_path / 'cancel.db'))
     try:
         session = _BlockingSession()
         session.release.set()
@@ -391,9 +401,9 @@ def test_shutdown_reports_failure_instead_of_waiting_out_a_silent_scan(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kioku_mesh.memory.local_index import LocalIndex
+    from kioku_mesh.memory.local_index import LocalIndex as _LocalIndex
 
-    idx = LocalIndex.connect(str(tmp_path / 'silent.db'))
+    idx = _LocalIndex.connect(str(tmp_path / 'silent.db'))
     session = _SilentSession()
     try:
         monkeypatch.setattr(store, 'get_session', lambda: session)
@@ -485,11 +495,11 @@ def _mk_remote_obs() -> Any:
 def test_stop_during_a_silent_final_selector_applies_nothing(tmp_path: Any) -> None:
     """B2: obs scan done, final tomb selector silent, stop requested."""
     from kioku_mesh.core.transport import ScanCancelled
-    from kioku_mesh.memory.local_index import LocalIndex
+    from kioku_mesh.memory.local_index import LocalIndex as _LocalIndex
 
     obs = _mk_remote_obs()
     session = _SilentTombSession(obs)
-    idx = LocalIndex.connect(str(tmp_path / 'b2.db'))
+    idx = _LocalIndex.connect(str(tmp_path / 'b2.db'))
     stop = threading.Event()
     result: dict[str, Any] = {}
 
@@ -543,3 +553,128 @@ def test_scan_cancelled_after_a_selector_finishes_with_zero_replies() -> None:
             timeout=0.1,
             should_stop=stop.is_set,
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: explicit ``realign-index`` CLI subcommand
+# ---------------------------------------------------------------------------
+
+
+def _mk_obs(content: str, *, project: str = 'realign-test') -> Any:
+    from kioku_mesh.models import Observation
+
+    return Observation(
+        content=content,
+        project=project,
+        agent_family='claude',
+        client_id='test-client',
+        pc_id='test-pc',
+        session_id='test-session',
+        visibility='mesh',
+    )
+
+
+def test_realign_index_requires_zenoh_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """``realign-index`` refuses to run against the local (non-Zenoh) backend."""
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    monkeypatch.setenv('XDG_DATA_HOME', str(tmp_path / 'xdg-data'))
+
+    rc = cli_main(['realign-index'])
+
+    assert rc == 2
+
+
+def test_normal_cli_never_calls_repair_or_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """A normal one-shot command (``save``) must not call repair_from_zenoh or rebuild_from_zenoh (#38)."""
+    repair_calls: list[str] = []
+    rebuild_calls: list[bool] = []
+
+    def tracking_repair(self: LocalIndex, session: object, *, mode: str = 'full') -> RepairStats:
+        repair_calls.append(mode)
+        return RepairStats(mode=mode)
+
+    def tracking_rebuild(self: LocalIndex, session: object) -> RebuildStats:
+        rebuild_calls.append(True)
+        return RebuildStats()
+
+    monkeypatch.setattr(LocalIndex, 'repair_from_zenoh', tracking_repair)
+    monkeypatch.setattr(LocalIndex, 'rebuild_from_zenoh', tracking_rebuild)
+    monkeypatch.delenv('KIOKU_MESH_SKIP_REBUILD', raising=False)
+    monkeypatch.delenv('KIOKU_MESH_FORCE_REBUILD', raising=False)
+
+    seed = LocalIndex.connect()
+    seed.upsert(_mk_obs('seed'))
+    seed.close()
+
+    rc = cli_main(
+        ['save', 'normal cli op', '-p', 'realign-test', '--subject', 'normal op', '--summary', 'no implicit scan']
+    )
+
+    assert rc == 0
+    assert not repair_calls, 'normal CLI commands must never call repair_from_zenoh implicitly'
+    assert not rebuild_calls, 'normal CLI commands must never call rebuild_from_zenoh implicitly (#38)'
+
+
+def test_realign_index_calls_repair_from_zenoh_default_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``realign-index`` with no ``--mode`` calls repair_from_zenoh(mode='full') and reports stats."""
+    calls: list[str] = []
+
+    def tracking_repair(self: LocalIndex, session: object, *, mode: str = 'full') -> RepairStats:
+        calls.append(mode)
+        return RepairStats(mode=mode, scanned_obs=3, scanned_tomb=1, added=2, updated=1, marked_deleted=1)
+
+    monkeypatch.setattr(LocalIndex, 'repair_from_zenoh', tracking_repair)
+
+    rc = cli_main(['realign-index'])
+
+    assert rc == 0
+    assert calls == ['full']
+    out = capsys.readouterr().out
+    assert 'scanned obs=3 tomb=1' in out
+    assert 'added=2 updated=1 marked_deleted=1' in out
+
+
+def test_realign_index_mode_flag_passes_tombstones(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+) -> None:
+    """``--mode tombstones`` is forwarded to repair_from_zenoh unchanged."""
+    calls: list[str] = []
+
+    def tracking_repair(self: LocalIndex, session: object, *, mode: str = 'full') -> RepairStats:
+        calls.append(mode)
+        return RepairStats(mode=mode)
+
+    monkeypatch.setattr(LocalIndex, 'repair_from_zenoh', tracking_repair)
+
+    rc = cli_main(['realign-index', '--mode', 'tombstones'])
+
+    assert rc == 0
+    assert calls == ['tombstones']
+
+
+def test_realign_index_failure_reports_nonzero_exit_and_message(
+    monkeypatch: pytest.MonkeyPatch,
+    single_zenohd: Any,  # noqa: ARG001
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A scan failure must surface as a non-zero exit code with a diagnostic, never a silent success."""
+
+    def failing_repair(self: LocalIndex, session: object, *, mode: str = 'full') -> RepairStats:
+        raise RepairScanError('malformed obs payload for mem/obs/x: boom')
+
+    monkeypatch.setattr(LocalIndex, 'repair_from_zenoh', failing_repair)
+
+    rc = cli_main(['realign-index'])
+
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert 'realign-index failed' in err
+    assert 'RepairScanError' in err
