@@ -73,6 +73,7 @@ class RebuildStats:
     marked_deleted: int = 0
     shadowed: int = 0
     unchanged: int = 0
+    orphaned: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -128,6 +129,15 @@ _UPSERT_SQL = (
 _NOT_EXPIRED_SQL = "(expires_at IS NULL OR expires_at = '' OR expires_at > ?)"
 
 _MARK_DELETED_SQL = 'UPDATE obs_index SET deleted_at = ?, shadowed_at = NULL WHERE observation_id = ?'
+# R5: orphan tombstone placeholder — obs absent from both the local index and
+# the current scan. Records deleted_at only; if the obs later reappears the
+# _UPSERT_SQL ON CONFLICT path fills in the rest without touching deleted_at
+# (that column is intentionally absent from its UPDATE SET), so the delete
+# state survives. ON CONFLICT DO NOTHING because a concurrent path may have
+# already inserted a real row for this id.
+_INSERT_ORPHAN_TOMBSTONE_SQL = (
+    'INSERT INTO obs_index (observation_id, deleted_at) VALUES (?, ?) ON CONFLICT(observation_id) DO NOTHING'
+)
 _MARK_SHADOWED_SQL = (
     'UPDATE obs_index SET shadowed_at = COALESCE(shadowed_at, ?) WHERE observation_id = ? AND deleted_at IS NULL'
 )
@@ -1423,17 +1433,22 @@ class LocalIndex:
                         unchanged += 1
 
                 mark_rows = []
+                orphan_tomb_rows: list[tuple[str, str]] = []
                 for obs_id, del_at in tomb_ids.items():
-                    # Rebuild can only update rows it has locally or is about
-                    # to upsert from the observation scan; orphan tombstones are
-                    # left to a later replay or rebuild where the obs appears.
                     if obs_id not in existing and obs_id not in seen_obs_ids:
+                        # R5: obs is absent from both the local index and this
+                        # scan (gc'd upstream, or never replicated). Persist a
+                        # tombstone-only placeholder instead of discarding the
+                        # delete state — a later rebuild that does see the obs
+                        # will merge into this row (see _INSERT_ORPHAN_TOMBSTONE_SQL).
+                        orphan_tomb_rows.append((obs_id, del_at))
                         continue
                     current_deleted = existing.get(obs_id, (None, None, ''))[0]
                     if current_deleted is not None:
                         continue
                     mark_rows.append((del_at, obs_id))
                     marked_deleted += 1
+                orphaned = len(orphan_tomb_rows)
 
                 stale_rows: list[tuple[str, str]] = []
                 shadowed_at = _shadow_now_iso()
@@ -1447,6 +1462,8 @@ class LocalIndex:
                     self._conn.executemany(_UPSERT_SQL, upsert_rows)
                 if mark_rows:
                     self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
+                if orphan_tomb_rows:
+                    self._conn.executemany(_INSERT_ORPHAN_TOMBSTONE_SQL, orphan_tomb_rows)
                 if mark_missing_shadowed:
                     if stale_rows:
                         self._conn.executemany(_MARK_SHADOWED_SQL, stale_rows)
@@ -1511,7 +1528,9 @@ class LocalIndex:
                 log.warning('_rebuild_from_observations transaction failed: %s', e)
                 raise
 
-        return RebuildStats(added=added, marked_deleted=marked_deleted, shadowed=shadowed, unchanged=unchanged)
+        return RebuildStats(
+            added=added, marked_deleted=marked_deleted, shadowed=shadowed, unchanged=unchanged, orphaned=orphaned
+        )
 
     def rebuild_from_raw_records(
         self,

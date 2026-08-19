@@ -874,6 +874,66 @@ def test_rebuild_from_zenoh_clears_shadow_when_obs_reappears(tmp_path: Path) -> 
         idx.close()
 
 
+def test_rebuild_from_zenoh_persists_orphan_tombstone(tmp_path: Path) -> None:
+    """R5: a tomb whose obs is absent from both the index and zenoh must not vanish."""
+    db_path = tmp_path / 'rebuild_orphan.db'
+    idx = LocalIndex.connect(str(db_path))
+    try:
+        orphan_id = '0' * 32
+        deleted_at = '2026-05-01T00:00:00.000000Z'
+        tomb = Tombstone(observation_id=orphan_id, deleted_at=deleted_at)
+
+        stats = idx.rebuild_from_zenoh(_FakeSession([], [tomb]))
+
+        assert stats.orphaned == 1
+        assert stats.marked_deleted == 0
+        assert stats.added == 0
+        assert idx.row_count() == 1
+        assert idx.search(project='r') == []
+        with sqlite3.connect(str(db_path)) as raw:
+            got = raw.execute(
+                'SELECT deleted_at, payload_json FROM obs_index WHERE observation_id = ?',
+                (orphan_id,),
+            ).fetchone()
+            assert got == (deleted_at, None)
+    finally:
+        idx.close()
+
+
+def test_rebuild_from_zenoh_merges_orphan_tombstone_when_obs_reappears(tmp_path: Path) -> None:
+    """R5: once the orphan placeholder exists, a later obs arrival must not resurrect it as live."""
+    db_path = tmp_path / 'rebuild_orphan_merge.db'
+    idx = LocalIndex.connect(str(db_path))
+    try:
+        obs = _mk_obs('was orphan-tombstoned', project='r')
+        deleted_at = '2026-05-01T00:00:00.000000Z'
+        tomb = Tombstone(observation_id=obs.observation_id, deleted_at=deleted_at)
+
+        first = idx.rebuild_from_zenoh(_FakeSession([], [tomb]))
+        assert first.orphaned == 1
+
+        # obs finally shows up in a later scan; the tombstone is no longer
+        # returned this time (e.g. already gc'd upstream) — this is the
+        # scenario that must not resurrect the row as live.
+        second = idx.rebuild_from_zenoh(_FakeSession([obs], []))
+
+        assert second.marked_deleted == 0
+        assert second.orphaned == 0
+        assert idx.search(project='r') == []
+        with sqlite3.connect(str(db_path)) as raw:
+            got = raw.execute(
+                'SELECT deleted_at, payload_json FROM obs_index WHERE observation_id = ?',
+                (obs.observation_id,),
+            ).fetchone()
+            assert got[0] == deleted_at
+            assert got[1] is not None
+        hit = idx.find_by_id(obs.observation_id, include_deleted=True)
+        assert hit is not None
+        assert hit.observation_id == obs.observation_id
+    finally:
+        idx.close()
+
+
 # ---------------------------------------------------------------------------
 # Issue #32 — project-scoped tombstone enumeration + WAL checkpoint
 # ---------------------------------------------------------------------------

@@ -97,6 +97,12 @@ ADR-0030.
 
 ### Fixed
 
+- `rebuild_from_zenoh` が、obs 本体が zenoh にもローカル index にも無い tombstone を
+  無条件で捨てていた (orphan skip) 問題を修正した。捨てるとその observation_id は
+  index から完全に消え、後から obs だけが zenoh に再出現した際に delete 状態を失って
+  live として復活してしまう恐れがあった。今後は `deleted_at` のみを持つ
+  tombstone-only の行を index に残し、後続の rebuild で obs 本体が見つかった時点で
+  `deleted_at` を保持したまま内容を結合する (R5, TASK-441 修正方針6)
 - zenoh session が再作成されると local SQLite index が二度と zenoh の更新を
   受け取らなくなる問題を修正した。subscriber は宣言時の session と寿命を共にするが
   `with_retry` / pending-put drain の `_reset_session()` 後に再宣言されず、put と
