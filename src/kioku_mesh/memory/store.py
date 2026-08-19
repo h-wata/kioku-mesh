@@ -85,6 +85,11 @@ from .purge import GcCandidate  # noqa: F401  (façade re-export, #167)
 from .purge import GcCandidates  # noqa: F401  (façade re-export, #167)
 from .purge import physical_delete_observation  # noqa: F401  (façade re-export, #167)
 from .purge import scan_obs_by_pc_id  # noqa: F401  (façade re-export, #167)
+from .realignment import disable_realignment
+from .realignment import enable_realignment  # noqa: F401  (façade re-export)
+from .realignment import realignment_status  # noqa: F401  (façade re-export)
+from .realignment import start_realignment_worker
+from .realignment import stop_realignment_worker  # noqa: F401  (façade re-export)
 from .replication import _empty_index_rebuild_allowed
 from .replication import _obs_id_from_key  # noqa: F401  (façade re-export, #167)
 from .replication import _should_rebuild_on_init
@@ -136,6 +141,7 @@ def get_index() -> LocalIndex:
     if _index is None:
         _index = LocalIndex.connect()
         if not _index.disabled:
+            aligned = False
             try:
                 session = get_session()
                 rebuild = _should_rebuild_on_init()
@@ -152,10 +158,15 @@ def get_index() -> LocalIndex:
                     try:
                         stats = _index.rebuild_from_zenoh(session)
                         log.info('LocalIndex rebuild: %s', stats)
+                        aligned = True
                     except Exception as e:  # noqa: BLE001
                         log.warning('LocalIndex rebuild failed (partial index): %s', e)
             except Exception as e:  # noqa: BLE001
                 log.warning('LocalIndex zenoh init skipped (no session): %s', e)
+            # ADR-0035: only a process that declared ownership (the MCP server
+            # on the zenoh backend) gets a worker, and only now that the index
+            # is really open — opening it is what this branch just did.
+            start_realignment_worker(full_repair_due=not aligned)
     return _index
 
 
@@ -269,6 +280,9 @@ def _reset_index() -> None:
     """
     global _index
     stop_pending_drain_background()
+    # Also drops realignment ownership: only the MCP entry point grants it, and
+    # a test that granted it must not leak a worker into the next test.
+    disable_realignment()
     _reset_subscribers()
     if _index is not None:
         try:

@@ -866,6 +866,42 @@ def test_main_starts_and_stops_pending_drain_around_run(monkeypatch: pytest.Monk
     assert calls == ['start', 'run', 'stop']
 
 
+def test_main_owns_realignment_around_run_without_touching_the_index(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0035: MCP grants ownership, and revokes it on exit.
+
+    The index and the zenoh session stay untouched: an MCP process whose
+    client never calls a memory tool must not grow either as a side effect.
+    """
+    from kioku_mesh.memory import realignment
+    from kioku_mesh.memory import store as store_mod
+
+    seen: list[dict] = []
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module, 'start_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'stop_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: seen.append(realignment.realignment_status()))
+
+    mcp_server_module.main()
+
+    assert seen == [{'enabled': True, 'running': False}]
+    assert realignment.realignment_status() == {'enabled': False, 'running': False}
+    assert store_mod._index is None
+
+
+def test_main_does_not_own_realignment_on_the_local_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    from kioku_mesh.memory import realignment
+
+    seen: list[dict] = []
+    monkeypatch.setenv('KIOKU_MESH_BACKEND', 'local')
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: seen.append(realignment.realignment_status()))
+
+    mcp_server_module.main()
+
+    assert seen == [{'enabled': False, 'running': False}]
+
+
 def test_main_warns_when_zenoh_connect_unreachable(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,

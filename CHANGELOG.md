@@ -29,6 +29,19 @@ ADR-0030.
 
 ### Added
 
+- 長寿命 MCP server の定期 index 再アラインメント worker。`kioku-mesh-mcp` が
+  zenoh backend で起動したときだけ所有権を取り、実際に local index が開いた後に
+  daemon thread を 1 本だけ起動する (memory tool を使わない MCP process は index も
+  session も作らない)。tombstone-only repair を 15 分ごと、full repair を 6 時間ごとに
+  実行し、startup rebuild が失敗していた場合は 6 時間を待たず次の 15 分 tick から
+  full repair を再試行する。呼ぶのは非破壊の `repair_from_zenoh` だけで、shadow を
+  伴う `rebuild_from_zenoh` は定期実行しない。one-shot CLI は従来どおり worker を
+  起動しない (#325, ADR-0035, TASK-450 Phase 2)
+- `kioku-mesh doctor` に `index_realignment` チェックを追加した。最後に完了した
+  tombstone / full repair、直近の失敗、worker の有効・稼働状態を表示し、full repair が
+  24 時間以上前 (または一度も完了していない) 場合と、直近の失敗が後続の成功より
+  新しい場合に WARN する。既存の `index_subscriber` チェック (今 listen しているか) とは
+  別チェックとして分離している (#325)
 - `LocalIndex.repair_from_zenoh(mode=...)`: zenoh で見えた observation / tombstone
   だけを適用する非破壊の index 補修 primitive (schema v5 + `index_alignment_state`)。
   scan を全件収集して完了を確認してから 1 transaction で適用し、scan に無い行を

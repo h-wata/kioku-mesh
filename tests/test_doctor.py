@@ -571,3 +571,124 @@ def test_cli_doctor_check_legacy_namespace_flag(
     assert rc == 0
     out = capsys.readouterr().out
     assert 'legacy_namespace' in out
+
+
+# -- index_realignment (ADR-0035, R3 Phase 2) ----------------------------------
+
+
+def _index_with_alignment(tmp_path: 'Path', **columns: str) -> object:
+    """Return a real LocalIndex whose alignment_state columns are set as given."""
+    from kioku_mesh.memory.local_index import LocalIndex  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'realign.db'))
+    if columns:
+        assignments = ', '.join(f'{col} = ?' for col in columns)
+        idx._update_alignment_state(assignments, tuple(columns.values()))  # noqa: SLF001
+    return idx
+
+
+def _iso_ago(hours: float) -> str:
+    from datetime import datetime  # noqa: PLC0415
+    from datetime import timedelta  # noqa: PLC0415
+    from datetime import timezone  # noqa: PLC0415
+
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _patch_index(monkeypatch: pytest.MonkeyPatch, idx: object, **status: bool) -> None:
+    from kioku_mesh.memory import store as store_mod  # noqa: PLC0415
+
+    monkeypatch.setattr(store_mod, 'get_index', lambda: idx)
+    monkeypatch.setattr(
+        store_mod,
+        'realignment_status',
+        lambda: {'enabled': status.get('enabled', True), 'running': status.get('running', True)},
+    )
+
+
+def test_check_index_realignment_pass_when_recent(tmp_path: 'Path', monkeypatch: pytest.MonkeyPatch) -> None:
+    idx = _index_with_alignment(
+        tmp_path,
+        last_full_repair_completed_at=_iso_ago(2),
+        last_tomb_repair_completed_at=_iso_ago(0.1),
+    )
+    try:
+        _patch_index(monkeypatch, idx)
+        result = doctor.check_index_realignment()
+    finally:
+        idx.close()
+
+    assert result.status is CheckStatus.PASS
+    assert 'last full index repair' in result.summary
+    assert result.details['worker_running'] is True
+
+
+def test_check_index_realignment_warns_when_stale(tmp_path: 'Path', monkeypatch: pytest.MonkeyPatch) -> None:
+    idx = _index_with_alignment(tmp_path, last_full_repair_completed_at=_iso_ago(30))
+    try:
+        _patch_index(monkeypatch, idx, running=False)
+        result = doctor.check_index_realignment()
+    finally:
+        idx.close()
+
+    assert result.status is CheckStatus.WARN
+    assert 'stale' in result.summary
+
+
+def test_check_index_realignment_warns_when_never_repaired(tmp_path: 'Path', monkeypatch: pytest.MonkeyPatch) -> None:
+    idx = _index_with_alignment(tmp_path)
+    try:
+        _patch_index(monkeypatch, idx, enabled=False, running=False)
+        result = doctor.check_index_realignment()
+    finally:
+        idx.close()
+
+    assert result.status is CheckStatus.WARN
+    assert 'no full index repair has completed' in result.summary
+    assert result.details['last_full_repair_completed_at'] == 'never'
+
+
+def test_check_index_realignment_warns_when_failure_is_newer_than_success(
+    tmp_path: 'Path',
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    idx = _index_with_alignment(
+        tmp_path,
+        last_full_repair_completed_at=_iso_ago(3),
+        last_failure_at=_iso_ago(1),
+        last_failure_mode='tombstones',
+        last_failure_class='RepairScanError',
+    )
+    try:
+        _patch_index(monkeypatch, idx)
+        result = doctor.check_index_realignment()
+    finally:
+        idx.close()
+
+    assert result.status is CheckStatus.WARN
+    assert 'RepairScanError' in result.summary
+    assert result.details['last_failure_mode'] == 'tombstones'
+
+
+def test_check_index_realignment_hint_only_names_existing_commands(
+    tmp_path: 'Path',
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 3's `realign-index` does not exist yet — the hint must not name it."""
+    idx = _index_with_alignment(tmp_path)
+    try:
+        _patch_index(monkeypatch, idx)
+        result = doctor.check_index_realignment()
+    finally:
+        idx.close()
+
+    assert 'realign-index' not in result.hint
+    assert 'kioku-mesh --rebuild status' in result.hint
+    assert 'kioku-mesh-mcp' in result.hint
+
+
+def test_check_index_realignment_is_a_separate_check_from_the_subscriber() -> None:
+    order = doctor._CHECK_ORDER  # noqa: SLF001
+    assert 'check_index_realignment' in order
+    assert 'check_index_subscriber' in order
+    assert order.index('check_index_realignment') == order.index('check_index_subscriber') + 1

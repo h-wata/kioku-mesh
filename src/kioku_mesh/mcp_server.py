@@ -56,6 +56,8 @@ from .messaging.purge import purge_expired_msgs
 from .models import Observation
 from .models import resolve_expires_at
 from .models import VALID_MEMORY_TYPES
+from .store import disable_realignment
+from .store import enable_realignment
 from .store import get_index
 from .store import MAX_SEARCH
 from .store import search_observations
@@ -1706,11 +1708,16 @@ def main() -> None:
     if get_backend_mode() != 'local':
         _warn_if_zenoh_connect_unreachable()
         start_pending_drain_background()
+        # ADR-0035: declare ownership of the periodic index realignment worker.
+        # The thread itself only starts once a memory tool has actually opened
+        # the local index, so a client that never touches memory stays inert.
+        enable_realignment()
     try:
         mcp.run()
     finally:
         if get_backend_mode() != 'local':
             stop_pending_drain_background()
+            disable_realignment()
         reset_backend()
 
 
