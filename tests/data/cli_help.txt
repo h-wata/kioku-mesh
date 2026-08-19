@@ -1,0 +1,691 @@
+### kioku-mesh
+usage: kioku-mesh [-h] [--version] [--rebuild]
+                  {save,search,delete,status,backfill-metadata,drain,gc,gc-observations,get-memory,init,doctor,mcp,messaging,mesh,tls,zenohd,config,scope-migrate,scope-inventory,scope-purge,migrate-visibility,realign-index}
+                  ...
+
+kioku-mesh CLI
+
+positional arguments:
+  {save,search,delete,status,backfill-metadata,drain,gc,gc-observations,get-memory,init,doctor,mcp,messaging,mesh,tls,zenohd,config,scope-migrate,scope-inventory,scope-purge,migrate-visibility,realign-index}
+    save                Save an observation
+    search              Search memories
+    delete              Soft-delete an observation (tombstone)
+    status              Show memory status
+    backfill-metadata   Report / repair observations saved without subject or summary (dry-run by
+                        default)
+    drain               Drain pending_puts
+    gc                  Physically delete tombstoned entries (retention / --force-id / --by-pc-id)
+    gc-observations     Report stale observations (expired TTL / tombstones / shadows). Dry-run by
+                        default.
+    get-memory          Get a single observation by observation_id
+    init                Generate a starter zenohd config under ~/.config/kioku-mesh/
+    doctor              Run diagnostic checks (zenohd reachable, config present, state dir
+                        healthy)
+    mcp                 MCP client registration helpers
+    messaging           Inspect and repair local messaging (inbox) state
+    mesh                Embedded zenoh router for try-it / demo (no zenohd binary required)
+    tls                 Provision mTLS certificates for the mesh (private CA, CSR-based)
+    zenohd              Manage zenohd and zenoh-backend-rocksdb binaries
+    config              Inspect and update generated configuration
+    scope-migrate       Move the pre-split mem/mesh/** keys into the new clean mesh storage
+                        (design v3 B1)
+    scope-inventory     Report what this host still holds per scope (read-only: Zenoh dir probe +
+                        SQLite index)
+    scope-purge         Remove host-local copies of scopes this host no longer declares (no Zenoh
+                        delete)
+    migrate-visibility  Migrate legacy obs/tomb keys into an explicit visibility namespace
+                        (ADR-0019 Phase C)
+    realign-index       One-shot repair-only Zenoh scan for CLI-only hosts (opt-in catch-up; never
+                        shadows/deletes)
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --rebuild             Rebuild the SQLite index from zenoh on first startup. CLI is one-shot and
+                        skips by default (#38); pass this when the index is empty and you want
+                        search to work, or during CI verification. KIOKU_MESH_FORCE_REBUILD=1 has
+                        the same effect.
+
+### kioku-mesh save
+usage: kioku-mesh save [-h] [-p PROJECT] [-t TAGS]
+                       [--memory-type {bug,config,decision,note,pattern,summary}]
+                       [--importance 1-5] [--visibility {,user,team,mesh}] [--subject SUBJECT]
+                       [--summary SUMMARY] [--source-files SOURCE_FILES] [--references REFERENCES]
+                       [--supersedes SUPERSEDES]
+                       content
+
+positional arguments:
+  content               content to save
+
+options:
+  -h, --help            show this help message and exit
+  -p PROJECT, --project PROJECT
+  -t TAGS, --tags TAGS  comma-separated tags
+  --memory-type {bug,config,decision,note,pattern,summary}
+                        memory category (default: note)
+  --importance 1-5      importance 1-5 (default: 2)
+  --visibility {,user,team,mesh}
+                        replication scope: user (your machines), team, mesh (all peers); default
+                        follows configured default_visibility (env > project > global). Since
+                        Phase D / v0.8, an unset default falls back to 'mesh'.
+  --subject SUBJECT     REQUIRED. short topic name
+  --summary SUMMARY     REQUIRED. one-line summary shown in search results
+  --source-files SOURCE_FILES
+                        related file paths (comma-separated)
+  --references REFERENCES
+                        related PR / Issue ids (comma-separated, e.g. "#67,PR#68,org/repo#42")
+  --supersedes SUPERSEDES
+                        observation_ids this entry replaces (comma-separated, 32-char hex)
+
+### kioku-mesh search
+usage: kioku-mesh search [-h] [--agent-family AGENT_FAMILY] [--client-id CLIENT_ID]
+                         [--pc-id PC_ID] [--session-id SESSION_ID] [-p PROJECT] [--since SINCE]
+                         [-n LIMIT] [--format {text,markdown,json}]
+                         [--search-mode {and,or,and_or}]
+                         [query]
+
+positional arguments:
+  query                 search keyword (optional)
+
+options:
+  -h, --help            show this help message and exit
+  --agent-family AGENT_FAMILY
+  --client-id CLIENT_ID
+  --pc-id PC_ID
+  --session-id SESSION_ID
+  -p PROJECT, --project PROJECT
+  --since SINCE         limit to ISO8601 timestamp and later
+  -n LIMIT, --limit LIMIT
+                        max results (default: 50)
+  --format {text,markdown,json}
+                        output format (default: text)
+  --search-mode {and,or,and_or}
+                        search mode: and (default) / or / and_or
+
+### kioku-mesh delete
+usage: kioku-mesh delete [-h] [-p PROJECT] [--pc-id PC_ID] [--since SINCE] [--until UNTIL]
+                         [--dry-run] [--yes] [--batch-size BATCH_SIZE] [-r REASON]
+                         [observation_id]
+
+positional arguments:
+  observation_id        full 32-character observation_id
+
+options:
+  -h, --help            show this help message and exit
+  -p PROJECT, --project PROJECT
+                        tombstone observations in the given project
+  --pc-id PC_ID         tombstone observations from the given pc_id
+  --since SINCE         limit to ISO8601 timestamp and later
+  --until UNTIL         limit to ISO8601 timestamp and earlier
+  --dry-run             show count only, do not delete
+  --yes                 skip interactive confirmation for bulk delete
+  --batch-size BATCH_SIZE
+                        bulk delete page / progress granularity (default 1000, max 10000)
+  -r REASON, --reason REASON
+
+### kioku-mesh status
+usage: kioku-mesh status [-h] [--show-shadows]
+
+options:
+  -h, --help      show this help message and exit
+  --show-shadows  list shadowed observations (read-only, no unshadow/delete)
+
+### kioku-mesh backfill-metadata
+usage: kioku-mesh backfill-metadata [-h] [-p PROJECT] [--apply] [--limit LIMIT] [--show SHOW]
+
+Derive subject / summary for stored observations that are missing them. Dry-run by default:
+nothing is written unless --apply is passed. Repairs are append-only: each fix is stored as a new
+observation that supersedes the original, which stays on disk untouched. agent_family is part of
+the observation key and is only reported, never repaired.
+
+options:
+  -h, --help            show this help message and exit
+  -p PROJECT, --project PROJECT
+  --apply               actually append the repaired observations (default: dry-run)
+  --limit LIMIT         max observations to repair (0 = no cap)
+  --show SHOW           how many planned repairs to print (default: 10)
+
+### kioku-mesh drain
+usage: kioku-mesh drain [-h] [--pending] [--limit LIMIT]
+
+options:
+  -h, --help     show this help message and exit
+  --pending      replay queued rows in pending_puts.db
+  --limit LIMIT  max rows drained per invocation
+
+### kioku-mesh gc
+usage: kioku-mesh gc [-h] [--force-id FORCE_ID] [--retention-days RETENTION_DAYS] [-p PROJECT]
+                     [--by-pc-id BY_PC_ID] [--session-prefix SESSION_PREFIX] [--execute] [--yes]
+                     [--no-shadow-prune]
+
+options:
+  -h, --help            show this help message and exit
+  --force-id FORCE_ID   physically delete observation_id by 32-char exact match (emergency-purge
+                        for sensitive data; --project is ignored)
+  --retention-days RETENTION_DAYS
+                        retention in days (default 30). Tombstones and their obs older than this
+                        are physically deleted.
+  -p PROJECT, --project PROJECT
+                        only delete tombstones for the given project (default: all projects)
+  --by-pc-id BY_PC_ID   bulk-physically-delete obs matching a 32-char pc_id (for cleaning up
+                        bench/spam). Default is dry-run; pass --execute to actually delete. Skips
+                        tomb sweep / broadcast.
+  --session-prefix SESSION_PREFIX
+                        used with --by-pc-id; narrow further by session_id prefix (e.g. "bench")
+  --execute             disable --by-pc-id dry-run and actually delete
+  --yes                 skip interactive confirmation for --by-pc-id --execute (for CI /
+                        automation)
+  --no-shadow-prune     Skip physical deletion of shadow rows during retention sweep (tombstones
+                        only).
+
+### kioku-mesh gc-observations
+usage: kioku-mesh gc-observations [-h] [-p PROJECT] [--retention-days RETENTION_DAYS] [--execute]
+                                  [--yes]
+
+options:
+  -h, --help            show this help message and exit
+  -p PROJECT, --project PROJECT
+                        only consider the given project (default: every project in the index)
+  --retention-days RETENTION_DAYS
+                        retention in days for the tombstone / shadow buckets (default 30). Expired
+                        TTL observations ignore this — their instant was chosen by the writer.
+  --execute             actually tombstone expired-TTL rows and physically delete the retention
+                        buckets
+  --yes                 skip interactive confirmation for --execute (for CI / automation)
+
+### kioku-mesh get-memory
+usage: kioku-mesh get-memory [-h] [--include-hidden] observation_id
+
+positional arguments:
+  observation_id    full 32-character observation_id
+
+options:
+  -h, --help        show this help message and exit
+  --include-hidden  also return tombstoned / shadowed observations
+
+### kioku-mesh init
+usage: kioku-mesh init [-h] [--mode {local,hub,spoke}] [--listen ENDPOINT] [--connect ENDPOINT]
+                       [--out OUT] [--tls] [--force] [--print] [--install-systemd]
+
+Generate a starter config. Pick --mode by the deployment shape you want:
+
+  local  (default) SQLite only, no zenohd. Single-host persistent storage
+         with zero daemon. The easiest starting point.
+  hub    zenohd + rocksdb + LAN listener. Central peer that spokes dial in to
+         (multi-host mesh, persistent).
+  spoke  zenohd + rocksdb, dials a hub via --connect (multi-host mesh, persistent).
+
+For ephemeral Zenoh smoke tests without provisioning, use `kioku-mesh mesh start`.
+See README §Power users for the multi-host walkthrough.
+
+options:
+  -h, --help            show this help message and exit
+  --mode {local,hub,spoke}
+                        deployment shape: local (default) / hub / spoke. See full descriptions
+                        above.
+  --listen ENDPOINT     listen endpoint (repeatable, e.g. tcp/0.0.0.0:7447). Interactive picker if
+                        omitted.
+  --connect ENDPOINT    connect endpoint (repeatable). Required for --mode spoke.
+  --out OUT             output path (default: /home/gisen/.config/kioku-mesh/zenohd.json5)
+  --tls                 emit an mTLS config (tls/ endpoints + transport.link.tls). hub/spoke only;
+                        requires certs provisioned via `kioku-mesh tls` first.
+  --force               overwrite if the target file exists
+  --print               write to stdout instead of file
+  --install-systemd     also install a user-scope systemd unit at
+                        /home/gisen/.config/systemd/user/kioku-mesh-zenohd.service that runs
+                        `zenohd -c <out>` on login. Linux only; macOS / Windows / non-systemd
+                        hosts get a clear error.
+
+### kioku-mesh doctor
+usage: kioku-mesh doctor [-h] [--json] [--check-legacy-namespace] [--check-tool-call-fragments]
+
+options:
+  -h, --help            show this help message and exit
+  --json                emit machine-readable JSON instead of human-readable text
+  --check-legacy-namespace
+                        run only the legacy-namespace preflight check (ADR-0019 Phase D)
+  --check-tool-call-fragments
+                        run only the scan for stored MCP tool-call markup (read-only)
+
+### kioku-mesh mcp
+usage: kioku-mesh mcp [-h] {install} ...
+
+positional arguments:
+  {install}
+    install   Register kioku-mesh-mcp with a supported MCP client
+
+options:
+  -h, --help  show this help message and exit
+
+### kioku-mesh mcp install
+usage: kioku-mesh mcp install [-h] --client {claude-code,codex-cli} [--name NAME] [-e KEY=VALUE]
+                              [--force] [--dry-run] [--repair]
+
+options:
+  -h, --help            show this help message and exit
+  --client {claude-code,codex-cli}
+                        target MCP client (v0.3 supports Claude Code and Codex CLI)
+  --name NAME           registry key the client lists the server under (default: kioku_mesh)
+  -e KEY=VALUE, --env KEY=VALUE
+                        extra env var passed to the MCP server. Repeatable. Overrides the per-
+                        client defaults.
+  --force               replace an existing registration of the same name
+  --dry-run             print the command / config block instead of executing the registration
+  --repair              overwrite only retired MESH_MEM_* identity env vars on an already-
+                        registered entry to the current KIOKU_MESH_* prefix, leaving command and
+                        all other env untouched. Ignores --force/--env/--dry-run.
+
+### kioku-mesh messaging
+usage: kioku-mesh messaging [-h] {orphan-acks} ...
+
+positional arguments:
+  {orphan-acks}
+    orphan-acks  Inspect / recover acknowledgements that have no matching message
+
+options:
+  -h, --help     show this help message and exit
+
+### kioku-mesh messaging orphan-acks
+usage: kioku-mesh messaging orphan-acks [-h] {list,status,recover} ...
+
+An ack row with no messages row cannot be classified from the database alone:
+it may be residue from the old purge bug, or an acknowledgement that arrived
+before its message. Such rows are quarantined as legacy-unknown and are never
+read as acknowledgements. These commands list them (read-only) and resolve one
+exact pair at a time. There is deliberately no bulk delete and no age-based
+cleanup: age is not evidence, and deleting a legitimate early ack loses it.
+
+positional arguments:
+  {list,status,recover}
+    list                List quarantined (msg_id, session) pairs. Read-only.
+    status              Report this node's N4 rollout state. Read-only. Exit 0 = complete, 1 = not
+                        complete.
+    recover             Release or promote ONE quarantined pair (requires --backup and --execute)
+
+options:
+  -h, --help            show this help message and exit
+
+### kioku-mesh messaging orphan-acks list
+usage: kioku-mesh messaging orphan-acks list [-h] [--db DB] [--limit LIMIT] [--cursor CURSOR]
+                                             [--format {text,json}]
+
+options:
+  -h, --help            show this help message and exit
+  --db DB               inbox database path (default: the local state dir)
+  --limit LIMIT         rows per page (default: 50)
+  --cursor CURSOR       continue from a previous page
+  --format {text,json}  output format
+
+### kioku-mesh messaging orphan-acks status
+usage: kioku-mesh messaging orphan-acks status [-h] [--db DB] [--format {text,json}]
+
+Per-database rollout check for the ack-state migration. Reports the schema
+version, the writer version running here, and the quarantine counts, then says
+whether anything still blocks completion on this node.
+
+A fleet is done when every node exits 0 with the same writer version; this
+command cannot see other nodes and does not guess about them.
+
+options:
+  -h, --help            show this help message and exit
+  --db DB               inbox database path (default: the local state dir)
+  --format {text,json}  output format
+
+### kioku-mesh messaging orphan-acks recover
+usage: kioku-mesh messaging orphan-acks recover [-h] [--db DB] --msg-id MSG_ID --session-id
+                                                SESSION_ID --action {release,promote}
+                                                [--backup BACKUP] [--operator OPERATOR]
+                                                [--execute]
+
+release: record that the pair is not an acknowledgement, so the message may be
+         presented again.
+promote: record that it really was an acknowledgement observed before its
+         message, and make it authoritative. Requires the message to exist.
+
+Without --execute this is a dry run. --msg-id and --session-id must each name
+one exact value; wildcards, ranges and "all" are refused.
+
+options:
+  -h, --help            show this help message and exit
+  --db DB               inbox database path (default: the local state dir)
+  --msg-id MSG_ID       exact msg_id (no wildcards)
+  --session-id SESSION_ID
+                        exact recipient_session_id (no wildcards)
+  --action {release,promote}
+  --backup BACKUP       absolute path for a fresh pre-recovery database backup. Required with
+                        --execute; must not already exist.
+  --operator OPERATOR   who is running this, recorded in the audit log
+  --execute             apply the change. Without it, the command only reports what it would do.
+
+### kioku-mesh mesh
+usage: kioku-mesh mesh [-h] {start,join} ...
+
+Ephemeral multi-host mesh without the zenohd binary. Intended as a
+try-it / demo path — cross-host replication is NOT persistent across
+router restarts, and writes made while a peer was offline are not
+replayed later. For production multi-host use, install zenohd and
+follow the Power users section in the README.
+
+60-second multi-host start:
+  Host A: kioku-mesh mesh start
+  Host B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh mesh join tcp/<host-a-ip>:17447
+  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello mesh"
+  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh search "hello"
+
+Env vars:
+  ZENOH_CONNECT   zenoh router endpoint (e.g. tcp/192.168.1.10:17447)
+  KIOKU_MESH_BACKEND  set to "zenoh" to use Zenoh transport (default for mesh)
+
+positional arguments:
+  {start,join}
+    start       Start an in-process zenoh router (foreground; Ctrl-C to stop)
+    join        Connect to a mesh peer (foreground; accumulates peer saves locally)
+
+options:
+  -h, --help    show this help message and exit
+
+### kioku-mesh mesh start
+usage: kioku-mesh mesh start [-h] [--listen LISTEN]
+
+Start an in-process zenoh router (mode=router). No zenohd binary required.
+
+The router subscribes to all peer saves and stores them in the local SQLite index,
+so `kioku-mesh search` from this terminal will return content saved by remote peers.
+
+Example:
+  kioku-mesh mesh start --listen tcp/0.0.0.0:17447
+
+Then on a remote host:
+  ZENOH_CONNECT=tcp/<this-host>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"
+
+Env vars:
+  ZENOH_CONNECT     (set automatically by mesh start to point at the local router)
+  KIOKU_MESH_BACKEND  (set automatically to "zenoh")
+
+options:
+  -h, --help       show this help message and exit
+  --listen LISTEN  TCP listen endpoint (default: tcp/0.0.0.0:17447)
+
+### kioku-mesh mesh join
+usage: kioku-mesh mesh join [-h] peer
+
+Connect to a mesh router as an in-process peer. Starts a replication subscriber
+so remote saves are accumulated in the local SQLite index (Ctrl-C to stop).
+
+Example:
+  kioku-mesh mesh join tcp/192.168.1.10:17447
+
+After joining, in another terminal:
+  ZENOH_CONNECT=tcp/192.168.1.10:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"
+  kioku-mesh search "hello"  # reads from local SQLite filled by the subscriber
+
+Env vars:
+  ZENOH_CONNECT     endpoint to connect to (set automatically from <peer> arg)
+  KIOKU_MESH_BACKEND  set to "zenoh" automatically
+
+positional arguments:
+  peer        Peer endpoint to connect to (e.g. tcp/192.168.1.10:17447)
+
+options:
+  -h, --help  show this help message and exit
+
+### kioku-mesh tls
+usage: kioku-mesh tls [-h] {init-ca,request,sign,install,enroll,info} ...
+
+Provision mutual-TLS certificates so only peers holding a cert signed
+by your CA can join the mesh. Trust model: one private CA, one key per
+peer that never leaves the peer (only the CSR travels).
+
+Copy-paste flow (no SSH, no file shuffling):
+  CA host:   kioku-mesh tls init-ca
+  each peer: kioku-mesh tls request --san <addr-peers-dial>
+             (copy the printed CSR block to the CA host)
+  CA host:   kioku-mesh tls sign        (paste the CSR block)
+             (copy the printed bundle block back to the peer)
+  each peer: kioku-mesh tls install     (paste the bundle block)
+             kioku-mesh init --mode <hub|spoke> --tls --listen ... --force
+
+Have SSH to the CA host? One command does all three:
+  each peer: kioku-mesh tls enroll <ca-host> --san <addr-peers-dial>
+
+The blocks (CSR, signed bundle) are not secret; move them however is
+convenient — paste, chat, scp, a USB stick. The CA key and each peer
+key are secret and never appear in a block or leave their host.
+
+positional arguments:
+  {init-ca,request,sign,install,enroll,info}
+    init-ca             Create the mesh CA (run once, on the CA host)
+    request             Generate this peer key (local) + a CSR blob to copy to the CA host
+    sign                Sign a peer CSR with the local CA (run on the CA host)
+    install             Install a signed cert + CA cert into this host (from a bundle blob or
+                        files)
+    enroll              One command: request + sign over SSH + install (needs SSH to the CA host)
+    info                Show local CA / peer certificate details and expiry
+
+options:
+  -h, --help            show this help message and exit
+
+### kioku-mesh tls init-ca
+usage: kioku-mesh tls init-ca [-h] [--name NAME] [--days DAYS] [--force]
+
+options:
+  -h, --help   show this help message and exit
+  --name NAME  CA common name (default: kioku-mesh-ca)
+  --days DAYS  CA validity in days (default: 3650)
+  --force      replace an existing CA (invalidates signed peer certs)
+
+### kioku-mesh tls request
+usage: kioku-mesh tls request [-h] --san ADDR [--cn CN] [-o OUT]
+
+options:
+  -h, --help         show this help message and exit
+  --san ADDR         address peers dial this host on (IP or hostname). Repeatable; include every
+                     reachable address.
+  --cn CN            certificate common name (default: first --san)
+  -o OUT, --out OUT  write the CSR blob to a file instead of stdout
+
+### kioku-mesh tls sign
+usage: kioku-mesh tls sign [-h] [-o OUT] [--days DAYS] [csr]
+
+positional arguments:
+  csr                path to a .csr file or saved CSR blob; omit to paste/pipe one on stdin
+
+options:
+  -h, --help         show this help message and exit
+  -o OUT, --out OUT  write the signed cert bundle to a file instead of stdout
+  --days DAYS        certificate validity in days (default: 825)
+
+### kioku-mesh tls install
+usage: kioku-mesh tls install [-h] [--cert CERT] [--ca CA] [bundle]
+
+positional arguments:
+  bundle       path to a saved cert-bundle blob; omit to paste/pipe one on stdin
+
+options:
+  -h, --help   show this help message and exit
+  --cert CERT  (file mode) path to this peer signed certificate; use with --ca
+  --ca CA      (file mode) path to the CA certificate; use with --cert
+
+### kioku-mesh tls enroll
+usage: kioku-mesh tls enroll [-h] --san ADDR [--cn CN] [--days DAYS] [--remote-mesh REMOTE_MESH]
+                             [--ssh-port SSH_PORT] [--ssh-opt OPT] [--timeout TIMEOUT]
+                             CA-HOST
+
+positional arguments:
+  CA-HOST               SSH destination of the CA host (e.g. user@hub)
+
+options:
+  -h, --help            show this help message and exit
+  --san ADDR            address peers dial this host on (IP or hostname). Repeatable.
+  --cn CN               certificate common name (default: first --san)
+  --days DAYS           certificate validity in days (default: 825)
+  --remote-mesh REMOTE_MESH
+                        kioku-mesh command name on the CA host (default: kioku-mesh)
+  --ssh-port SSH_PORT   SSH port for the CA host (default: ssh default)
+  --ssh-opt OPT         pass an -o option to ssh (repeatable), e.g. --ssh-opt
+                        'StrictHostKeyChecking=accept-new'
+  --timeout TIMEOUT     SSH timeout in seconds (default: 60)
+
+### kioku-mesh tls info
+usage: kioku-mesh tls info [-h]
+
+options:
+  -h, --help  show this help message and exit
+
+### kioku-mesh zenohd
+usage: kioku-mesh zenohd [-h] {install} ...
+
+positional arguments:
+  {install}
+    install   Download and install zenohd + zenoh-backend-rocksdb (version-matched)
+
+options:
+  -h, --help  show this help message and exit
+
+### kioku-mesh zenohd install
+usage: kioku-mesh zenohd install [-h] [--version VERSION] [--bin-dir DIR] [--verbose]
+
+options:
+  -h, --help         show this help message and exit
+  --version VERSION  Zenoh release version to install (default: 1.9.0)
+  --bin-dir DIR      Destination directory (default: ~/.local/share/kioku-mesh/bin)
+  --verbose          Print download progress
+
+### kioku-mesh config
+usage: kioku-mesh config [-h] {render-storages} ...
+
+positional arguments:
+  {render-storages}
+    render-storages  Rewrite the zenohd storages block from storage_scopes, keeping the rest of
+                     the config
+
+options:
+  -h, --help         show this help message and exit
+
+### kioku-mesh config render-storages
+usage: kioku-mesh config render-storages [-h] [--dry-run] [--apply] [--out PATH] [--db PATH]
+                                         [--transitional] [--acknowledge-missing-scopes]
+
+options:
+  -h, --help            show this help message and exit
+  --dry-run             print the diff only
+  --apply               write the rendered config
+  --out PATH            config to rewrite (default: ~/.config/kioku-mesh/zenohd.json5)
+  --db PATH             SQLite index scanned for scopes with no storage (default: the local index)
+  --transitional        also keep the pre-split agent_mem storage as the read-only mesh re-PUT
+                        source
+  --acknowledge-missing-scopes
+                        apply even though stored observations fall outside storage_scopes
+
+### kioku-mesh scope-migrate
+usage: kioku-mesh scope-migrate [-h] {manifest,re-put} ...
+
+Two phases: `manifest` under the transitional config, `re-put` under the final config. The re-PUT
+is gated on a live exact mesh storage, so it cannot run while the transitional broad storage is
+still serving.
+
+positional arguments:
+  {manifest,re-put}
+    manifest         Build the immutable key/payload manifest from the pre-split storage (writes
+                     nothing to Zenoh)
+    re-put           Re-PUT a manifest into the live mesh storage, resumably, then verify digests
+
+options:
+  -h, --help         show this help message and exit
+
+### kioku-mesh scope-migrate manifest
+usage: kioku-mesh scope-migrate manifest [-h] --expected-peers N [--out PATH] [--dry-run]
+
+options:
+  -h, --help          show this help message and exit
+  --expected-peers N  number of peer routers that must answer the source get (keys held only by a
+                      peer that did not answer would be missing from the manifest)
+  --out PATH          manifest path (default: under ~/.local/share)
+  --dry-run           print the manifest summary; write no file
+
+### kioku-mesh scope-migrate re-put
+usage: kioku-mesh scope-migrate re-put [-h] --manifest PATH [--checkpoint CHECKPOINT] [--dry-run]
+                                       [--yes] [--batch-size BATCH_SIZE]
+
+options:
+  -h, --help            show this help message and exit
+  --manifest PATH       manifest built by the manifest phase
+  --checkpoint CHECKPOINT
+                        checkpoint path (default: beside the manifest)
+  --dry-run             print what would be re-PUT; write nothing
+  --yes                 skip interactive confirmation
+  --batch-size BATCH_SIZE
+                        keys re-PUT per checkpoint flush (default 500)
+
+### kioku-mesh scope-inventory
+usage: kioku-mesh scope-inventory [-h] [--db PATH] [--all-peers]
+
+options:
+  -h, --help   show this help message and exit
+  --db PATH    SQLite index (default: the local index)
+  --all-peers  also count replies from other routers (default: this host only)
+
+### kioku-mesh scope-purge
+usage: kioku-mesh scope-purge [-h] [--db PATH] [--rocksdb-root PATH] [--dry-run] [--yes]
+
+options:
+  -h, --help           show this help message and exit
+  --db PATH            SQLite index (default: the local index)
+  --rocksdb-root PATH  RocksDB root (default: $ZENOH_BACKEND_ROCKSDB_ROOT or ~/.local/share/kioku-
+                       mesh)
+  --dry-run            print the plan only
+  --yes                skip interactive confirmation
+
+### kioku-mesh migrate-visibility
+usage: kioku-mesh migrate-visibility [-h] --from {legacy} --to TO_VISIBILITY [--dry-run] [--yes]
+                                     [--scope SCOPE | --key-prefix KEY_PREFIX]
+                                     [--batch-size BATCH_SIZE] [--resume RESUME]
+                                     [--checkpoint CHECKPOINT] [--backup-dir BACKUP_DIR]
+
+options:
+  -h, --help            show this help message and exit
+  --from {legacy}       source namespace (currently only "legacy" is supported)
+  --to TO_VISIBILITY    target visibility: mesh | user | team | team/<team_id>
+  --dry-run             scan and print plan without any mutations
+  --yes                 skip interactive confirmation
+  --scope SCOPE         identity scope: agent_family[/client_id[/pc_id[/session_id]]] (1-4
+                        segments)
+  --key-prefix KEY_PREFIX
+                        advanced: legacy obs key prefix (must start with mem/obs); appends /**
+  --batch-size BATCH_SIZE
+                        records processed per checkpoint flush (default 500, max 10000)
+  --resume RESUME       resume from an existing checkpoint JSON path
+  --checkpoint CHECKPOINT
+                        checkpoint file path (auto-created if not given)
+  --backup-dir BACKUP_DIR
+                        backup directory (auto-created)
+
+### kioku-mesh realign-index
+usage: kioku-mesh realign-index [-h] [--mode {full,tombstones}]
+
+Applies positive source facts seen in Zenoh to the local SQLite index: upserts observations and applies tombstones seen in the scan. Unlike --rebuild, it never shadows or deletes a row because it was absent from the scan (ADR-0035).
+
+Normal one-shot commands (search, doctor, save, ...) never run this scan implicitly (#38): the per-command cost of a full mesh scan is unacceptable for everyday use. A long-lived MCP server instead repairs itself periodically in the background. A host that only ever runs the CLI has no such background worker, so this command exists as its explicit, operator-scheduled catch-up path.
+
+kioku-mesh does not install a timer or systemd unit for you. Example systemd user timer (adjust paths; 6h+ is a reasonable interval):
+
+  # ~/.config/systemd/user/kioku-mesh-realign.service
+  [Service]
+  Type=oneshot
+  ExecStart=%h/.local/bin/kioku-mesh realign-index
+
+  # ~/.config/systemd/user/kioku-mesh-realign.timer
+  [Timer]
+  OnUnitActiveSec=6h
+  [Install]
+  WantedBy=timers.target
+
+  $ systemctl --user enable --now kioku-mesh-realign.timer
+
+Or cron: 0 */6 * * * kioku-mesh realign-index >> ~/.local/state/kioku-mesh/realign.log 2>&1
+
+options:
+  -h, --help            show this help message and exit
+  --mode {full,tombstones}
+                        tombstones = cheap tombstone-only scan; full = observations + tombstones
+                        (default: full)

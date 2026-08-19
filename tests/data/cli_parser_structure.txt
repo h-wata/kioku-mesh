@@ -1,0 +1,308 @@
+### kioku-mesh
+func=None
+description='kioku-mesh CLI'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_VersionAction opts=['--version'] dest=version nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help="show program's version number and exit" completer=False
+  action=_StoreTrueAction opts=['--rebuild'] dest=rebuild nargs=0 const=True default=False choices=None required=False metavar=None type=None help='Rebuild the SQLite index from zenoh on first startup. CLI is one-shot and skips by default (#38); pass this when the index is empty and you want search to work, or during CI verification. KIOKU_MESH_FORCE_REBUILD=1 has the same effect.' completer=False
+  action=_SubParsersAction opts=[] dest=command nargs='A...' const=None default=None choices=[save, search, delete, status, backfill-metadata, drain, gc, gc-observations, get-memory, init, doctor, mcp, messaging, mesh, tls, zenohd, config, scope-migrate, scope-inventory, scope-purge, migrate-visibility, realign-index] required=True metavar=None type=None help=None completer=False
+### kioku-mesh save
+func=_cmd_save
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=content nargs=None const=None default=None choices=None required=True metavar=None type=None help='content to save' completer=False
+  action=_StoreAction opts=['-p', '--project'] dest=project nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=True
+  action=_StoreAction opts=['-t', '--tags'] dest=tags nargs=None const=None default='' choices=None required=False metavar=None type=None help='comma-separated tags' completer=False
+  action=_StoreAction opts=['--memory-type'] dest=memory_type nargs=None const=None default='note' choices=['bug', 'config', 'decision', 'note', 'pattern', 'summary'] required=False metavar=None type=None help='memory category (default: note)' completer=False
+  action=_StoreAction opts=['--importance'] dest=importance nargs=None const=None default=2 choices=[1, 2, 3, 4, 5] required=False metavar='1-5' type=int help='importance 1-5 (default: 2)' completer=False
+  action=_StoreAction opts=['--visibility'] dest=visibility nargs=None const=None default='' choices=['', 'user', 'team', 'mesh'] required=False metavar=None type=None help="replication scope: user (your machines), team, mesh (all peers); default follows configured default_visibility (env > project > global). Since Phase D / v0.8, an unset default falls back to 'mesh'." completer=False
+  action=_StoreAction opts=['--subject'] dest=subject nargs=None const=None default='' choices=None required=False metavar=None type=None help='REQUIRED. short topic name' completer=False
+  action=_StoreAction opts=['--summary'] dest=summary nargs=None const=None default='' choices=None required=False metavar=None type=None help='REQUIRED. one-line summary shown in search results' completer=False
+  action=_StoreAction opts=['--source-files'] dest=source_files nargs=None const=None default='' choices=None required=False metavar=None type=None help='related file paths (comma-separated)' completer=False
+  action=_StoreAction opts=['--references'] dest=references nargs=None const=None default='' choices=None required=False metavar=None type=None help='related PR / Issue ids (comma-separated, e.g. "#67,PR#68,org/repo#42")' completer=False
+  action=_StoreAction opts=['--supersedes'] dest=supersedes nargs=None const=None default='' choices=None required=False metavar=None type=None help='observation_ids this entry replaces (comma-separated, 32-char hex)' completer=False
+### kioku-mesh search
+func=_cmd_search
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=query nargs='?' const=None default='' choices=None required=False metavar=None type=None help='search keyword (optional)' completer=False
+  action=_StoreAction opts=['--agent-family'] dest=agent_family nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=False
+  action=_StoreAction opts=['--client-id'] dest=client_id nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=False
+  action=_StoreAction opts=['--pc-id'] dest=pc_id nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=True
+  action=_StoreAction opts=['--session-id'] dest=session_id nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=False
+  action=_StoreAction opts=['-p', '--project'] dest=project nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=True
+  action=_StoreAction opts=['--since'] dest=since nargs=None const=None default='' choices=None required=False metavar=None type=None help='limit to ISO8601 timestamp and later' completer=False
+  action=_StoreAction opts=['-n', '--limit'] dest=limit nargs=None const=None default=50 choices=None required=False metavar=None type=int help='max results (default: 50)' completer=False
+  action=_StoreAction opts=['--format'] dest=format nargs=None const=None default='text' choices=['text', 'markdown', 'json'] required=False metavar=None type=None help='output format (default: text)' completer=False
+  action=_StoreAction opts=['--search-mode'] dest=search_mode nargs=None const=None default='and' choices=['and', 'or', 'and_or'] required=False metavar=None type=None help='search mode: and (default) / or / and_or' completer=False
+### kioku-mesh delete
+func=_cmd_delete
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=observation_id nargs='?' const=None default='' choices=None required=False metavar=None type=None help='full 32-character observation_id' completer=False
+  action=_StoreAction opts=['-p', '--project'] dest=project nargs=None const=None default='' choices=None required=False metavar=None type=None help='tombstone observations in the given project' completer=True
+  action=_StoreAction opts=['--pc-id'] dest=pc_id nargs=None const=None default='' choices=None required=False metavar=None type=None help='tombstone observations from the given pc_id' completer=True
+  action=_StoreAction opts=['--since'] dest=since nargs=None const=None default='' choices=None required=False metavar=None type=None help='limit to ISO8601 timestamp and later' completer=False
+  action=_StoreAction opts=['--until'] dest=until nargs=None const=None default='' choices=None required=False metavar=None type=None help='limit to ISO8601 timestamp and earlier' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='show count only, do not delete' completer=False
+  action=_StoreTrueAction opts=['--yes'] dest=yes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='skip interactive confirmation for bulk delete' completer=False
+  action=_StoreAction opts=['--batch-size'] dest=batch_size nargs=None const=None default=1000 choices=None required=False metavar=None type=_positive_int help='bulk delete page / progress granularity (default 1000, max 10000)' completer=False
+  action=_StoreAction opts=['-r', '--reason'] dest=reason nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=False
+### kioku-mesh status
+func=_cmd_status
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreTrueAction opts=['--show-shadows'] dest=show_shadows nargs=0 const=True default=False choices=None required=False metavar=None type=None help='list shadowed observations (read-only, no unshadow/delete)' completer=False
+### kioku-mesh backfill-metadata
+func=_cmd_backfill_metadata
+description='Derive subject / summary for stored observations that are missing them. Dry-run by default: nothing is written unless --apply is passed. Repairs are append-only: each fix is stored as a new observation that supersedes the original, which stays on disk untouched. agent_family is part of the observation key and is only reported, never repaired.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['-p', '--project'] dest=project nargs=None const=None default='' choices=None required=False metavar=None type=None help=None completer=True
+  action=_StoreTrueAction opts=['--apply'] dest=apply nargs=0 const=True default=False choices=None required=False metavar=None type=None help='actually append the repaired observations (default: dry-run)' completer=False
+  action=_StoreAction opts=['--limit'] dest=limit nargs=None const=None default=0 choices=None required=False metavar=None type=int help='max observations to repair (0 = no cap)' completer=False
+  action=_StoreAction opts=['--show'] dest=show nargs=None const=None default=10 choices=None required=False metavar=None type=int help='how many planned repairs to print (default: 10)' completer=False
+### kioku-mesh drain
+func=_cmd_drain
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreTrueAction opts=['--pending'] dest=pending nargs=0 const=True default=False choices=None required=False metavar=None type=None help='replay queued rows in pending_puts.db' completer=False
+  action=_StoreAction opts=['--limit'] dest=limit nargs=None const=None default=None choices=None required=False metavar=None type=_positive_int help='max rows drained per invocation' completer=False
+### kioku-mesh gc
+func=_cmd_gc
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--force-id'] dest=force_id nargs=None const=None default='' choices=None required=False metavar=None type=None help='physically delete observation_id by 32-char exact match (emergency-purge for sensitive data; --project is ignored)' completer=False
+  action=_StoreAction opts=['--retention-days'] dest=retention_days nargs=None const=None default=30 choices=None required=False metavar=None type=int help='retention in days (default 30). Tombstones and their obs older than this are physically deleted.' completer=False
+  action=_StoreAction opts=['-p', '--project'] dest=project nargs=None const=None default='' choices=None required=False metavar=None type=None help='only delete tombstones for the given project (default: all projects)' completer=True
+  action=_StoreAction opts=['--by-pc-id'] dest=by_pc_id nargs=None const=None default='' choices=None required=False metavar=None type=None help='bulk-physically-delete obs matching a 32-char pc_id (for cleaning up bench/spam). Default is dry-run; pass --execute to actually delete. Skips tomb sweep / broadcast.' completer=True
+  action=_StoreAction opts=['--session-prefix'] dest=session_prefix nargs=None const=None default='' choices=None required=False metavar=None type=None help='used with --by-pc-id; narrow further by session_id prefix (e.g. "bench")' completer=False
+  action=_StoreTrueAction opts=['--execute'] dest=execute nargs=0 const=True default=False choices=None required=False metavar=None type=None help='disable --by-pc-id dry-run and actually delete' completer=False
+  action=_StoreTrueAction opts=['--yes'] dest=yes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='skip interactive confirmation for --by-pc-id --execute (for CI / automation)' completer=False
+  action=_StoreTrueAction opts=['--no-shadow-prune'] dest=no_shadow_prune nargs=0 const=True default=False choices=None required=False metavar=None type=None help='Skip physical deletion of shadow rows during retention sweep (tombstones only).' completer=False
+### kioku-mesh gc-observations
+func=_cmd_gc_observations
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['-p', '--project'] dest=project nargs=None const=None default='' choices=None required=False metavar=None type=None help='only consider the given project (default: every project in the index)' completer=True
+  action=_StoreAction opts=['--retention-days'] dest=retention_days nargs=None const=None default=30 choices=None required=False metavar=None type=int help='retention in days for the tombstone / shadow buckets (default 30). Expired TTL observations ignore this — their instant was chosen by the writer.' completer=False
+  action=_StoreTrueAction opts=['--execute'] dest=execute nargs=0 const=True default=False choices=None required=False metavar=None type=None help='actually tombstone expired-TTL rows and physically delete the retention buckets' completer=False
+  action=_StoreTrueAction opts=['--yes'] dest=yes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='skip interactive confirmation for --execute (for CI / automation)' completer=False
+### kioku-mesh get-memory
+func=_cmd_get_memory
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=observation_id nargs=None const=None default=None choices=None required=True metavar=None type=None help='full 32-character observation_id' completer=False
+  action=_StoreTrueAction opts=['--include-hidden'] dest=include_hidden nargs=0 const=True default=False choices=None required=False metavar=None type=None help='also return tombstoned / shadowed observations' completer=False
+### kioku-mesh init
+func=_cmd_init
+description='Generate a starter config. Pick --mode by the deployment shape you want:\n\n  local  (default) SQLite only, no zenohd. Single-host persistent storage\n         with zero daemon. The easiest starting point.\n  hub    zenohd + rocksdb + LAN listener. Central peer that spokes dial in to\n         (multi-host mesh, persistent).\n  spoke  zenohd + rocksdb, dials a hub via --connect (multi-host mesh, persistent).\n\nFor ephemeral Zenoh smoke tests without provisioning, use `kioku-mesh mesh start`.\nSee README §Power users for the multi-host walkthrough.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--mode'] dest=mode nargs=None const=None default='local' choices=['local', 'hub', 'spoke'] required=False metavar=None type=None help='deployment shape: local (default) / hub / spoke. See full descriptions above.' completer=False
+  action=_AppendAction opts=['--listen'] dest=listen nargs=None const=None default=[] choices=None required=False metavar='ENDPOINT' type=None help='listen endpoint (repeatable, e.g. tcp/0.0.0.0:7447). Interactive picker if omitted.' completer=False
+  action=_AppendAction opts=['--connect'] dest=connect nargs=None const=None default=[] choices=None required=False metavar='ENDPOINT' type=None help='connect endpoint (repeatable). Required for --mode spoke.' completer=False
+  action=_StoreAction opts=['--out'] dest=out nargs=None const=None default='' choices=None required=False metavar=None type=None help='output path (default: /home/gisen/.config/kioku-mesh/zenohd.json5)' completer=False
+  action=_StoreTrueAction opts=['--tls'] dest=tls nargs=0 const=True default=False choices=None required=False metavar=None type=None help='emit an mTLS config (tls/ endpoints + transport.link.tls). hub/spoke only; requires certs provisioned via `kioku-mesh tls` first.' completer=False
+  action=_StoreTrueAction opts=['--force'] dest=force nargs=0 const=True default=False choices=None required=False metavar=None type=None help='overwrite if the target file exists' completer=False
+  action=_StoreTrueAction opts=['--print'] dest=to_stdout nargs=0 const=True default=False choices=None required=False metavar=None type=None help='write to stdout instead of file' completer=False
+  action=_StoreTrueAction opts=['--install-systemd'] dest=install_systemd nargs=0 const=True default=False choices=None required=False metavar=None type=None help='also install a user-scope systemd unit at /home/gisen/.config/systemd/user/kioku-mesh-zenohd.service that runs `zenohd -c <out>` on login. Linux only; macOS / Windows / non-systemd hosts get a clear error.' completer=False
+### kioku-mesh doctor
+func=_cmd_doctor
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreTrueAction opts=['--json'] dest=json nargs=0 const=True default=False choices=None required=False metavar=None type=None help='emit machine-readable JSON instead of human-readable text' completer=False
+  action=_StoreTrueAction opts=['--check-legacy-namespace'] dest=check_legacy_namespace nargs=0 const=True default=False choices=None required=False metavar=None type=None help='run only the legacy-namespace preflight check (ADR-0019 Phase D)' completer=False
+  action=_StoreTrueAction opts=['--check-tool-call-fragments'] dest=check_tool_call_fragments nargs=0 const=True default=False choices=None required=False metavar=None type=None help='run only the scan for stored MCP tool-call markup (read-only)' completer=False
+### kioku-mesh mcp
+func=None
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=mcp_command nargs='A...' const=None default=None choices=[install] required=True metavar=None type=None help=None completer=False
+### kioku-mesh mcp install
+func=_cmd_mcp_install
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--client'] dest=client nargs=None const=None default=None choices=['claude-code', 'codex-cli'] required=True metavar=None type=None help='target MCP client (v0.3 supports Claude Code and Codex CLI)' completer=False
+  action=_StoreAction opts=['--name'] dest=name nargs=None const=None default='kioku_mesh' choices=None required=False metavar=None type=None help='registry key the client lists the server under (default: kioku_mesh)' completer=False
+  action=_AppendAction opts=['-e', '--env'] dest=env nargs=None const=None default=[] choices=None required=False metavar='KEY=VALUE' type=None help='extra env var passed to the MCP server. Repeatable. Overrides the per-client defaults.' completer=False
+  action=_StoreTrueAction opts=['--force'] dest=force nargs=0 const=True default=False choices=None required=False metavar=None type=None help='replace an existing registration of the same name' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='print the command / config block instead of executing the registration' completer=False
+  action=_StoreTrueAction opts=['--repair'] dest=repair nargs=0 const=True default=False choices=None required=False metavar=None type=None help='overwrite only retired MESH_MEM_* identity env vars on an already-registered entry to the current KIOKU_MESH_* prefix, leaving command and all other env untouched. Ignores --force/--env/--dry-run.' completer=False
+### kioku-mesh messaging
+func=None
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=messaging_command nargs='A...' const=None default=None choices=[orphan-acks] required=True metavar=None type=None help=None completer=False
+### kioku-mesh messaging orphan-acks
+func=None
+description='An ack row with no messages row cannot be classified from the database alone:\nit may be residue from the old purge bug, or an acknowledgement that arrived\nbefore its message. Such rows are quarantined as legacy-unknown and are never\nread as acknowledgements. These commands list them (read-only) and resolve one\nexact pair at a time. There is deliberately no bulk delete and no age-based\ncleanup: age is not evidence, and deleting a legitimate early ack loses it.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=orphan_command nargs='A...' const=None default=None choices=[list, status, recover] required=True metavar=None type=None help=None completer=False
+### kioku-mesh messaging orphan-acks list
+func=_cmd_orphan_acks_list
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--db'] dest=db nargs=None const=None default=None choices=None required=False metavar=None type=None help='inbox database path (default: the local state dir)' completer=False
+  action=_StoreAction opts=['--limit'] dest=limit nargs=None const=None default=50 choices=None required=False metavar=None type=int help='rows per page (default: 50)' completer=False
+  action=_StoreAction opts=['--cursor'] dest=cursor nargs=None const=None default=None choices=None required=False metavar=None type=None help='continue from a previous page' completer=False
+  action=_StoreAction opts=['--format'] dest=format nargs=None const=None default='text' choices=['text', 'json'] required=False metavar=None type=None help='output format' completer=False
+### kioku-mesh messaging orphan-acks status
+func=_cmd_orphan_acks_status
+description='Per-database rollout check for the ack-state migration. Reports the schema\nversion, the writer version running here, and the quarantine counts, then says\nwhether anything still blocks completion on this node.\n\nA fleet is done when every node exits 0 with the same writer version; this\ncommand cannot see other nodes and does not guess about them.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--db'] dest=db nargs=None const=None default=None choices=None required=False metavar=None type=None help='inbox database path (default: the local state dir)' completer=False
+  action=_StoreAction opts=['--format'] dest=format nargs=None const=None default='text' choices=['text', 'json'] required=False metavar=None type=None help='output format' completer=False
+### kioku-mesh messaging orphan-acks recover
+func=_cmd_orphan_acks_recover
+description='release: record that the pair is not an acknowledgement, so the message may be\n         presented again.\npromote: record that it really was an acknowledgement observed before its\n         message, and make it authoritative. Requires the message to exist.\n\nWithout --execute this is a dry run. --msg-id and --session-id must each name\none exact value; wildcards, ranges and "all" are refused.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--db'] dest=db nargs=None const=None default=None choices=None required=False metavar=None type=None help='inbox database path (default: the local state dir)' completer=False
+  action=_StoreAction opts=['--msg-id'] dest=msg_id nargs=None const=None default=None choices=None required=True metavar=None type=None help='exact msg_id (no wildcards)' completer=False
+  action=_StoreAction opts=['--session-id'] dest=session_id nargs=None const=None default=None choices=None required=True metavar=None type=None help='exact recipient_session_id (no wildcards)' completer=False
+  action=_StoreAction opts=['--action'] dest=action nargs=None const=None default=None choices=['release', 'promote'] required=True metavar=None type=None help=None completer=False
+  action=_StoreAction opts=['--backup'] dest=backup nargs=None const=None default=None choices=None required=False metavar=None type=None help='absolute path for a fresh pre-recovery database backup. Required with --execute; must not already exist.' completer=False
+  action=_StoreAction opts=['--operator'] dest=operator nargs=None const=None default=None choices=None required=False metavar=None type=None help='who is running this, recorded in the audit log' completer=False
+  action=_StoreTrueAction opts=['--execute'] dest=execute nargs=0 const=True default=False choices=None required=False metavar=None type=None help='apply the change. Without it, the command only reports what it would do.' completer=False
+### kioku-mesh mesh
+func=None
+description='Ephemeral multi-host mesh without the zenohd binary. Intended as a\ntry-it / demo path — cross-host replication is NOT persistent across\nrouter restarts, and writes made while a peer was offline are not\nreplayed later. For production multi-host use, install zenohd and\nfollow the Power users section in the README.\n\n60-second multi-host start:\n  Host A: kioku-mesh mesh start\n  Host B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh mesh join tcp/<host-a-ip>:17447\n  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello mesh"\n  Host A or B: ZENOH_CONNECT=tcp/<host-a-ip>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh search "hello"\n\nEnv vars:\n  ZENOH_CONNECT   zenoh router endpoint (e.g. tcp/192.168.1.10:17447)\n  KIOKU_MESH_BACKEND  set to "zenoh" to use Zenoh transport (default for mesh)'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=mesh_command nargs='A...' const=None default=None choices=[start, join] required=True metavar=None type=None help=None completer=False
+### kioku-mesh mesh start
+func=_cmd_mesh_start
+description='Start an in-process zenoh router (mode=router). No zenohd binary required.\n\nThe router subscribes to all peer saves and stores them in the local SQLite index,\nso `kioku-mesh search` from this terminal will return content saved by remote peers.\n\nExample:\n  kioku-mesh mesh start --listen tcp/0.0.0.0:17447\n\nThen on a remote host:\n  ZENOH_CONNECT=tcp/<this-host>:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"\n\nEnv vars:\n  ZENOH_CONNECT     (set automatically by mesh start to point at the local router)\n  KIOKU_MESH_BACKEND  (set automatically to "zenoh")'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--listen'] dest=listen nargs=None const=None default='tcp/0.0.0.0:17447' choices=None required=False metavar=None type=None help='TCP listen endpoint (default: tcp/0.0.0.0:17447)' completer=False
+### kioku-mesh mesh join
+func=_cmd_mesh_join
+description='Connect to a mesh router as an in-process peer. Starts a replication subscriber\nso remote saves are accumulated in the local SQLite index (Ctrl-C to stop).\n\nExample:\n  kioku-mesh mesh join tcp/192.168.1.10:17447\n\nAfter joining, in another terminal:\n  ZENOH_CONNECT=tcp/192.168.1.10:17447 KIOKU_MESH_BACKEND=zenoh kioku-mesh save "hello"\n  kioku-mesh search "hello"  # reads from local SQLite filled by the subscriber\n\nEnv vars:\n  ZENOH_CONNECT     endpoint to connect to (set automatically from <peer> arg)\n  KIOKU_MESH_BACKEND  set to "zenoh" automatically'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=peer nargs=None const=None default=None choices=None required=True metavar=None type=None help='Peer endpoint to connect to (e.g. tcp/192.168.1.10:17447)' completer=False
+### kioku-mesh tls
+func=None
+description='Provision mutual-TLS certificates so only peers holding a cert signed\nby your CA can join the mesh. Trust model: one private CA, one key per\npeer that never leaves the peer (only the CSR travels).\n\nCopy-paste flow (no SSH, no file shuffling):\n  CA host:   kioku-mesh tls init-ca\n  each peer: kioku-mesh tls request --san <addr-peers-dial>\n             (copy the printed CSR block to the CA host)\n  CA host:   kioku-mesh tls sign        (paste the CSR block)\n             (copy the printed bundle block back to the peer)\n  each peer: kioku-mesh tls install     (paste the bundle block)\n             kioku-mesh init --mode <hub|spoke> --tls --listen ... --force\n\nHave SSH to the CA host? One command does all three:\n  each peer: kioku-mesh tls enroll <ca-host> --san <addr-peers-dial>\n\nThe blocks (CSR, signed bundle) are not secret; move them however is\nconvenient — paste, chat, scp, a USB stick. The CA key and each peer\nkey are secret and never appear in a block or leave their host.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=tls_command nargs='A...' const=None default=None choices=[init-ca, request, sign, install, enroll, info] required=True metavar=None type=None help=None completer=False
+### kioku-mesh tls init-ca
+func=_cmd_tls_init_ca
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--name'] dest=name nargs=None const=None default='kioku-mesh-ca' choices=None required=False metavar=None type=None help='CA common name (default: kioku-mesh-ca)' completer=False
+  action=_StoreAction opts=['--days'] dest=days nargs=None const=None default=3650 choices=None required=False metavar=None type=int help='CA validity in days (default: 3650)' completer=False
+  action=_StoreTrueAction opts=['--force'] dest=force nargs=0 const=True default=False choices=None required=False metavar=None type=None help='replace an existing CA (invalidates signed peer certs)' completer=False
+### kioku-mesh tls request
+func=_cmd_tls_request
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_AppendAction opts=['--san'] dest=san nargs=None const=None default=[] choices=None required=True metavar='ADDR' type=None help='address peers dial this host on (IP or hostname). Repeatable; include every reachable address.' completer=False
+  action=_StoreAction opts=['--cn'] dest=cn nargs=None const=None default='' choices=None required=False metavar=None type=None help='certificate common name (default: first --san)' completer=False
+  action=_StoreAction opts=['-o', '--out'] dest=out nargs=None const=None default='' choices=None required=False metavar=None type=None help='write the CSR blob to a file instead of stdout' completer=False
+### kioku-mesh tls sign
+func=_cmd_tls_sign
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=csr nargs='?' const=None default=None choices=None required=False metavar=None type=None help='path to a .csr file or saved CSR blob; omit to paste/pipe one on stdin' completer=False
+  action=_StoreAction opts=['-o', '--out'] dest=out nargs=None const=None default='' choices=None required=False metavar=None type=None help='write the signed cert bundle to a file instead of stdout' completer=False
+  action=_StoreAction opts=['--days'] dest=days nargs=None const=None default=825 choices=None required=False metavar=None type=int help='certificate validity in days (default: 825)' completer=False
+### kioku-mesh tls install
+func=_cmd_tls_install
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=bundle nargs='?' const=None default=None choices=None required=False metavar=None type=None help='path to a saved cert-bundle blob; omit to paste/pipe one on stdin' completer=False
+  action=_StoreAction opts=['--cert'] dest=cert nargs=None const=None default=None choices=None required=False metavar=None type=None help='(file mode) path to this peer signed certificate; use with --ca' completer=False
+  action=_StoreAction opts=['--ca'] dest=ca nargs=None const=None default=None choices=None required=False metavar=None type=None help='(file mode) path to the CA certificate; use with --cert' completer=False
+### kioku-mesh tls enroll
+func=_cmd_tls_enroll
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=[] dest=ca_host nargs=None const=None default=None choices=None required=True metavar='CA-HOST' type=None help='SSH destination of the CA host (e.g. user@hub)' completer=False
+  action=_AppendAction opts=['--san'] dest=san nargs=None const=None default=[] choices=None required=True metavar='ADDR' type=None help='address peers dial this host on (IP or hostname). Repeatable.' completer=False
+  action=_StoreAction opts=['--cn'] dest=cn nargs=None const=None default='' choices=None required=False metavar=None type=None help='certificate common name (default: first --san)' completer=False
+  action=_StoreAction opts=['--days'] dest=days nargs=None const=None default=825 choices=None required=False metavar=None type=int help='certificate validity in days (default: 825)' completer=False
+  action=_StoreAction opts=['--remote-mesh'] dest=remote_mesh nargs=None const=None default='kioku-mesh' choices=None required=False metavar=None type=None help='kioku-mesh command name on the CA host (default: kioku-mesh)' completer=False
+  action=_StoreAction opts=['--ssh-port'] dest=ssh_port nargs=None const=None default=0 choices=None required=False metavar=None type=int help='SSH port for the CA host (default: ssh default)' completer=False
+  action=_AppendAction opts=['--ssh-opt'] dest=ssh_opt nargs=None const=None default=[] choices=None required=False metavar='OPT' type=None help="pass an -o option to ssh (repeatable), e.g. --ssh-opt 'StrictHostKeyChecking=accept-new'" completer=False
+  action=_StoreAction opts=['--timeout'] dest=timeout nargs=None const=None default=60 choices=None required=False metavar=None type=int help='SSH timeout in seconds (default: 60)' completer=False
+### kioku-mesh tls info
+func=_cmd_tls_info
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+### kioku-mesh zenohd
+func=None
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=zenohd_command nargs='A...' const=None default=None choices=[install] required=True metavar=None type=None help=None completer=False
+### kioku-mesh zenohd install
+func=_cmd_zenohd_install
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--version'] dest=version nargs=None const=None default='1.9.0' choices=None required=False metavar=None type=None help='Zenoh release version to install (default: 1.9.0)' completer=False
+  action=_StoreAction opts=['--bin-dir'] dest=bin_dir nargs=None const=None default=None choices=None required=False metavar='DIR' type=None help='Destination directory (default: ~/.local/share/kioku-mesh/bin)' completer=False
+  action=_StoreTrueAction opts=['--verbose'] dest=verbose nargs=0 const=True default=False choices=None required=False metavar=None type=None help='Print download progress' completer=False
+### kioku-mesh config
+func=None
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=config_command nargs='A...' const=None default=None choices=[render-storages] required=True metavar=None type=None help=None completer=False
+### kioku-mesh config render-storages
+func=_cmd_config_render_storages
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='print the diff only' completer=False
+  action=_StoreTrueAction opts=['--apply'] dest=apply nargs=0 const=True default=False choices=None required=False metavar=None type=None help='write the rendered config' completer=False
+  action=_StoreAction opts=['--out'] dest=out nargs=None const=None default=None choices=None required=False metavar='PATH' type=None help='config to rewrite (default: ~/.config/kioku-mesh/zenohd.json5)' completer=False
+  action=_StoreAction opts=['--db'] dest=db nargs=None const=None default='' choices=None required=False metavar='PATH' type=None help='SQLite index scanned for scopes with no storage (default: the local index)' completer=False
+  action=_StoreTrueAction opts=['--transitional'] dest=transitional nargs=0 const=True default=False choices=None required=False metavar=None type=None help='also keep the pre-split agent_mem storage as the read-only mesh re-PUT source' completer=False
+  action=_StoreTrueAction opts=['--acknowledge-missing-scopes'] dest=acknowledge_missing_scopes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='apply even though stored observations fall outside storage_scopes' completer=False
+### kioku-mesh scope-migrate
+func=None
+description='Two phases: `manifest` under the transitional config, `re-put` under the final config. The re-PUT is gated on a live exact mesh storage, so it cannot run while the transitional broad storage is still serving.'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_SubParsersAction opts=[] dest=scope_migrate_command nargs='A...' const=None default=None choices=[manifest, re-put] required=True metavar=None type=None help=None completer=False
+### kioku-mesh scope-migrate manifest
+func=_cmd_scope_migrate_manifest
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--expected-peers'] dest=expected_peers nargs=None const=None default=None choices=None required=True metavar='N' type=_positive_int help='number of peer routers that must answer the source get (keys held only by a peer that did not answer would be missing from the manifest)' completer=False
+  action=_StoreAction opts=['--out'] dest=out nargs=None const=None default='' choices=None required=False metavar='PATH' type=None help='manifest path (default: under ~/.local/share)' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='print the manifest summary; write no file' completer=False
+### kioku-mesh scope-migrate re-put
+func=_cmd_scope_migrate_reput
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--manifest'] dest=manifest nargs=None const=None default=None choices=None required=True metavar='PATH' type=None help='manifest built by the manifest phase' completer=False
+  action=_StoreAction opts=['--checkpoint'] dest=checkpoint nargs=None const=None default='' choices=None required=False metavar=None type=None help='checkpoint path (default: beside the manifest)' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='print what would be re-PUT; write nothing' completer=False
+  action=_StoreTrueAction opts=['--yes'] dest=yes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='skip interactive confirmation' completer=False
+  action=_StoreAction opts=['--batch-size'] dest=batch_size nargs=None const=None default=500 choices=None required=False metavar=None type=_positive_int help='keys re-PUT per checkpoint flush (default 500)' completer=False
+### kioku-mesh scope-inventory
+func=_cmd_scope_inventory
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--db'] dest=db nargs=None const=None default='' choices=None required=False metavar='PATH' type=None help='SQLite index (default: the local index)' completer=False
+  action=_StoreTrueAction opts=['--all-peers'] dest=all_peers nargs=0 const=True default=False choices=None required=False metavar=None type=None help='also count replies from other routers (default: this host only)' completer=False
+### kioku-mesh scope-purge
+func=_cmd_scope_purge
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--db'] dest=db nargs=None const=None default='' choices=None required=False metavar='PATH' type=None help='SQLite index (default: the local index)' completer=False
+  action=_StoreAction opts=['--rocksdb-root'] dest=rocksdb_root nargs=None const=None default='' choices=None required=False metavar='PATH' type=None help='RocksDB root (default: $ZENOH_BACKEND_ROCKSDB_ROOT or ~/.local/share/kioku-mesh)' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='print the plan only' completer=False
+  action=_StoreTrueAction opts=['--yes'] dest=yes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='skip interactive confirmation' completer=False
+### kioku-mesh migrate-visibility
+func=_cmd_migrate_visibility
+description=None
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--from'] dest=from_source nargs=None const=None default=None choices=['legacy'] required=True metavar=None type=None help='source namespace (currently only "legacy" is supported)' completer=False
+  action=_StoreAction opts=['--to'] dest=to_visibility nargs=None const=None default=None choices=None required=True metavar=None type=None help='target visibility: mesh | user | team | team/<team_id>' completer=False
+  action=_StoreTrueAction opts=['--dry-run'] dest=dry_run nargs=0 const=True default=False choices=None required=False metavar=None type=None help='scan and print plan without any mutations' completer=False
+  action=_StoreTrueAction opts=['--yes'] dest=yes nargs=0 const=True default=False choices=None required=False metavar=None type=None help='skip interactive confirmation' completer=False
+  action=_StoreAction opts=['--scope'] dest=scope nargs=None const=None default='' choices=None required=False metavar=None type=None help='identity scope: agent_family[/client_id[/pc_id[/session_id]]] (1-4 segments)' completer=False
+  action=_StoreAction opts=['--key-prefix'] dest=key_prefix nargs=None const=None default='' choices=None required=False metavar=None type=None help='advanced: legacy obs key prefix (must start with mem/obs); appends /**' completer=False
+  action=_StoreAction opts=['--batch-size'] dest=batch_size nargs=None const=None default=500 choices=None required=False metavar=None type=_positive_int help='records processed per checkpoint flush (default 500, max 10000)' completer=False
+  action=_StoreAction opts=['--resume'] dest=resume nargs=None const=None default='' choices=None required=False metavar=None type=None help='resume from an existing checkpoint JSON path' completer=False
+  action=_StoreAction opts=['--checkpoint'] dest=checkpoint nargs=None const=None default='' choices=None required=False metavar=None type=None help='checkpoint file path (auto-created if not given)' completer=False
+  action=_StoreAction opts=['--backup-dir'] dest=backup_dir nargs=None const=None default='' choices=None required=False metavar=None type=None help='backup directory (auto-created)' completer=False
+### kioku-mesh realign-index
+func=_cmd_realign_index
+description='Applies positive source facts seen in Zenoh to the local SQLite index: upserts observations and applies tombstones seen in the scan. Unlike --rebuild, it never shadows or deletes a row because it was absent from the scan (ADR-0035).\n\nNormal one-shot commands (search, doctor, save, ...) never run this scan implicitly (#38): the per-command cost of a full mesh scan is unacceptable for everyday use. A long-lived MCP server instead repairs itself periodically in the background. A host that only ever runs the CLI has no such background worker, so this command exists as its explicit, operator-scheduled catch-up path.\n\nkioku-mesh does not install a timer or systemd unit for you. Example systemd user timer (adjust paths; 6h+ is a reasonable interval):\n\n  # ~/.config/systemd/user/kioku-mesh-realign.service\n  [Service]\n  Type=oneshot\n  ExecStart=%h/.local/bin/kioku-mesh realign-index\n\n  # ~/.config/systemd/user/kioku-mesh-realign.timer\n  [Timer]\n  OnUnitActiveSec=6h\n  [Install]\n  WantedBy=timers.target\n\n  $ systemctl --user enable --now kioku-mesh-realign.timer\n\nOr cron: 0 */6 * * * kioku-mesh realign-index >> ~/.local/state/kioku-mesh/realign.log 2>&1'
+  action=_HelpAction opts=['-h', '--help'] dest=help nargs=0 const=None default='==SUPPRESS==' choices=None required=False metavar=None type=None help='show this help message and exit' completer=False
+  action=_StoreAction opts=['--mode'] dest=mode nargs=None const=None default='full' choices=['full', 'tombstones'] required=False metavar=None type=None help='tombstones = cheap tombstone-only scan; full = observations + tombstones (default: full)' completer=False
