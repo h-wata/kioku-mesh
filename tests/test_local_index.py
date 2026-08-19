@@ -3398,6 +3398,51 @@ def test_repair_sqlite_failure_rolls_back(tmp_path: Path) -> None:
         idx.close()
 
 
+def test_repair_persists_orphan_tombstone(tmp_path: Path) -> None:
+    """N2: repair (full mode) must reuse R5's orphan placeholder, not discard it."""
+    db_path = tmp_path / 'repair_orphan.db'
+    idx = LocalIndex.connect(str(db_path))
+    try:
+        orphan_id = '0' * 32
+        deleted_at = '2026-05-01T00:00:00.000000Z'
+        tomb = Tombstone(observation_id=orphan_id, deleted_at=deleted_at)
+
+        stats = idx.repair_from_zenoh(_FakeSession([], [tomb]))
+
+        assert stats.orphaned == 1
+        assert stats.marked_deleted == 0
+        assert idx.row_count() == 1
+        assert idx.search(project='r') == []
+        with sqlite3.connect(str(db_path)) as raw:
+            got = raw.execute(
+                'SELECT deleted_at, payload_json FROM obs_index WHERE observation_id = ?',
+                (orphan_id,),
+            ).fetchone()
+            assert got == (deleted_at, None)
+    finally:
+        idx.close()
+
+
+def test_repair_tombstones_mode_does_not_treat_unscanned_obs_as_orphan(tmp_path: Path) -> None:
+    """Tombstones-only mode never scans observations, so it must not persist orphans.
+
+    "not seen this scan" only means "confirmed absent" when obs were actually scanned.
+    """
+    db_path = tmp_path / 'repair_tomb_mode_no_orphan.db'
+    idx = LocalIndex.connect(str(db_path))
+    try:
+        unindexed_id = '0' * 32
+        tomb = Tombstone(observation_id=unindexed_id, deleted_at='2026-05-01T00:00:00.000000Z')
+
+        stats = idx.repair_from_zenoh(_FakeSession([], [tomb]), mode='tombstones')
+
+        assert stats.orphaned == 0
+        assert stats.marked_deleted == 0
+        assert idx.row_count() == 0
+    finally:
+        idx.close()
+
+
 def test_repair_does_not_change_rebuild_shadow_semantics(tmp_path: Path) -> None:
     """Rebuild still shadows absent rows; repair on the same index does not."""
     db = tmp_path / 'repair_vs_rebuild.db'

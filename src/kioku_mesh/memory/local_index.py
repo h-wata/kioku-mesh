@@ -99,6 +99,7 @@ class RepairStats:
     added: int = 0
     updated: int = 0
     marked_deleted: int = 0
+    orphaned: int = 0
     started_at: str = ''
     completed_at: str = ''
     failure_class: str = ''
@@ -209,6 +210,43 @@ _INSERT_ORPHAN_TOMBSTONE_SQL = (
 _MARK_SHADOWED_SQL = (
     'UPDATE obs_index SET shadowed_at = COALESCE(shadowed_at, ?) WHERE observation_id = ? AND deleted_at IS NULL'
 )
+
+
+def _split_tombstone_actions(
+    tomb_ids: dict[str, str],
+    existing: dict[str, tuple[str | None, str | None, str]],
+    seen_obs_ids: set[str],
+    *,
+    detect_orphans: bool = True,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Split scanned tombstones into (mark_rows, orphan_tomb_rows).
+
+    Shared by the rebuild (``_rebuild_from_observations``) and repair-only
+    (``_apply_repair``) apply paths (ADR-0035 N2). A tombstone whose
+    observation is absent from both ``existing`` and this scan's
+    ``seen_obs_ids`` is an orphan: persist it as a deleted_at-only
+    placeholder (``_INSERT_ORPHAN_TOMBSTONE_SQL``) instead of discarding the
+    delete state. Absence from a scan is otherwise never used to infer
+    anything (ADR-0035) — this only acts on tombstones the scan *did* see.
+
+    ``detect_orphans=False`` is for callers whose scan did not cover
+    observations at all (e.g. repair's tombstones-only mode): with no
+    observation scan, "not in seen_obs_ids" would not mean "confirmed
+    absent from Zenoh", so such tombs are left untouched rather than
+    treated as orphans.
+    """
+    mark_rows: list[tuple[str, str]] = []
+    orphan_tomb_rows: list[tuple[str, str]] = []
+    for obs_id, del_at in tomb_ids.items():
+        if obs_id not in existing and obs_id not in seen_obs_ids:
+            if detect_orphans:
+                orphan_tomb_rows.append((obs_id, del_at))
+            continue
+        if existing.get(obs_id, (None, None, ''))[0] is not None:
+            continue
+        mark_rows.append((del_at, obs_id))
+    return mark_rows, orphan_tomb_rows
+
 
 # ADR-0021: FTS5 lockstep sync SQL.
 _FTS_UPSERT_SQL = (
@@ -1500,22 +1538,8 @@ class LocalIndex:
                     else:
                         unchanged += 1
 
-                mark_rows = []
-                orphan_tomb_rows: list[tuple[str, str]] = []
-                for obs_id, del_at in tomb_ids.items():
-                    if obs_id not in existing and obs_id not in seen_obs_ids:
-                        # R5: obs is absent from both the local index and this
-                        # scan (gc'd upstream, or never replicated). Persist a
-                        # tombstone-only placeholder instead of discarding the
-                        # delete state — a later rebuild that does see the obs
-                        # will merge into this row (see _INSERT_ORPHAN_TOMBSTONE_SQL).
-                        orphan_tomb_rows.append((obs_id, del_at))
-                        continue
-                    current_deleted = existing.get(obs_id, (None, None, ''))[0]
-                    if current_deleted is not None:
-                        continue
-                    mark_rows.append((del_at, obs_id))
-                    marked_deleted += 1
+                mark_rows, orphan_tomb_rows = _split_tombstone_actions(tomb_ids, existing, seen_obs_ids)
+                marked_deleted = len(mark_rows)
                 orphaned = len(orphan_tomb_rows)
 
                 stale_rows: list[tuple[str, str]] = []
@@ -1738,24 +1762,20 @@ class LocalIndex:
                     else:
                         stats.updated += 1
 
-                mark_rows = []
                 seen_obs_ids = {obs.observation_id for obs in obs_list}
-                for obs_id, del_at in tomb_ids.items():
-                    # Same contract as mark_deleted(): a tombstone whose
-                    # observation is not indexed is a no-op here. Durable
-                    # orphan tombstones are TASK-451's (R5) scope.
-                    if obs_id not in existing and obs_id not in seen_obs_ids:
-                        continue
-                    if existing.get(obs_id, (None, None, ''))[0] is not None:
-                        continue
-                    mark_rows.append((del_at, obs_id))
-                    stats.marked_deleted += 1
+                mark_rows, orphan_tomb_rows = _split_tombstone_actions(
+                    tomb_ids, existing, seen_obs_ids, detect_orphans=stats.mode == REPAIR_MODE_FULL
+                )
+                stats.marked_deleted = len(mark_rows)
+                stats.orphaned = len(orphan_tomb_rows)
 
                 self._conn.execute('BEGIN')
                 if upsert_rows:
                     self._conn.executemany(_UPSERT_SQL, upsert_rows)
                 if mark_rows:
                     self._conn.executemany(_MARK_DELETED_SQL, mark_rows)
+                if orphan_tomb_rows:
+                    self._conn.executemany(_INSERT_ORPHAN_TOMBSTONE_SQL, orphan_tomb_rows)
                 # superseded_by is set only from observations this scan saw; it
                 # is never reset globally, because a repair scan is not a
                 # complete view of the mesh.
