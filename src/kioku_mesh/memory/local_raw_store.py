@@ -145,7 +145,7 @@ class LocalRawStore:
         for obs_id, project in rows:
             yield obs_id, project
 
-    def migrate_from_index(self, index_db_path: Path) -> None:
+    def migrate_from_index(self, index_db_path: Path) -> None:  # noqa: C901
         """Copy pre-Phase2 index.db rows to raw.db.
 
         Copy-only (index.db is never deleted) and idempotent (marker in

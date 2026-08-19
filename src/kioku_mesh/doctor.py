@@ -945,7 +945,7 @@ def _config_file_replication(config_path: Path) -> dict[str, Any]:
     return {name: body.get('replication') for name, body in storages.items() if isinstance(body, dict)}
 
 
-def check_storage_scopes(
+def check_storage_scopes(  # noqa: C901
     *,
     live: list[Any] | None = None,
     config_path: Path | None = None,
@@ -1090,7 +1090,7 @@ def check_storage_scopes(
     )
 
 
-def check_legacy_namespace(
+def check_legacy_namespace(  # noqa: C901
     session: Any | None = None,
     *,
     records: list[Any] | None = None,

@@ -368,7 +368,7 @@ _LOCAL_INDEX_HINT = (
 )
 
 
-def _cmd_delete(args: argparse.Namespace) -> int:
+def _cmd_delete(args: argparse.Namespace) -> int:  # noqa: C901
     if args.observation_id and _delete_has_bulk_selector(args):
         print(
             'observation_id and bulk selector (--project/--pc-id/--since/--until) cannot be combined.',
@@ -1931,7 +1931,7 @@ def _cmd_init_local(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_init(args: argparse.Namespace) -> int:
+def _cmd_init(args: argparse.Namespace) -> int:  # noqa: C901
     if args.mode == 'local':
         if getattr(args, 'tls', False):
             print('error: --tls applies only to --mode hub / spoke.', file=sys.stderr)
@@ -2483,7 +2483,7 @@ def _cmd_orphan_acks_recover(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_migrate_visibility(args: argparse.Namespace) -> int:
+def _cmd_migrate_visibility(args: argparse.Namespace) -> int:  # noqa: C901
     from datetime import timezone
 
     from .memory.visibility_migration import build_migration_plan
