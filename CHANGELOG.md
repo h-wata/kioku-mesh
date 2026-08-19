@@ -138,6 +138,7 @@ ADR-0030.
 - `migrate-visibility` は target scope に live で exact、かつ重複しない durable storage が
   無ければ copy も delete も行わずに拒否する。resume した repair PUT にも同じ判定が
   かかる (#316)
+- ruff lint に C901 (循環的複雑度) を追加し、既存の複雑度違反を可視化
 
 ### Fixed
 

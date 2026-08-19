@@ -78,7 +78,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 preview = true
-select = ["A", "ANN", "C4", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
+select = ["A", "ANN", "C4", "C90", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
 ignore = [
     "ANN002",
     "ANN003",
@@ -98,11 +98,30 @@ ignore = [
     "N818",  # QueryErrorReply keeps its name by design (exception-as-marker).
 ]
 
+[tool.ruff.lint.mccabe]
+# 12 violations at this threshold, spread across 8 files. This is a
+# detection-only first step (TASK-468): the offending functions are not
+# refactored here, only made visible via per-file-ignores below.
+max-complexity = 15
+
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately reach into module-private helpers and mock internals.
 "tests/**" = ["SLF001"]
 # One-off PIL-based image/GIF generator scripts, not shipped package code.
 "docs/assets/gen_*.py" = ["ANN", "D", "N802", "N806"]
+# C901 (cyclomatic complexity) pre-existing violations, tracked as debt
+# rather than fixed here (TASK-468 is detection-only; refactor is future
+# work). Listed per file, not silenced globally or per-function with noqa,
+# so the debt stays visible in this list.
+"src/kioku_mesh/__main__.py" = ["C901"]
+"src/kioku_mesh/doctor.py" = ["C901"]
+"src/kioku_mesh/mcp_server.py" = ["C901"]
+"src/kioku_mesh/memory/local_index.py" = ["C901"]
+"src/kioku_mesh/memory/local_raw_store.py" = ["C901"]
+"src/kioku_mesh/memory/replication.py" = ["C901"]
+"src/kioku_mesh/memory/store.py" = ["C901"]
+"src/kioku_mesh/memory/visibility_migration.py" = ["C901"]
+"scripts/smoke_5peer_mesh.py" = ["C901"]
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = "single"
