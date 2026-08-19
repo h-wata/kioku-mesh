@@ -78,7 +78,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 preview = true
-select = ["A", "ANN", "C4", "C90", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
+select = ["A", "ANN", "C4", "C90", "E", "F", "N", "Q", "W", "D", "D401", "SLF", "PLR0912", "PLR0915"]
 ignore = [
     "ANN002",
     "ANN003",
@@ -111,6 +111,11 @@ max-complexity = 15
 "tests/**" = ["SLF001"]
 # One-off PIL-based image/GIF generator scripts, not shipped package code.
 "docs/assets/gen_*.py" = ["ANN", "D", "N802", "N806"]
+# PLR0912/PLR0915 existing violations at the adopted threshold (max-branches=25,
+# max-statements=120), tracked here rather than fixed (TASK-469). Do not add new
+# entries without lowering the function below threshold instead.
+"src/kioku_mesh/__main__.py" = ["PLR0915"]  # _build_parser: 221 statements (argparse subcommand wiring)
+"src/kioku_mesh/memory/local_index.py" = ["PLR0912", "PLR0915"]  # LocalIndex.search: 56 branches / 177 statements
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = "single"
@@ -141,3 +146,7 @@ addopts = "-p no:launch_testing -p no:launch_ros"
 # (tests/test_two_node_scope_harness.py)。既定の `pytest tests/ -q` に含める。
 # これだけ回すなら `pytest -m integration`、外すなら `pytest -m "not integration"`。
 markers = ["integration: spawns real zenohd routers and waits for replication"]
+
+[tool.ruff.lint.pylint]
+max-branches = 25
+max-statements = 120
