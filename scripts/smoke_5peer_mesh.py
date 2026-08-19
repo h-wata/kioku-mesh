@@ -307,7 +307,7 @@ def _start_router(peer_idx: int) -> subprocess.Popen:
     return proc
 
 
-def main() -> dict:  # noqa: C901
+def main() -> dict:  # noqa: C901, PLR0912, PLR0915
     import shutil
 
     results = {}

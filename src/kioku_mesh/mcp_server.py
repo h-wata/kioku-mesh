@@ -1357,7 +1357,7 @@ def _bounded_message_item(msg: Message, envelope_reason: str | None, *, acked: b
 
 
 @mcp.tool()
-def check_messages(  # noqa: C901
+def check_messages(  # noqa: C901, PLR0912, PLR0915
     limit: int = 20,
     visibility: str = '',
     include_acked: bool = False,

@@ -143,5 +143,5 @@ addopts = "-p no:launch_testing -p no:launch_ros"
 markers = ["integration: spawns real zenohd routers and waits for replication"]
 
 [tool.ruff.lint.pylint]
-max-branches = 25
-max-statements = 120
+max-branches = 20
+max-statements = 80

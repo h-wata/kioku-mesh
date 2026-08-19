@@ -1471,7 +1471,7 @@ class LocalIndex:
 
         return self._rebuild_from_observations(obs_list, tomb_ids, mark_missing_shadowed=True)
 
-    def _rebuild_from_observations(  # noqa: C901
+    def _rebuild_from_observations(  # noqa: C901, PLR0912
         self,
         obs_list: list[Observation],
         tomb_ids: dict[str, str],
