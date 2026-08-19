@@ -31,6 +31,7 @@ import time
 from types import ModuleType
 from typing import Callable
 
+from ..core.transport import ScanCancelled
 from .local_index import REPAIR_MODE_FULL
 from .local_index import REPAIR_MODE_TOMB
 
@@ -40,8 +41,13 @@ log = logging.getLogger(__name__)
 TOMB_INTERVAL_SEC = 15 * 60
 #: Full observation+tombstone repair cadence, seconds.
 FULL_INTERVAL_SEC = 6 * 60 * 60
-#: Shutdown must not stall the MCP exit; the thread is a daemon anyway.
-JOIN_TIMEOUT = 0.2
+#: How long shutdown waits for the worker to actually exit. A stop request
+#: cancels an in-flight repair scan at the next reply boundary (see
+#: :func:`collect_ok_replies_over`), so the thread normally exits in
+#: milliseconds; this bound only covers a peer that accepted a query and never
+#: answers it, where the scan stays blocked in zenoh until its own timeout. In
+#: that case shutdown reports the failure rather than waiting the full scan out.
+JOIN_TIMEOUT = 5.0
 
 _state_lock = threading.Lock()
 _enabled = False
@@ -63,12 +69,17 @@ def enable_realignment() -> None:
         _enabled = True
 
 
-def disable_realignment() -> None:
-    """Revoke ownership and stop any running worker."""
+def disable_realignment() -> bool:
+    """Revoke ownership and stop any running worker.
+
+    Returns what :func:`stop_realignment_worker` returned: False means the
+    worker was still running when the wait ran out, which the caller
+    (``mcp_server.main``) must not treat as a clean shutdown.
+    """
     global _enabled
     with _state_lock:
         _enabled = False
-    stop_realignment_worker()
+    return stop_realignment_worker()
 
 
 def realignment_status() -> dict[str, object]:
@@ -109,7 +120,12 @@ def start_realignment_worker(*, full_repair_due: bool = False) -> bool:
 
 
 def stop_realignment_worker(join_timeout: float = JOIN_TIMEOUT) -> bool:
-    """Ask the worker to stop; join briefly. True when it is gone."""
+    """Ask the worker to stop and wait for it to exit. True when it is gone.
+
+    Setting the stop event also cancels an in-flight repair scan, so this
+    returns once the thread has really exited rather than abandoning a running
+    repair to the daemon-thread-dies-with-the-process fallback (PR #328 B1).
+    """
     global _thread, _stop_event
     with _state_lock:
         thread = _thread
@@ -122,9 +138,9 @@ def stop_realignment_worker(join_timeout: float = JOIN_TIMEOUT) -> bool:
         return False
     thread.join(timeout=max(0.0, join_timeout))
     if thread.is_alive():
-        # A scan in flight is bounded by its own zenoh timeout; the daemon
-        # thread dies with the process rather than delaying shutdown here.
-        log.info('index realignment worker still running after %.2fs; leaving daemon thread alive', join_timeout)
+        # Only reachable when the scan is stuck inside zenoh with no reply to
+        # cancel on. Report it instead of pretending shutdown completed.
+        log.error('index realignment worker did not exit within %.2fs; it is still running', join_timeout)
         return False
     with _state_lock:
         if _thread is thread:
@@ -133,12 +149,17 @@ def stop_realignment_worker(join_timeout: float = JOIN_TIMEOUT) -> bool:
     return True
 
 
-def _repair_once(mode: str) -> bool:
+def _repair_once(mode: str, should_stop: Callable[[], bool] | None = None) -> bool:
     """Run one repair scan. Returns True on success; never raises."""
     store = _store()
     try:
         session = store.get_session()
-        stats = store.get_index().repair_from_zenoh(session, mode=mode)
+        stats = store.get_index().repair_from_zenoh(session, mode=mode, should_stop=should_stop)
+    except ScanCancelled:
+        # Shutdown asked for it: nothing applied, no completion timestamp, and
+        # no failure recorded — being stopped says nothing about the mesh.
+        log.info('index realignment %s repair cancelled by shutdown', mode)
+        return False
     except Exception as e:  # noqa: BLE001 — a failed repair must not kill the worker
         # local_index already persisted the failure in index_alignment_state.
         log.warning('index realignment %s repair failed: %s: %s', mode, type(e).__name__, e)
@@ -163,7 +184,7 @@ def _run_worker(
     if wait is None:
         wait = stop_event.wait
     if repair is None:
-        repair = _repair_once
+        repair = lambda mode: _repair_once(mode, should_stop=stop_event.is_set)  # noqa: E731
     try:
         next_tomb = now() + TOMB_INTERVAL_SEC
         next_full = now() + FULL_INTERVAL_SEC

@@ -7,6 +7,7 @@ because "the thread is alive" is exactly what a mock-only test cannot show.
 """
 
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -169,7 +170,7 @@ def test_worker_does_not_start_without_ownership() -> None:
 
 def test_repair_once_reports_failure_instead_of_raising(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Boom:
-        def repair_from_zenoh(self, session: object, *, mode: str) -> None:
+        def repair_from_zenoh(self, session: object, *, mode: str, should_stop: object = None) -> None:
             raise TimeoutError('scan timed out')
 
     monkeypatch.setattr(store, 'get_session', lambda: object())
@@ -183,7 +184,7 @@ def test_repair_once_uses_repair_not_rebuild(monkeypatch: pytest.MonkeyPatch) ->
     calls: list[str] = []
 
     class _Idx:
-        def repair_from_zenoh(self, session: object, *, mode: str) -> str:
+        def repair_from_zenoh(self, session: object, *, mode: str, should_stop: object = None) -> str:
             calls.append(f'repair:{mode}')
             return 'stats'
 
@@ -247,3 +248,172 @@ def test_cli_run_leaves_realignment_off(monkeypatch: pytest.MonkeyPatch, capsys:
     store.get_index()
 
     assert realignment.realignment_status() == {'enabled': False, 'running': False}
+
+
+# -- shutdown with an in-flight repair (PR #328 B1) ----------------------------
+
+
+class _BlockingSession:
+    """A zenoh-shaped session whose scan keeps streaming replies until released.
+
+    This is the shape of a real scan that is still collecting from peers when
+    shutdown arrives: without a cancellation check at the reply boundary the
+    scan runs until ``release``, and shutdown has to abandon the thread.
+    """
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.entered = threading.Event()
+        self.replies_yielded = 0
+
+    def get(self, key_expr: str, **kwargs: Any) -> Any:  # noqa: ARG002
+        def _stream() -> Any:
+            self.entered.set()
+            while not self.release.wait(0.005):
+                self.replies_yielded += 1
+                yield _NoOkReply()
+
+        return _stream()
+
+
+class _SkippedOk:
+    """An ok reply on a non-canonical key: the repair scan skips it."""
+
+    key_expr = 'mem/mesh/not-a-canonical-key'
+    payload = ''
+
+
+class _NoOkReply:
+    """A reply carrying the ok above (the scan sees one reply, applies nothing)."""
+
+    ok = _SkippedOk()
+    err = None
+
+
+def _start_worker_in_repair(monkeypatch: pytest.MonkeyPatch, idx: Any) -> _BlockingSession:
+    """Start a real worker that is already inside a repair scan."""
+    session = _BlockingSession()
+    monkeypatch.setattr(store, 'get_session', lambda: session)
+    monkeypatch.setattr(store, 'get_index', lambda: idx)
+    real_run = realignment._run_worker
+    # Skip the 15-minute wait: go straight into the first repair.
+    monkeypatch.setattr(
+        realignment,
+        '_run_worker',
+        lambda stop, **kw: real_run(stop, **{**kw, 'wait': lambda _d: stop.is_set()}),
+    )
+    assert realignment.start_realignment_worker() is True
+    assert session.entered.wait(5.0)
+    return session
+
+
+def test_shutdown_stops_a_worker_that_is_inside_a_repair(
+    owned: Any,  # noqa: ARG001
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: the thread must be gone when shutdown returns, not left as a daemon."""
+    from kioku_mesh.memory.local_index import LocalIndex
+
+    idx = LocalIndex.connect(str(tmp_path / 'shutdown.db'))
+    try:
+        session = _start_worker_in_repair(monkeypatch, idx)
+        started = time.monotonic()
+
+        stopped = realignment.disable_realignment()
+        elapsed = time.monotonic() - started
+
+        assert stopped is True
+        assert realignment.realignment_status()['running'] is False
+        # Shutdown must not have waited out the blocked scan.
+        assert elapsed < 5.0
+        assert session.release.is_set() is False
+
+        state = idx.alignment_state()
+        assert state.last_tomb_repair_completed_at == ''
+        assert state.last_full_repair_completed_at == ''
+        # A cancellation is not a mesh failure, so it is not recorded as one.
+        assert state.last_failure_at == ''
+    finally:
+        idx.close()
+
+
+def test_cancelled_scan_raises_instead_of_returning_partial_results() -> None:
+    """A cancelled scan must not look like a completed one to its caller."""
+    from kioku_mesh.core.transport import collect_ok_replies_over
+    from kioku_mesh.core.transport import ScanCancelled
+
+    session = _BlockingSession()
+    session.release.set()
+
+    with pytest.raises(ScanCancelled):
+        collect_ok_replies_over(session, ['mem/obs/**'], timeout=0.1, should_stop=lambda: True)
+
+
+def test_repair_cancellation_applies_nothing_and_advances_no_timestamp(tmp_path: Any) -> None:
+    from kioku_mesh.core.transport import ScanCancelled
+    from kioku_mesh.memory.local_index import LocalIndex
+
+    idx = LocalIndex.connect(str(tmp_path / 'cancel.db'))
+    try:
+        session = _BlockingSession()
+        session.release.set()
+
+        with pytest.raises(ScanCancelled):
+            idx.repair_from_zenoh(session, mode=realignment.REPAIR_MODE_TOMB, should_stop=lambda: True)
+
+        state = idx.alignment_state()
+        assert state.last_tomb_repair_completed_at == ''
+        assert state.last_failure_at == ''
+    finally:
+        idx.close()
+
+
+class _SilentSession(_BlockingSession):
+    """A scan that accepted the query and never answers — the residual case.
+
+    Cancellation is cooperative, so a scan with no reply boundary to check on
+    cannot be interrupted; shutdown must report that instead of hanging.
+    """
+
+    def get(self, key_expr: str, **kwargs: Any) -> Any:  # noqa: ARG002
+        def _stream() -> Any:
+            self.entered.set()
+            self.release.wait(10.0)
+            return
+            yield  # pragma: no cover — makes this a generator
+
+        return _stream()
+
+
+def test_shutdown_reports_failure_instead_of_waiting_out_a_silent_scan(
+    owned: Any,  # noqa: ARG001
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kioku_mesh.memory.local_index import LocalIndex
+
+    idx = LocalIndex.connect(str(tmp_path / 'silent.db'))
+    session = _SilentSession()
+    try:
+        monkeypatch.setattr(store, 'get_session', lambda: session)
+        monkeypatch.setattr(store, 'get_index', lambda: idx)
+        real_run = realignment._run_worker
+        monkeypatch.setattr(
+            realignment,
+            '_run_worker',
+            lambda stop, **kw: real_run(stop, **{**kw, 'wait': lambda _d: stop.is_set()}),
+        )
+        assert realignment.start_realignment_worker() is True
+        assert session.entered.wait(5.0)
+
+        started = time.monotonic()
+        stopped = realignment.stop_realignment_worker(join_timeout=0.2)
+        elapsed = time.monotonic() - started
+
+        assert stopped is False
+        assert elapsed < 2.0
+    finally:
+        session.release.set()
+        realignment.stop_realignment_worker(join_timeout=5.0)
+        idx.close()

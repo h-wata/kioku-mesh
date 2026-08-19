@@ -36,7 +36,10 @@ ADR-0030.
   実行し、startup rebuild が失敗していた場合は 6 時間を待たず次の 15 分 tick から
   full repair を再試行する。呼ぶのは非破壊の `repair_from_zenoh` だけで、shadow を
   伴う `rebuild_from_zenoh` は定期実行しない。one-shot CLI は従来どおり worker を
-  起動しない (#325, ADR-0035, TASK-450 Phase 2)
+  起動しない。MCP の shutdown は停止要求で実行中の repair scan を reply 境界で中断させ、
+  thread が実際に終了するまで待つ (中断された repair は何も適用せず、完了時刻も
+  失敗も記録しない)。応答の来ない scan で待ち時間を超えた場合は、停止できなかったことを
+  stderr に警告する (#325, ADR-0035, TASK-450 Phase 2)
 - `kioku-mesh doctor` に `index_realignment` チェックを追加した。最後に完了した
   tombstone / full repair、直近の失敗、worker の有効・稼働状態を表示し、full repair が
   24 時間以上前 (または一度も完了していない) 場合と、直近の失敗が後続の成功より

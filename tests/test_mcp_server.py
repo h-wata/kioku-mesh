@@ -890,6 +890,22 @@ def test_main_owns_realignment_around_run_without_touching_the_index(
     assert store_mod._index is None
 
 
+def test_main_warns_when_the_realignment_worker_does_not_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The shutdown result is checked, not discarded (PR #328 B1)."""
+    monkeypatch.delenv('ZENOH_CONNECT', raising=False)
+    monkeypatch.setattr(mcp_server_module, 'start_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'stop_pending_drain_background', lambda: None)
+    monkeypatch.setattr(mcp_server_module, 'disable_realignment', lambda: False)
+    monkeypatch.setattr(mcp_server_module.mcp, 'run', lambda: None)
+
+    mcp_server_module.main()
+
+    assert 'index realignment worker did not stop before shutdown' in capsys.readouterr().err
+
+
 def test_main_does_not_own_realignment_on_the_local_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     from kioku_mesh.memory import realignment
 

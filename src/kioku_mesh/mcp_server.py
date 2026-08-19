@@ -1717,7 +1717,15 @@ def main() -> None:
     finally:
         if get_backend_mode() != 'local':
             stop_pending_drain_background()
-            disable_realignment()
+            if not disable_realignment():
+                # The worker outlived the shutdown wait (a scan stuck inside
+                # zenoh). Say so on stderr: the backend is about to be torn
+                # down underneath a thread that is still using it.
+                print(
+                    'WARNING: index realignment worker did not stop before shutdown; '
+                    'it will be killed with the process.',
+                    file=sys.stderr,
+                )
         reset_backend()
 
 
