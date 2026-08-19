@@ -1715,18 +1715,23 @@ def main() -> None:
     try:
         mcp.run()
     finally:
+        realignment_stopped = True
         if get_backend_mode() != 'local':
             stop_pending_drain_background()
-            if not disable_realignment():
-                # The worker outlived the shutdown wait (a scan stuck inside
-                # zenoh). Say so on stderr: the backend is about to be torn
-                # down underneath a thread that is still using it.
+            realignment_stopped = disable_realignment()
+            if not realignment_stopped:
                 print(
                     'WARNING: index realignment worker did not stop before shutdown; '
-                    'it will be killed with the process.',
+                    'leaving the zenoh backend to be released with the process.',
                     file=sys.stderr,
                 )
-        reset_backend()
+        if realignment_stopped:
+            # Skipped while that worker is still inside a scan: reset_backend
+            # closes the backend and resets the zenoh session, which would then
+            # run concurrently with the thread's own session.get. The process
+            # is exiting either way, so letting the session go with it is the
+            # safer of the two (PR #328 B2 review).
+            reset_backend()
 
 
 if __name__ == '__main__':

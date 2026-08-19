@@ -417,3 +417,129 @@ def test_shutdown_reports_failure_instead_of_waiting_out_a_silent_scan(
         session.release.set()
         realignment.stop_realignment_worker(join_timeout=5.0)
         idx.close()
+
+
+# -- B2: a selector that ends with zero replies -------------------------------
+
+
+class _SilentTombSession:
+    """obs scan answers normally; the tomb selector accepts and never answers.
+
+    The shape that produced PR #328 B2: the per-reply cancellation check never
+    runs for a selector with no replies, so a stop arriving while the last
+    selector waits must still be caught after that selector finishes.
+    """
+
+    def __init__(self, obs: Any) -> None:
+        self._obs = obs
+        self.entered_tomb = threading.Event()
+        self.release = threading.Event()
+
+    def get(self, key_expr: str, **kwargs: Any) -> Any:  # noqa: ARG002
+        if '/tomb/' in key_expr:
+
+            def _silent() -> Any:
+                self.entered_tomb.set()
+                self.release.wait(10.0)
+                return
+                yield  # pragma: no cover — makes this a generator
+
+            return _silent()
+        return [_ObsReply(self._obs)]
+
+
+class _ObsReply:
+    def __init__(self, obs: Any) -> None:
+        self.ok = _ObsOk(obs)
+        self.err = None
+
+
+class _ObsOk:
+    def __init__(self, obs: Any) -> None:
+        self.key_expr = obs.key_expr
+        self.payload = _ObsPayload(obs.to_json())
+
+
+class _ObsPayload:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def to_string(self) -> str:
+        return self._text
+
+
+def _mk_remote_obs() -> Any:
+    from kioku_mesh.core.models import Observation
+
+    return Observation(
+        content='remote observation',
+        project='b2',
+        agent_family='claude',
+        client_id='test',
+        pc_id='testpc',
+        session_id='testsession',
+        visibility='mesh',
+    )
+
+
+def test_stop_during_a_silent_final_selector_applies_nothing(tmp_path: Any) -> None:
+    """B2: obs scan done, final tomb selector silent, stop requested."""
+    from kioku_mesh.core.transport import ScanCancelled
+    from kioku_mesh.memory.local_index import LocalIndex
+
+    obs = _mk_remote_obs()
+    session = _SilentTombSession(obs)
+    idx = LocalIndex.connect(str(tmp_path / 'b2.db'))
+    stop = threading.Event()
+    result: dict[str, Any] = {}
+
+    def _repair() -> None:
+        try:
+            result['stats'] = idx.repair_from_zenoh(
+                session, mode=realignment.REPAIR_MODE_FULL, should_stop=stop.is_set
+            )
+        except BaseException as e:  # noqa: BLE001 — the test asserts on what came out
+            result['exc'] = e
+
+    worker = threading.Thread(target=_repair, daemon=True)
+    try:
+        worker.start()
+        assert session.entered_tomb.wait(5.0)
+        stop.set()
+        session.release.set()
+        worker.join(timeout=5.0)
+
+        assert not worker.is_alive()
+        assert 'stats' not in result, f'a cancelled scan must not report success: {result.get("stats")}'
+        assert isinstance(result.get('exc'), ScanCancelled)
+        assert idx.find_by_id(obs.observation_id, include_deleted=True) is None
+        state = idx.alignment_state()
+        assert state.last_full_repair_completed_at == ''
+        assert state.last_failure_at == ''
+    finally:
+        session.release.set()
+        worker.join(timeout=5.0)
+        idx.close()
+
+
+def test_scan_cancelled_after_a_selector_finishes_with_zero_replies() -> None:
+    """The unit-level shape of B2, independent of repair."""
+    from kioku_mesh.core.transport import collect_ok_replies_over
+    from kioku_mesh.core.transport import ScanCancelled
+
+    stop = threading.Event()
+
+    class _StopOnSecondSelector:
+        def get(self, key_expr: str, **kwargs: Any) -> Any:  # noqa: ARG002
+            if '/tomb/' in key_expr:
+                stop.set()  # a stop arrives while this empty selector runs
+                return []
+            return []
+
+    with pytest.raises(ScanCancelled):
+        collect_ok_replies_over(
+            _StopOnSecondSelector(),
+            ['mem/**/obs/**', 'mem/**/tomb/**'],
+            timeout=0.1,
+            should_stop=stop.is_set,
+        )

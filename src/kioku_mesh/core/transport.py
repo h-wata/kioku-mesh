@@ -382,9 +382,13 @@ def collect_ok_replies_over(
     has already seen part of the scan when the first ``err`` raises.
 
     ``should_stop`` makes a long scan abandonable: it is polled before each
-    selector and after each reply, and :class:`ScanCancelled` is raised as soon
-    as it returns True. Raising — rather than returning what was collected so
-    far — is what stops a cancelled scan from being mistaken for a complete one.
+    selector, after each reply, and — crucially — after each selector finishes,
+    and :class:`ScanCancelled` is raised as soon as it returns True. Raising —
+    rather than returning what was collected so far — is what stops a cancelled
+    scan from being mistaken for a complete one. The check *after* a selector is
+    what covers a selector that ends with zero replies: the per-reply check
+    never runs there, so without it a stop arriving while the last selector
+    waited would return a partial scan as a complete one (PR #328 B2).
     Cancellation is cooperative: a ``session.get()`` that a peer accepted but
     never answers still blocks until its own ``timeout`` elapses.
     """
@@ -396,6 +400,8 @@ def collect_ok_replies_over(
             collected.append(ok)
             if should_stop is not None and should_stop():
                 raise ScanCancelled(f'scan cancelled during {key_expr}')
+        if should_stop is not None and should_stop():
+            raise ScanCancelled(f'scan cancelled after {key_expr}')
     return collected
 
 
