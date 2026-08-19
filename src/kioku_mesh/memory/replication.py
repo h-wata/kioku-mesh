@@ -161,7 +161,7 @@ def _empty_index_rebuild_allowed() -> bool:
 _obs_id_from_key = obs_id_from_key
 
 
-def start_index_subscriber(session: zenoh.Session) -> list:
+def start_index_subscriber(session: zenoh.Session) -> list:  # noqa: C901
     """Subscribe to obs / tomb keys (legacy + tiered) to keep SQLite in sync.
 
     ADR-0019 Phase A: the subscriptions use ``mem/**/obs/**`` /

@@ -611,7 +611,7 @@ def _execute_batch(
     save_checkpoint_atomic(chk, checkpoint_path)
 
 
-def execute_migration(
+def execute_migration(  # noqa: C901
     plan: MigrationPlan,
     *,
     session: Any,

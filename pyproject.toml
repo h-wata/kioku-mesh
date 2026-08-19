@@ -78,7 +78,7 @@ target-version = "py310"
 
 [tool.ruff.lint]
 preview = true
-select = ["A", "ANN", "C4", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
+select = ["A", "ANN", "C4", "C90", "E", "F", "N", "Q", "W", "D", "D401", "SLF"]
 ignore = [
     "ANN002",
     "ANN003",
@@ -97,6 +97,14 @@ ignore = [
     "D404",
     "N818",  # QueryErrorReply keeps its name by design (exception-as-marker).
 ]
+
+[tool.ruff.lint.mccabe]
+# 13 violations at this threshold, spread across 9 files (10 -> 36, 15 -> 13,
+# 20 -> 6; see queue/projects/kioku-mesh/reports/details/TASK-468_c901_violations.md
+# for the full sweep). This is a detection-only first step (TASK-468): the
+# offending functions are not refactored here, only silenced individually
+# via `# noqa: C901` so new violations in the same files still get caught.
+max-complexity = 15
 
 [tool.ruff.lint.per-file-ignores]
 # Tests legitimately reach into module-private helpers and mock internals.

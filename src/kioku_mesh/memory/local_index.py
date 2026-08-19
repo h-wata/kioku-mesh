@@ -647,7 +647,7 @@ class LocalIndex:
         """
         return self.search(project=project, limit=limit)
 
-    def search(
+    def search(  # noqa: C901
         self,
         *,
         project: str | Sequence[str] = '',
@@ -1471,7 +1471,7 @@ class LocalIndex:
 
         return self._rebuild_from_observations(obs_list, tomb_ids, mark_missing_shadowed=True)
 
-    def _rebuild_from_observations(
+    def _rebuild_from_observations(  # noqa: C901
         self,
         obs_list: list[Observation],
         tomb_ids: dict[str, str],
