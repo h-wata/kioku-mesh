@@ -147,6 +147,10 @@ ADR-0030.
 - ruff lint に C901 (循環的複雑度, max-complexity=15) を追加。既存 13 箇所の違反は
   `# noqa: C901` を関数単位で個別付与して抑制し (ファイル単位の一括抑制はしない)、
   今後同じファイルに追加される高複雑度の新規関数は引き続き検出される
+- CLI の `_build_parser` (889 行 / 221 statements / 51 locals) をサブコマンド族ごとの
+  登録関数 14 個に分割し、本体を登録関数を順に呼ぶだけの 33 行にした。CLI の外部から
+  見た挙動は不変で、`--help` 出力・引数の dest/default/choices/metavar・
+  `set_defaults(func=...)` の対応をゴールデンテストで固定している
 
 ### Fixed
 

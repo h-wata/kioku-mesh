@@ -2656,21 +2656,13 @@ def _cmd_zenohd_install(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
-    parser = argparse.ArgumentParser(prog='kioku-mesh', description='kioku-mesh CLI')
-    parser.add_argument('--version', action='version', version=f'kioku-mesh {__version__}')
-    parser.add_argument(
-        '--rebuild',
-        action='store_true',
-        help=(
-            'Rebuild the SQLite index from zenoh on first startup. '
-            'CLI is one-shot and skips by default (#38); '
-            'pass this when the index is empty and you want search to work, or during CI verification. '
-            'KIOKU_MESH_FORCE_REBUILD=1 has the same effect.'
-        ),
-    )
-    sub = parser.add_subparsers(dest='command', required=True)
+#: What ``ArgumentParser.add_subparsers()`` returns. argparse exposes no public
+#: name for it, and the registration helpers below all take one.
+_SubParsers = argparse._SubParsersAction  # noqa: SLF001
 
+
+def _register_observation_commands(sub: _SubParsers) -> None:
+    """Register the observation commands: save, search, delete, status."""
     _MEMORY_TYPES = sorted(VALID_MEMORY_TYPES)  # noqa: N806
 
     p_save = sub.add_parser('save', help='Save an observation')
@@ -2777,6 +2769,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_status.set_defaults(func=_cmd_status)
 
+
+def _register_maintenance_commands(sub: _SubParsers) -> None:
+    """Register the store-maintenance commands: backfill-metadata, drain, gc, gc-observations."""
     p_backfill = sub.add_parser(
         'backfill-metadata',
         help='Report / repair observations saved without subject or summary (dry-run by default)',
@@ -2901,6 +2896,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_gc_obs.set_defaults(func=_cmd_gc_observations)
 
+
+def _register_get_memory_command(sub: _SubParsers) -> None:
+    """Register the get-memory command."""
     p_get = sub.add_parser('get-memory', help='Get a single observation by observation_id')
     p_get.add_argument('observation_id', help='full 32-character observation_id')
     p_get.add_argument(
@@ -2911,6 +2909,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_get.set_defaults(func=_cmd_get_memory)
 
+
+def _register_init_command(sub: _SubParsers) -> None:
+    """Register the init command."""
     p_init = sub.add_parser(
         'init',
         help='Generate a starter zenohd config under ~/.config/kioku-mesh/',
@@ -2980,6 +2981,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_init.set_defaults(func=_cmd_init)
 
+
+def _register_doctor_command(sub: _SubParsers) -> None:
+    """Register the doctor command."""
     p_doctor = sub.add_parser(
         'doctor',
         help='Run diagnostic checks (zenohd reachable, config present, state dir healthy)',
@@ -3001,6 +3005,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_doctor.set_defaults(func=_cmd_doctor)
 
+
+def _register_mcp_commands(sub: _SubParsers) -> None:
+    """Register the mcp command group."""
     p_mcp = sub.add_parser(
         'mcp',
         help='MCP client registration helpers',
@@ -3050,6 +3057,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_mcp_install.set_defaults(func=_cmd_mcp_install)
 
+
+def _register_messaging_commands(sub: _SubParsers) -> None:
+    """Register the messaging command group."""
     p_messaging = sub.add_parser(
         'messaging',
         help='Inspect and repair local messaging (inbox) state',
@@ -3126,6 +3136,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_orphan_recover.set_defaults(func=_cmd_orphan_acks_recover)
 
+
+def _register_mesh_commands(sub: _SubParsers) -> None:
+    """Register the mesh command group."""
     p_mesh = sub.add_parser(
         'mesh',
         help='Embedded zenoh router for try-it / demo (no zenohd binary required)',
@@ -3198,6 +3211,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_mesh_join.set_defaults(func=_cmd_mesh_join)
 
+
+def _register_tls_commands(sub: _SubParsers) -> None:
+    """Register the tls command group."""
     p_tls = sub.add_parser(
         'tls',
         help='Provision mTLS certificates for the mesh (private CA, CSR-based)',
@@ -3321,6 +3337,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     p_tls_info = p_tls_sub.add_parser('info', help='Show local CA / peer certificate details and expiry')
     p_tls_info.set_defaults(func=_cmd_tls_info)
 
+
+def _register_zenohd_commands(sub: _SubParsers) -> None:
+    """Register the zenohd command group."""
     p_zenohd = sub.add_parser(
         'zenohd',
         help='Manage zenohd and zenoh-backend-rocksdb binaries',
@@ -3348,6 +3367,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_zenohd_install.set_defaults(func=_cmd_zenohd_install)
 
+
+def _register_config_commands(sub: _SubParsers) -> None:
+    """Register the config command group."""
     p_config = sub.add_parser('config', help='Inspect and update generated configuration')
     p_config_sub = p_config.add_subparsers(dest='config_command', required=True)
     p_config_render = p_config_sub.add_parser(
@@ -3381,6 +3403,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     )
     p_config_render.set_defaults(func=_cmd_config_render_storages)
 
+
+def _register_scope_commands(sub: _SubParsers) -> None:
+    """Register the scope commands: scope-migrate, scope-inventory, scope-purge."""
     p_scope_migrate = sub.add_parser(
         'scope-migrate',
         help='Move the pre-split mem/mesh/** keys into the new clean mesh storage (design v3 B1)',
@@ -3460,6 +3485,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     p_scope_purge.add_argument('--yes', action='store_true', help='skip interactive confirmation')
     p_scope_purge.set_defaults(func=_cmd_scope_purge)
 
+
+def _register_visibility_migration_command(sub: _SubParsers) -> None:
+    """Register the migrate-visibility command."""
     p_migrate = sub.add_parser(
         'migrate-visibility',
         help='Migrate legacy obs/tomb keys into an explicit visibility namespace (ADR-0019 Phase C)',
@@ -3508,6 +3536,9 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     p_migrate.add_argument('--backup-dir', dest='backup_dir', default='', help='backup directory (auto-created)')
     p_migrate.set_defaults(func=_cmd_migrate_visibility)
 
+
+def _register_realign_index_command(sub: _SubParsers) -> None:
+    """Register the realign-index command."""
     p_realign = sub.add_parser(
         'realign-index',
         help='One-shot repair-only Zenoh scan for CLI-only hosts (opt-in catch-up; never shadows/deletes)',
@@ -3543,6 +3574,39 @@ def _build_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
         help='tombstones = cheap tombstone-only scan; full = observations + tombstones (default: full)',
     )
     p_realign.set_defaults(func=_cmd_realign_index)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog='kioku-mesh', description='kioku-mesh CLI')
+    parser.add_argument('--version', action='version', version=f'kioku-mesh {__version__}')
+    parser.add_argument(
+        '--rebuild',
+        action='store_true',
+        help=(
+            'Rebuild the SQLite index from zenoh on first startup. '
+            'CLI is one-shot and skips by default (#38); '
+            'pass this when the index is empty and you want search to work, or during CI verification. '
+            'KIOKU_MESH_FORCE_REBUILD=1 has the same effect.'
+        ),
+    )
+    sub = parser.add_subparsers(dest='command', required=True)
+
+    # Registration order is the order --help lists the subcommands, so these
+    # calls must stay in this sequence. tests/data/cli_help.txt pins it.
+    _register_observation_commands(sub)
+    _register_maintenance_commands(sub)
+    _register_get_memory_command(sub)
+    _register_init_command(sub)
+    _register_doctor_command(sub)
+    _register_mcp_commands(sub)
+    _register_messaging_commands(sub)
+    _register_mesh_commands(sub)
+    _register_tls_commands(sub)
+    _register_zenohd_commands(sub)
+    _register_config_commands(sub)
+    _register_scope_commands(sub)
+    _register_visibility_migration_command(sub)
+    _register_realign_index_command(sub)
 
     return parser
 
