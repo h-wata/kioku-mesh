@@ -640,8 +640,11 @@ _REALIGNMENT_STALE_SEC = 24 * 60 * 60
 _REALIGNMENT_HINT = (
     'Periodic repair only runs inside the long-lived MCP server '
     '(`kioku-mesh-mcp`) on the zenoh backend; a CLI-only host never realigns '
-    'on its own. To realign once from the CLI, run `kioku-mesh --rebuild status` '
-    '(note: unlike repair, a rebuild also shadows rows missing from the scan).'
+    'on its own. Run `kioku-mesh realign-index` to repair once from the CLI '
+    '(add a systemd user timer or cron entry for periodic catch-up — see '
+    '`kioku-mesh realign-index --help`). `kioku-mesh --rebuild status` also '
+    're-aligns once, but unlike repair, a rebuild also shadows rows missing '
+    'from the scan.'
 )
 
 
