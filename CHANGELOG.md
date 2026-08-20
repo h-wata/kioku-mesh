@@ -115,6 +115,12 @@ ADR-0030.
 
 ### Changed
 
+- `LocalIndex.search` (56 branches / 177 statements) を責務ごとのヘルパーへ分割し、
+  `# noqa: C901, PLR0912, PLR0915` を外して通常の lint 対象に戻した。WHERE 句の組み立て
+  (可視性 / 属性 / 期間の3段)、FTS5 と LIKE の項分割と ranking 決定、モード別 SQL 生成と
+  実行時 FTS 失敗時の LIKE 再構成、payload デコードを、それぞれ独立した private 関数に
+  切り出している。検索結果の順序・件数・cursor 値・エラー時挙動は変えていない (#334)
+
 - **破壊的変更**: 通常の observation / tombstone save は、publish の前に自 host の
   live storage を Zenoh admin space で毎回確認するようになった。次のいずれかで
   拒否される: zenohd / admin storage を確認できない、`storage_scopes` が不正または

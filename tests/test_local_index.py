@@ -3484,3 +3484,262 @@ def test_alignment_state_migration_preserves_existing_v4_db(tmp_path: Path) -> N
         assert idx.alignment_state().last_full_repair_completed_at
     finally:
         idx.close()
+
+
+# --- characterization tests for Issue #334 (added BEFORE splitting search) ---
+#
+# These pin down behaviour of `LocalIndex.search` that was previously
+# unexercised, so the helper extraction that follows is provably a pure
+# refactor. They cover two of the three split axes named in Issue #334:
+# multi-value project filter assembly, and the runtime FTS -> LIKE fallback.
+
+
+class _FtsFailingConn:
+    """Delegate to a real connection but fail queries that touch ``obs_fts``.
+
+    Simulates a SQLite build where the FTS5 MATCH query is rejected at
+    execution time (unsupported syntax / corrupt index), which is the only
+    way to reach ``search``'s runtime LIKE-fallback branch.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, *, fail_fallback: bool = False) -> None:
+        self._conn = conn
+        self._fail_fallback = fail_fallback
+        self.fts_attempts = 0
+        self.fallback_attempts = 0
+
+    def execute(self, sql: str, params: object = (), /) -> sqlite3.Cursor:
+        if 'obs_fts MATCH' in sql:
+            self.fts_attempts += 1
+            raise sqlite3.OperationalError('simulated fts5 syntax error')
+        if self._fail_fallback and sql.startswith('SELECT payload_json FROM obs_index'):
+            self.fallback_attempts += 1
+            raise sqlite3.OperationalError('simulated fallback failure')
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+
+def test_search_project_sequence_ors_values(tmp_path: Path) -> None:
+    """Issue #278: a sequence of project names is OR-ed, not treated as one literal."""
+    idx = LocalIndex.connect(str(tmp_path / 'proj_seq.db'))
+    try:
+        old = _mk_obs('history under the old label', project='old-name')
+        new = _mk_obs('history under the new label', project='new-name')
+        other = _mk_obs('unrelated project', project='third-name')
+        for obs in (old, new, other):
+            idx.upsert(obs)
+
+        hits = idx.search(project=['old-name', 'new-name'], limit=50)
+
+        assert {h.observation_id for h in hits} == {old.observation_id, new.observation_id}
+        # A tuple must behave identically to a list.
+        tuple_hits = idx.search(project=('old-name', 'new-name'), limit=50)
+        assert {h.observation_id for h in tuple_hits} == {old.observation_id, new.observation_id}
+        # A single string still narrows to exactly that project.
+        assert {h.observation_id for h in idx.search(project='old-name')} == {old.observation_id}
+    finally:
+        idx.close()
+
+
+def test_search_project_sequence_composes_with_other_filters(tmp_path: Path) -> None:
+    """The project IN (...) clause stays AND-ed with the remaining filters."""
+    idx = LocalIndex.connect(str(tmp_path / 'proj_seq_and.db'))
+    try:
+        wanted = Observation(
+            content='bug report in renamed project',
+            project='old-name',
+            memory_type='bug',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        wrong_type = Observation(
+            content='note in renamed project',
+            project='new-name',
+            memory_type='note',
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        for obs in (wanted, wrong_type):
+            idx.upsert(obs)
+
+        hits = idx.search(project=['old-name', 'new-name'], memory_type='bug')
+
+        assert {h.observation_id for h in hits} == {wanted.observation_id}
+    finally:
+        idx.close()
+
+
+def test_search_and_mode_falls_back_to_like_when_fts_query_fails(tmp_path: Path) -> None:
+    """A runtime FTS failure re-runs the AND query as LIKE instead of returning nothing."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'fts_fail_and.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('runtime FTS fallback is unreachable without FTS5 support')
+
+        both = _mk_obs('zenoh replication bugfix', project='fb')
+        only_one = _mk_obs('zenoh only here', project='fb')
+        for obs in (both, only_one):
+            idx.upsert(obs)
+
+        failing = _FtsFailingConn(idx._conn)  # noqa: SLF001
+        idx._conn = failing  # type: ignore[assignment]  # noqa: SLF001
+
+        hits = idx.search(query='zenoh replication', project='fb')
+
+        assert failing.fts_attempts == 1, 'the FTS query must be attempted first'
+        # AND semantics survive the fallback: the row missing 'replication' stays out.
+        assert {h.observation_id for h in hits} == {both.observation_id}
+    finally:
+        idx.close()
+
+
+def test_search_or_mode_falls_back_to_like_when_fts_query_fails(tmp_path: Path) -> None:
+    """The OR-mode fallback keeps OR semantics across every query term."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'fts_fail_or.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('runtime FTS fallback is unreachable without FTS5 support')
+
+        alpha = _mk_obs('alpha document', project='fb')
+        beta = _mk_obs('beta document', project='fb')
+        neither = _mk_obs('gamma document', project='fb')
+        for obs in (alpha, beta, neither):
+            idx.upsert(obs)
+
+        failing = _FtsFailingConn(idx._conn)  # noqa: SLF001
+        idx._conn = failing  # type: ignore[assignment]  # noqa: SLF001
+
+        hits = idx.search(query='alpha beta', project='fb', search_mode='or')
+
+        assert failing.fts_attempts == 1
+        assert {h.observation_id for h in hits} == {alpha.observation_id, beta.observation_id}
+    finally:
+        idx.close()
+
+
+def test_search_returns_empty_when_like_fallback_also_fails(tmp_path: Path) -> None:
+    """Both query attempts failing degrades to an empty result, never an exception."""
+    from kioku_mesh.local_index import _FTS_CAP_LIKE  # noqa: PLC0415
+
+    idx = LocalIndex.connect(str(tmp_path / 'fts_fail_both.db'))
+    try:
+        if idx._fts_cap == _FTS_CAP_LIKE:  # noqa: SLF001
+            pytest.skip('runtime FTS fallback is unreachable without FTS5 support')
+
+        idx.upsert(_mk_obs('zenoh replication bugfix', project='fb'))
+
+        failing = _FtsFailingConn(idx._conn, fail_fallback=True)  # noqa: SLF001
+        idx._conn = failing  # type: ignore[assignment]  # noqa: SLF001
+
+        assert idx.search(query='zenoh replication', project='fb') == []
+        assert failing.fts_attempts == 1
+        assert failing.fallback_attempts == 1
+    finally:
+        idx.close()
+
+
+def test_search_returns_empty_when_non_fts_query_fails(tmp_path: Path) -> None:
+    """A query-less search has no fallback path: a SQLite error yields []."""
+    idx = LocalIndex.connect(str(tmp_path / 'plain_fail.db'))
+    try:
+        idx.upsert(_mk_obs('browse me', project='fb'))
+
+        failing = _FtsFailingConn(idx._conn, fail_fallback=True)  # noqa: SLF001
+        idx._conn = failing  # type: ignore[assignment]  # noqa: SLF001
+
+        assert idx.search(project='fb') == []
+        assert failing.fts_attempts == 0, 'no query terms means no FTS attempt'
+    finally:
+        idx.close()
+
+
+def test_search_mode_and_or_keeps_and_hits_first_against_or_ranking(tmp_path: Path) -> None:
+    """AND hits lead even when the OR phase would rank an OR-only hit above them.
+
+    ADR-0027 makes ``importance`` the primary ranking key, so a high-importance
+    single-term row outranks a low-importance both-terms row *inside* the OR
+    phase. The 'and_or' contract still puts the AND hit first, which only holds
+    because the two phases are concatenated rather than re-sorted together.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'andor_rank.db'))
+    try:
+        both = Observation(
+            content='alpha beta present together',
+            project='andor-rank',
+            importance=1,
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        alpha_only = Observation(
+            content='alpha without the other word',
+            project='andor-rank',
+            importance=5,
+            agent_family='claude',
+            client_id='test',
+            pc_id='testpc',
+            session_id='testsession',
+            visibility='mesh',
+        )
+        for obs in (both, alpha_only):
+            idx.upsert(obs)
+
+        # The OR phase alone ranks the high-importance single-term row first ...
+        or_ids = [
+            r.observation_id
+            for r in idx.search(query='alpha beta', project='andor-rank', include_superseded=True, search_mode='or')
+        ]
+        assert or_ids.index(alpha_only.observation_id) < or_ids.index(both.observation_id)
+
+        # ... but 'and_or' must still surface the AND hit ahead of it.
+        ids = [
+            r.observation_id
+            for r in idx.search(
+                query='alpha beta', project='andor-rank', include_superseded=True, search_mode='and_or', limit=10
+            )
+        ]
+        assert ids.index(both.observation_id) < ids.index(alpha_only.observation_id)
+        assert ids == list(dict.fromkeys(ids)), 'no duplicate observation_ids across the two phases'
+    finally:
+        idx.close()
+
+
+def test_search_skips_malformed_payload_instead_of_crashing(tmp_path: Path) -> None:
+    """A corrupt payload_json row is dropped from results, not raised to the caller.
+
+    A single unreadable row must not take the whole search down: the sidecar
+    index is best-effort (see the module docstring), so decoding failures are
+    logged and skipped while the healthy rows still come back.
+    """
+    idx = LocalIndex.connect(str(tmp_path / 'malformed.db'))
+    try:
+        healthy = _mk_obs('healthy row survives', project='corrupt')
+        broken = _mk_obs('this row gets corrupted', project='corrupt')
+        for obs in (healthy, broken):
+            idx.upsert(obs)
+
+        idx._conn.execute(  # noqa: SLF001
+            'UPDATE obs_index SET payload_json = ? WHERE observation_id = ?',
+            ('{not valid json', broken.observation_id),
+        )
+        idx._conn.commit()  # noqa: SLF001
+
+        hits = idx.search(project='corrupt')
+
+        assert {h.observation_id for h in hits} == {healthy.observation_id}
+    finally:
+        idx.close()
