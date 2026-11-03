@@ -401,10 +401,15 @@ def _append_reference_prefix_filter(where: list[str], params: list[object], pref
     """Match rows holding a ``references`` entry that starts with ``prefix`` (Issue #336).
 
     ``substr`` instead of ``LIKE`` so ``%`` / ``_`` in the prefix match literally.
+    A corrupt ``payload_json`` row is treated as having no references, so it
+    cannot make ``json_each`` fail the whole query.
     """
     if not prefix:
         return
-    where.append("EXISTS (SELECT 1 FROM json_each(payload_json, '$.references') WHERE substr(value, 1, ?) = ?)")
+    where.append(
+        "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,"
+        " '$.references') WHERE substr(value, 1, ?) = ?)"
+    )
     params.extend([len(prefix), prefix])
 
 

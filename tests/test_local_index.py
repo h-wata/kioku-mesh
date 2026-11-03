@@ -3773,5 +3773,12 @@ def test_search_reference_prefix_filter(tmp_path: Path) -> None:
             t1.observation_id,
             t2.observation_id,
         }
+        # A corrupt payload row elsewhere in the index must not hide the matches
+        bad = _obs([])
+        idx.upsert(bad)
+        assert idx._conn is not None
+        idx._conn.execute("UPDATE obs_index SET payload_json = '{bad' WHERE observation_id = ?", (bad.observation_id,))
+        idx._conn.commit()
+        assert ids(reference_prefix='squad:task:pj/') == {t1.observation_id, t2.observation_id}
     finally:
         idx.close()
