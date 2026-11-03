@@ -122,6 +122,12 @@ an independent new entry — pass the prior observation_id(s) in
 ``save_observation``'s ``supersedes`` argument so the store records the
 replacement instead of accumulating duplicates.
 
+``references`` typed prefixes (ADR-0036): ``obs:<id>`` = derived from that
+memory (unlike ``supersedes``, the source stays live);
+``squad:task:<project>/<task_id>`` = the Squad task this came from;
+``squad:report:<report_id>`` = the report it rests on. Other strings stay
+free-form. List by prefix with ``recall_context(reference_prefix=...)``.
+
 Self-check after every task: "Did the user or I just make a decision, confirm a
 recommendation, fix a bug, learn something, or establish a convention? If yes →
 ``save_observation`` NOW." Skip transient notes, status checks, and routine
@@ -479,6 +485,7 @@ def save_observation(
         memory_type=memory_type,
         subject=subject,
         source_files=source_files,
+        references=references,
     )
     obs = Observation(
         content=content,
@@ -914,6 +921,7 @@ def recall_context(
     since_iso: str = '',
     limit: int = 20,
     search_mode: str = 'and_or',
+    reference_prefix: str = '',
 ) -> str:
     """Recall current context with additive filters for memory_types, source_files, and references.
 
@@ -927,6 +935,9 @@ def recall_context(
         memory_types: optional list of memory_type values (must be in VALID_MEMORY_TYPES).
         source_files: optional exact-match source_files filter.
         references: optional exact-match references filter.
+        reference_prefix: optional prefix match on references, e.g.
+            ``squad:task:<project>/`` lists every memory saved under that
+            project's Squad tasks (typed prefixes: ADR-0036).
         since_iso: optional lower created_at bound (ISO 8601).
         limit: maximum results (clamped to 1..100).
         search_mode: 'and' | 'or' | 'and_or' (default and_or).
@@ -974,6 +985,7 @@ def recall_context(
         memory_types=memory_types_norm,
         source_files=source_files_norm,
         references=references_norm,
+        reference_prefix=reference_prefix,
     )
     hits = []
     for obs in hits_obs:
@@ -991,6 +1003,8 @@ def recall_context(
         filter_parts.append(f'source_files={source_files_norm}')
     if references_norm:
         filter_parts.append(f'references={references_norm}')
+    if reference_prefix:
+        filter_parts.append(f'reference_prefix={reference_prefix!r}')
     if since_iso:
         filter_parts.append(f'since={since_iso!r}')
     if query:

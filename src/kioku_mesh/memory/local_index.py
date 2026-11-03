@@ -397,6 +397,22 @@ def _append_json_array_filter(
     params.extend(clean)
 
 
+def _append_reference_prefix_filter(where: list[str], params: list[object], prefix: str) -> None:
+    """Match rows holding a ``references`` entry that starts with ``prefix`` (Issue #336).
+
+    ``substr`` instead of ``LIKE`` so ``%`` / ``_`` in the prefix match literally.
+    A corrupt ``payload_json`` row is treated as having no references, so it
+    cannot make ``json_each`` fail the whole query.
+    """
+    if not prefix:
+        return
+    where.append(
+        "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,"
+        " '$.references') WHERE substr(value, 1, ?) = ?)"
+    )
+    params.extend([len(prefix), prefix])
+
+
 def _append_attribute_filters(
     where: list[str],
     params: list[object],
@@ -410,6 +426,7 @@ def _append_attribute_filters(
     memory_types: list[str] | None,
     source_files: list[str] | None,
     references: list[str] | None,
+    reference_prefix: str,
 ) -> None:
     """Add the project / identity / memory_type / plural-list equality clauses."""
     # Issue #278: ``project`` may carry several literal values that belong
@@ -447,6 +464,7 @@ def _append_attribute_filters(
             params.extend(clean_types)
     _append_json_array_filter(where, params, json_path='$.source_files', values=source_files)
     _append_json_array_filter(where, params, json_path='$.references', values=references)
+    _append_reference_prefix_filter(where, params, reference_prefix)
 
 
 def _append_time_filters(
@@ -487,6 +505,7 @@ def _build_search_filters(
     memory_types: list[str] | None,
     source_files: list[str] | None,
     references: list[str] | None,
+    reference_prefix: str,
     since_iso: str,
     until_iso: str,
     cursor_observation_id: str,
@@ -520,6 +539,7 @@ def _build_search_filters(
         memory_types=memory_types,
         source_files=source_files,
         references=references,
+        reference_prefix=reference_prefix,
     )
     _append_time_filters(
         where,
@@ -1113,6 +1133,7 @@ class LocalIndex:
         references: list[str] | None = None,
         include_expired: bool = False,
         now_iso: str = '',
+        reference_prefix: str = '',
     ) -> list[Observation]:
         """SQL-side search returning Observations ordered by created_at DESC.
 
@@ -1141,6 +1162,9 @@ class LocalIndex:
         ``include_superseded=False`` (default) hides rows whose superseder is
         still live in the index (existence-based, ADR-0021). Set to ``True``
         to include superseded rows.
+
+        ``reference_prefix`` keeps rows with a ``references`` entry starting
+        with it (Issue #336). It composes with the exact ``references`` filter.
 
         ``include_expired=False`` (default) hides rows whose ``expires_at``
         has passed (Issue #272). Rows without a lifetime are never affected.
@@ -1186,6 +1210,7 @@ class LocalIndex:
                     'memory_types': memory_types,
                     'source_files': source_files,
                     'references': references,
+                    'reference_prefix': reference_prefix,
                     'include_expired': include_expired,
                     'now_iso': now_iso,
                 },
@@ -1205,6 +1230,7 @@ class LocalIndex:
             memory_types=memory_types,
             source_files=source_files,
             references=references,
+            reference_prefix=reference_prefix,
             since_iso=since_iso,
             until_iso=until_iso,
             cursor_observation_id=cursor_observation_id,
