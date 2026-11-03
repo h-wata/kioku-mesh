@@ -3743,3 +3743,35 @@ def test_search_skips_malformed_payload_instead_of_crashing(tmp_path: Path) -> N
         assert {h.observation_id for h in hits} == {healthy.observation_id}
     finally:
         idx.close()
+
+
+def test_search_reference_prefix_filter(tmp_path: Path) -> None:
+    """Issue #336: prefix match on references; ``%`` / ``_`` are literal, composes with exact."""
+    idx = LocalIndex.connect(str(tmp_path / 'ref_prefix.db'))
+    try:
+
+        def _obs(refs: list[str]) -> Observation:
+            return Observation(
+                content='x', project='p', references=refs, agent_family='c', client_id='c', pc_id='p', session_id='s'
+            )
+
+        t1 = _obs(['squad:task:pj/T1', '#9'])
+        t2 = _obs(['squad:task:pj/T2'])
+        other = _obs(['squad:task:pj2/T1'])
+        wild = _obs(['squad:task:p_%/T1'])
+        for o in (t1, t2, other, wild):
+            idx.upsert(o)
+
+        def ids(**kw: object) -> set[str]:
+            return {h.observation_id for h in idx.search(**kw)}  # type: ignore[arg-type]
+
+        assert ids(reference_prefix='squad:task:pj/') == {t1.observation_id, t2.observation_id}
+        assert ids(reference_prefix='squad:task:p_%/') == {wild.observation_id}
+        assert ids(reference_prefix='squad:task:pj/', references=['#9']) == {t1.observation_id}
+        assert ids(reference_prefix='squad:report:') == set()
+        assert ids(reference_prefix='squad:task:pj/', search_mode='and_or', query='x') == {
+            t1.observation_id,
+            t2.observation_id,
+        }
+    finally:
+        idx.close()

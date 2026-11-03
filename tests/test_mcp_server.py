@@ -2798,3 +2798,42 @@ def test_save_swallows_supersede_renderer_error_and_logs(monkeypatch: pytest.Mon
     assert data['status'] == 'saved'
     assert 'supersede_candidates' not in data
     assert any('supersede suggestion failed' in m for m in debug_calls)
+
+
+def test_recall_context_reference_prefix_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #336: reference_prefix lists every memory under a Squad project's tasks."""
+    backend = _mk_local_backend(monkeypatch)
+    obs1 = _mk_obs_full('task T1', project='prefix-test', references=['squad:task:pj/T1'])
+    obs2 = _mk_obs_full('task T2', project='prefix-test', references=['squad:task:pj/T2'])
+    obs3 = _mk_obs_full('other pj', project='prefix-test', references=['squad:task:pj2/T1'])
+    for o in (obs1, obs2, obs3):
+        backend.put_observation(o)
+
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool(
+                'recall_context',
+                {'project': 'prefix-test', 'reference_prefix': 'squad:task:pj/'},
+            )
+            return result.data
+
+    text = _run(_go())
+    assert obs1.observation_id in text
+    assert obs2.observation_id in text
+    assert obs3.observation_id not in text
+    assert "reference_prefix='squad:task:pj/'" in text
+
+
+def test_save_lint_malformed_typed_reference() -> None:
+    """ADR-0036: broken values after a known prefix warn; free-form strings never do."""
+    from kioku_mesh.memory.save_lint import lint_observation  # noqa: PLC0415
+
+    def codes(refs: list[str]) -> list[str]:
+        return [w.code for w in lint_observation('content', 'note', 'subj', references=refs)]
+
+    ok = ['obs:' + '0' * 32, 'squad:task:pj/T-1', 'squad:report:abc', '#12', 'PR #3', 'msg_id:x']
+    assert codes(ok) == []
+    bad = ['obs:123', 'squad:task:T-1', 'squad:task:pj/', 'squad:report:']
+    assert codes(bad) == ['MALFORMED_REFERENCE'] * 4

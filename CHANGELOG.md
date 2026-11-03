@@ -29,6 +29,11 @@ ADR-0030.
 
 ### Added
 
+- `references` に型付きプレフィックスの規約 (`obs:<id>` / `squad:task:<project>/<task_id>` /
+  `squad:report:<report_id>`) を定め、`recall_context(reference_prefix=...)` で前方一致の逆引きが
+  できるようにした。`%` / `_` は文字どおりに一致する。既知のプレフィックスで形式が崩れている値は
+  `save_observation` が `MALFORMED_REFERENCE` を警告する (保存は拒否しない)。payload 形式は
+  変わらない。判断の根拠は ADR-0036 (#336)
 - ruff: PLR0912/PLR0915 (分岐過多・文過多) を有効化 (max-branches=20, max-statements=80。
   cross-review 指摘 B1 を受け、当初案の 25/120 では新規 100 statements 級の関数が素通り
   するため強化した)。既存違反は `# noqa: PLR0912` / `# noqa: PLR0915` を関数単位で個別付与

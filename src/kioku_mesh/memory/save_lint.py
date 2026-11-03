@@ -78,6 +78,15 @@ _TOOL_CALL_FRAGMENT_PATTERNS: list[re.Pattern[str]] = [
 # store). Matching it would have cost 2 false positives and caught nothing new.
 
 
+# Typed ``references`` prefixes (ADR-0036). Only the shape after a known prefix
+# is checked; strings without one stay free-form and are never flagged.
+_TYPED_REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
+    'obs:': re.compile(r'obs:[0-9a-f]{32}'),
+    'squad:task:': re.compile(r'squad:task:[^/\s]+/[^/\s]+'),
+    'squad:report:': re.compile(r'squad:report:\S+'),
+}
+
+
 def find_tool_call_fragment(text: str) -> str | None:
     """Return the MCP tool-call fragment leaked into ``text``, or None."""
     for pattern in _TOOL_CALL_FRAGMENT_PATTERNS:
@@ -92,6 +101,7 @@ def lint_observation(
     memory_type: str,
     subject: str,
     source_files: list[str] | None = None,
+    references: list[str] | None = None,
 ) -> list[LintWarning]:
     """Check content/memory_type/subject and return quality warnings.
 
@@ -128,7 +138,18 @@ def lint_observation(
             )
             break
 
-    # 4. kiokuignore — TODO: implement in a future issue (Phase5 scope omitted)
+    # 4. malformed_reference: a known typed prefix with a broken value (ADR-0036)
+    for ref in references or []:
+        for prefix, pattern_re in _TYPED_REFERENCE_PATTERNS.items():
+            if ref.startswith(prefix) and not pattern_re.fullmatch(ref):
+                warnings.append(
+                    LintWarning(
+                        code='MALFORMED_REFERENCE',
+                        message=f'reference {ref!r} does not match the {prefix} format (see ADR-0036).',
+                    )
+                )
+
+    # 5. kiokuignore — TODO: implement in a future issue (Phase5 scope omitted)
     # if source_files: check .kiokuignore path rules against source_files
 
     return warnings
