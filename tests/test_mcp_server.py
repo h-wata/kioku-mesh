@@ -69,6 +69,19 @@ def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _instructions(client: Client) -> str | None:
+    """Server instructions under either protocol era.
+
+    fastmcp 4 negotiates the modern era, which has no InitializeResult and
+    exposes ``client.instructions`` instead; older versions only have the
+    InitializeResult.
+    """
+    if instructions := getattr(client, 'instructions', None):
+        return instructions
+    init_result = client.initialize_result
+    return init_result.instructions if init_result else None
+
+
 def test_list_tools_registers_all_tools(single_zenohd: Any) -> None:  # noqa: ARG001
     async def _go() -> list[str]:
         async with Client(mcp) as client:
@@ -95,10 +108,7 @@ def test_server_advertises_proactive_instructions(single_zenohd: Any) -> None:  
 
     async def _go() -> str | None:
         async with Client(mcp) as client:
-            init_result = client.initialize_result
-            if init_result is None:
-                return None
-            return init_result.instructions
+            return _instructions(client)
 
     instructions = _run(_go())
     assert instructions, 'FastMCP must expose initialize().instructions'
@@ -2642,8 +2652,7 @@ def test_instructions_document_cross_pc_origin(single_zenohd: Any) -> None:  # n
 
     async def _go() -> str | None:
         async with Client(mcp) as client:
-            init_result = client.initialize_result
-            return init_result.instructions if init_result else None
+            return _instructions(client)
 
     instructions = _run(_go())
     assert instructions
