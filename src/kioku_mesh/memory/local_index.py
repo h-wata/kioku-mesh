@@ -339,6 +339,12 @@ def _plan_query(query: str, *, cursor_observation_id: str, fts_cap: str) -> _Que
     )
 
 
+# Filters that read payload_json go through this so a corrupt row matches
+# nothing instead of raising "malformed JSON" and emptying the whole query
+# (Issue #339). Unfiltered searches already skip such rows at decode time.
+_SAFE_PAYLOAD_SQL = "CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END"
+
+
 def _append_visibility_filters(
     where: list[str],
     params: list[object],
@@ -393,7 +399,9 @@ def _append_json_array_filter(
     if not clean:
         return
     placeholders = ','.join('?' for _ in clean)
-    where.append(f"EXISTS (SELECT 1 FROM json_each(payload_json, '{json_path}') WHERE value IN ({placeholders}))")
+    where.append(
+        f"EXISTS (SELECT 1 FROM json_each({_SAFE_PAYLOAD_SQL}, '{json_path}') WHERE value IN ({placeholders}))"
+    )
     params.extend(clean)
 
 
@@ -401,14 +409,11 @@ def _append_reference_prefix_filter(where: list[str], params: list[object], pref
     """Match rows holding a ``references`` entry that starts with ``prefix`` (Issue #336).
 
     ``substr`` instead of ``LIKE`` so ``%`` / ``_`` in the prefix match literally.
-    A corrupt ``payload_json`` row is treated as having no references, so it
-    cannot make ``json_each`` fail the whole query.
     """
     if not prefix:
         return
     where.append(
-        "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,"
-        " '$.references') WHERE substr(value, 1, ?) = ?)"
+        f"EXISTS (SELECT 1 FROM json_each({_SAFE_PAYLOAD_SQL}, '$.references') WHERE substr(value, 1, ?) = ?)"
     )
     params.extend([len(prefix), prefix])
 
@@ -447,7 +452,7 @@ def _append_attribute_filters(
         ('session_id', session_id),
     ):
         if value:
-            where.append(f"json_extract(payload_json, '$.{field}') = ?")
+            where.append(f"json_extract({_SAFE_PAYLOAD_SQL}, '$.{field}') = ?")
             params.append(value)
     if memory_type:
         # ADR-0026: exact memory_type filter. ``memory_type`` is a real
