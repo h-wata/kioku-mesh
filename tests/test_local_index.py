@@ -3780,5 +3780,16 @@ def test_search_reference_prefix_filter(tmp_path: Path) -> None:
         idx._conn.execute("UPDATE obs_index SET payload_json = '{bad' WHERE observation_id = ?", (bad.observation_id,))
         idx._conn.commit()
         assert ids(reference_prefix='squad:task:pj/') == {t1.observation_id, t2.observation_id}
+        # Issue #339: the exact references / source_files filters and the
+        # identity filters read payload_json too, and must survive it as well
+        assert ids(references=['#9']) == {t1.observation_id}
+        assert ids(source_files=['nope.py']) == set()
+        assert ids(agent_family='c') == {
+            t1.observation_id,
+            t2.observation_id,
+            other.observation_id,
+            wild.observation_id,
+        }
+        assert ids(session_id='s', references=['squad:task:pj2/T1']) == {other.observation_id}
     finally:
         idx.close()

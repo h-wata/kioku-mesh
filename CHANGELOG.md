@@ -165,6 +165,10 @@ ADR-0030.
 
 ### Fixed
 
+- local index に `payload_json` が壊れた行が 1 つでもあると、`references` / `source_files` の
+  完全一致 filter と identity filter (`agent_family` / `client_id` / `pc_id` / `session_id`) を
+  付けた検索が `malformed JSON` で失敗して 0 件になっていた。壊れた行は filter に一致しない行として
+  扱い、正常な行は返す (#339)
 - `_build_parser` を分割した commit (`18bd309`) 自体には `drain` サブコマンドの
   `set_defaults(func=_cmd_drain)` は存在していたが、その後の未コミット作業ツリー上で
   誤って削除され、`kioku-mesh drain` 実行時に AttributeError で落ちる状態になって
