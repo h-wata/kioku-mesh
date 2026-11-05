@@ -913,7 +913,7 @@ def _format_recall_entries(hits: list) -> list[str]:
     return entries
 
 
-def _dropped_line(budget: int, hidden: dict[str, int]) -> str:
+def _dropped_line(budget: int, hidden: dict[str, str]) -> str:
     return f'\ndropped: budget={budget}, superseded={hidden["superseded"]}, expired={hidden["expired"]}'
 
 
@@ -922,7 +922,7 @@ def _format_recall_markdown(
     total: int,
     filters_summary: str,
     max_bytes: int | None = None,
-    hidden: dict[str, int] | None = None,
+    hidden: dict[str, str] | None = None,
 ) -> str:
     """Render recall hits under ``max_bytes``; with ``hidden`` (explain), append the dropped breakdown."""
     if max_bytes is None:
@@ -952,22 +952,25 @@ def _recall_why(obs: Observation, query_terms: list[str], rank: int, total: int)
     return f'why: matched=[{", ".join(matched)}]; importance={obs.importance}; rank={rank}/{total}'
 
 
-def _recall_hidden_counts(idx: object, **search_kwargs: object) -> dict[str, int]:
+def _recall_hidden_counts(idx: object, **search_kwargs: object) -> dict[str, str]:
     """Count rows the default filters hid, by re-running the search with each hidden state let back in.
 
     ponytail: counts are bounded by the 100-row search limit; page through if a
     query ever has more than 100 hidden rows.
     """
+    cap = _clamp_recall_limit(100)
 
     def ids(**flags: bool) -> set[str]:
-        rows = idx.search(limit=_clamp_recall_limit(100), include_deleted=False, **search_kwargs, **flags)
+        rows = idx.search(limit=cap, include_deleted=False, **search_kwargs, **flags)
         return {row.observation_id for row in rows}
 
+    def count(**flags: bool) -> str:
+        rows = ids(**flags)
+        # Hitting the cap means there may be more hidden rows than we could see.
+        return f'{len(rows - visible)}{"+" if len(rows) >= cap else ""}'
+
     visible = ids()
-    return {
-        'superseded': len(ids(include_superseded=True) - visible),
-        'expired': len(ids(include_expired=True) - visible),
-    }
+    return {'superseded': count(include_superseded=True), 'expired': count(include_expired=True)}
 
 
 def _recall_hits(idx: object, hits_obs: list[Observation], why_terms: list[str] | None) -> list[dict]:
@@ -980,6 +983,11 @@ def _recall_hits(idx: object, hits_obs: list[Observation], why_terms: list[str] 
             item['why'] = _recall_why(obs, why_terms, rank, len(hits_obs))
         hits.append(item)
     return hits
+
+
+# Below this the explain tail (``dropped: ...``) and an entry header no longer fit,
+# so the byte cap would cut them; reject such budgets instead (Issue #337 review P1).
+RECALL_MIN_TOKEN_BUDGET = 200
 
 
 def _recall_budget_bytes(token_budget: int) -> int:
@@ -1021,13 +1029,14 @@ def recall_context(
         since_iso: optional lower created_at bound (ISO 8601).
         limit: maximum results (clamped to 1..100).
         search_mode: 'and' | 'or' | 'and_or' (default and_or).
-        token_budget: optional output budget in tokens (0 = default byte cap). The
-            output is capped at ``token_budget * 3`` UTF-8 bytes (tokens ≈ bytes × 4/3),
-            never above ``RECALL_OUTPUT_MAX_BYTES``.
+        token_budget: optional output budget in tokens (0 = default byte cap; otherwise
+            >= 200). The output is capped at ``token_budget * 3`` UTF-8 bytes (tokens ≈
+            bytes × 4/3), never above ``RECALL_OUTPUT_MAX_BYTES``.
         explain: when True, each entry gets a ``why: matched=[...]; importance=N;
             rank=K/M`` line and the output ends with ``dropped: budget=X,
             superseded=Y, expired=Z`` (observations left out for the byte budget,
-            and hidden because superseded / expired).
+            and hidden because superseded / expired; ``N+`` means at least N, as
+            hidden rows are only counted up to 100).
 
     The returned text is capped at ``RECALL_OUTPUT_MAX_BYTES`` (Issue #356/A1);
     if the cap is hit, whole observations are dropped from the tail, except
@@ -1046,6 +1055,8 @@ def recall_context(
     """
     if search_mode not in ('and', 'or', 'and_or'):
         return f"search_mode must be one of 'and', 'or', 'and_or'. got: {search_mode!r}"
+    if token_budget != 0 and token_budget < RECALL_MIN_TOKEN_BUDGET:
+        return f'token_budget must be 0 (default cap) or >= {RECALL_MIN_TOKEN_BUDGET}. got: {token_budget}'
     if memory_types is not None:
         invalid = [t for t in memory_types if t and t not in VALID_MEMORY_TYPES]
         if invalid:

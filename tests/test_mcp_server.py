@@ -2895,6 +2895,25 @@ def test_recall_context_token_budget_smaller_than_first_entry(monkeypatch: pytes
     assert 0 < len(text.encode('utf-8')) <= 600
 
 
+@pytest.mark.parametrize('budget', [-1, 1, 199])
+def test_recall_context_rejects_too_small_token_budget(monkeypatch: pytest.MonkeyPatch, budget: int) -> None:
+    _mk_local_backend(monkeypatch)
+    assert _recall({'token_budget': budget}).startswith('token_budget must be 0')
+
+
+@pytest.mark.parametrize('rows', [0, 1])
+def test_recall_context_explain_at_min_budget_keeps_dropped_line(monkeypatch: pytest.MonkeyPatch, rows: int) -> None:
+    """At the minimum budget the dropped line is complete and the byte cap still holds."""
+    backend = _mk_local_backend(monkeypatch)
+    for _ in range(rows):
+        backend.put_observation(_mk_obs_full('fig ' + 'f' * 2_000, project='rc337-min'))
+    text = _recall({'project': 'rc337-min', 'query': 'fig', 'explain': True, 'token_budget': 200})
+    assert len(text.encode('utf-8')) <= 600
+    assert text.endswith('dropped: budget=0, superseded=0, expired=0')
+    if rows:
+        assert '\nwhy: matched=[fig]; importance=3; rank=1/1' in text
+
+
 def test_recall_context_token_budget_never_exceeds_default_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = _mk_local_backend(monkeypatch)
     monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
