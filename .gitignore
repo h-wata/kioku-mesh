@@ -9,6 +9,8 @@ dist/
 
 # venv
 .venv/
+# uv lockfile (not tracked; uv run regenerates it locally)
+uv.lock
 venv/
 env/
 
