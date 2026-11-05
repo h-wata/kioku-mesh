@@ -2864,7 +2864,9 @@ def test_recall_context_defaults_unchanged_by_new_args(monkeypatch: pytest.Monke
     backend = _mk_local_backend(monkeypatch)
     backend.put_observation(_mk_obs_full('alpha budget note', project='rc337-default'))
     plain = _recall({'project': 'rc337-default', 'query': 'alpha'})
-    explicit = _recall({'project': 'rc337-default', 'query': 'alpha', 'token_budget': 0, 'explain': False})
+    explicit = _recall(
+        {'project': 'rc337-default', 'query': 'alpha', 'token_budget': 0, 'explain': False, 'summary_only': False}
+    )
     assert plain == explicit
     assert 'why:' not in plain
     assert 'dropped:' not in plain
