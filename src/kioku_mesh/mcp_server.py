@@ -607,7 +607,15 @@ def _fit_entries(entries: list[str], budget: int) -> tuple[list[str], bool]:
 
 
 def _cap_search_output(entries: list[str], max_bytes: int, prefix: str = '') -> str:
+    """Join formatted ``search_memory`` entries, capping total UTF-8 byte size (see ``_cap_entries``)."""
+    return _cap_entries(entries, max_bytes, prefix)[0]
+
+
+def _cap_entries(entries: list[str], max_bytes: int, prefix: str = '') -> tuple[str, int]:
     """Join formatted ``search_memory`` entries, capping total UTF-8 byte size.
+
+    Returns the text and how many entries it shows (``recall_context(explain=True)``
+    reports the rest as dropped for budget, Issue #337).
 
     The returned string — prefix, entries, separators *and* the truncation
     notice — always satisfies ``len(result.encode('utf-8')) <= max_bytes``.
@@ -642,7 +650,7 @@ def _cap_search_output(entries: list[str], max_bytes: int, prefix: str = '') -> 
         body += _truncation_notice(len(included), total, max_bytes)
     # Degenerate caps (smaller than the notice itself) cannot fit everything;
     # the byte contract still holds, at the cost of the notice's tail.
-    return _cut_utf8(body, max_bytes)
+    return _cut_utf8(body, max_bytes), len(included)
 
 
 @mcp.tool()
@@ -884,6 +892,8 @@ def _format_recall_entries(hits: list) -> list[str]:
                 lines.append('')
             lines.append(f'id: {obs.observation_id}')
             lines.append(f'state: {state}')
+            if item.get('why'):
+                lines.append(item['why'])
             lines.append(f'importance: {obs.importance}')
             lines.append(f'created_at: {obs.created_at}')
             lines.append(f'origin: {obs.client_id or "-"} ({_origin_note(obs)})')
@@ -903,12 +913,80 @@ def _format_recall_entries(hits: list) -> list[str]:
     return entries
 
 
-def _format_recall_markdown(hits: list, total: int, filters_summary: str) -> str:
+def _dropped_line(budget: int, hidden: dict[str, int]) -> str:
+    return f'\ndropped: budget={budget}, superseded={hidden["superseded"]}, expired={hidden["expired"]}'
+
+
+def _format_recall_markdown(
+    hits: list,
+    total: int,
+    filters_summary: str,
+    max_bytes: int | None = None,
+    hidden: dict[str, int] | None = None,
+) -> str:
+    """Render recall hits under ``max_bytes``; with ``hidden`` (explain), append the dropped breakdown."""
+    if max_bytes is None:
+        max_bytes = RECALL_OUTPUT_MAX_BYTES
     if not hits:
-        return 'No matching current context.'
+        text = 'No matching current context.'
+        return text if hidden is None else _cut_utf8(text + _dropped_line(0, hidden), max_bytes)
     prefix = f'recall_context: {total} result(s)\n{filters_summary}'
     entries = _format_recall_entries(hits)
-    return _cap_search_output(entries, RECALL_OUTPUT_MAX_BYTES, prefix=prefix)
+    if hidden is None:
+        return _cap_search_output(entries, max_bytes, prefix=prefix)
+    # The dropped line is part of the returned text, so reserve its longest form
+    # (budget=total) before spending the entry budget, like the truncation notice.
+    reserve = len(_dropped_line(total, hidden).encode('utf-8'))
+    text, shown = _cap_entries(entries, max(max_bytes - reserve, 0), prefix=prefix)
+    return _cut_utf8(text + _dropped_line(total - shown, hidden), max_bytes)
+
+
+def _recall_why(obs: Observation, query_terms: list[str], rank: int, total: int) -> str:
+    """One-line reason an observation was recalled (Issue #337 ``explain``).
+
+    ``matched`` lists the query terms found (case-insensitively) in the fields the
+    search covers; it does not reproduce FTS tokenization exactly.
+    """
+    haystack = ' '.join([obs.subject, obs.summary, obs.content, *obs.tags, *obs.references, *obs.source_files]).lower()
+    matched = [term for term in query_terms if term.lower() in haystack]
+    return f'why: matched=[{", ".join(matched)}]; importance={obs.importance}; rank={rank}/{total}'
+
+
+def _recall_hidden_counts(idx: object, **search_kwargs: object) -> dict[str, int]:
+    """Count rows the default filters hid, by re-running the search with each hidden state let back in.
+
+    ponytail: counts are bounded by the 100-row search limit; page through if a
+    query ever has more than 100 hidden rows.
+    """
+
+    def ids(**flags: bool) -> set[str]:
+        rows = idx.search(limit=_clamp_recall_limit(100), include_deleted=False, **search_kwargs, **flags)
+        return {row.observation_id for row in rows}
+
+    visible = ids()
+    return {
+        'superseded': len(ids(include_superseded=True) - visible),
+        'expired': len(ids(include_expired=True) - visible),
+    }
+
+
+def _recall_hits(idx: object, hits_obs: list[Observation], why_terms: list[str] | None) -> list[dict]:
+    """Attach each hit's index state, and with ``why_terms`` (explain) its ``why`` line."""
+    hits = []
+    for rank, obs in enumerate(hits_obs, start=1):
+        state_info = idx.inspect_by_id(obs.observation_id)
+        item = {'obs': obs, 'state': state_info['state'] if state_info else 'live'}
+        if why_terms is not None:
+            item['why'] = _recall_why(obs, why_terms, rank, len(hits_obs))
+        hits.append(item)
+    return hits
+
+
+def _recall_budget_bytes(token_budget: int) -> int:
+    """``token_budget`` → byte cap: tokens ≈ UTF-8 bytes × 4/3, never above the default cap (Issue #337)."""
+    if token_budget <= 0:
+        return RECALL_OUTPUT_MAX_BYTES
+    return min(token_budget * 3, RECALL_OUTPUT_MAX_BYTES)
 
 
 @mcp.tool()
@@ -922,6 +1000,8 @@ def recall_context(
     limit: int = 20,
     search_mode: str = 'and_or',
     reference_prefix: str = '',
+    token_budget: int = 0,
+    explain: bool = False,
 ) -> str:
     """Recall current context with additive filters for memory_types, source_files, and references.
 
@@ -941,6 +1021,13 @@ def recall_context(
         since_iso: optional lower created_at bound (ISO 8601).
         limit: maximum results (clamped to 1..100).
         search_mode: 'and' | 'or' | 'and_or' (default and_or).
+        token_budget: optional output budget in tokens (0 = default byte cap). The
+            output is capped at ``token_budget * 3`` UTF-8 bytes (tokens ≈ bytes × 4/3),
+            never above ``RECALL_OUTPUT_MAX_BYTES``.
+        explain: when True, each entry gets a ``why: matched=[...]; importance=N;
+            rank=K/M`` line and the output ends with ``dropped: budget=X,
+            superseded=Y, expired=Z`` (observations left out for the byte budget,
+            and hidden because superseded / expired).
 
     The returned text is capped at ``RECALL_OUTPUT_MAX_BYTES`` (Issue #356/A1);
     if the cap is hit, whole observations are dropped from the tail, except
@@ -987,11 +1074,20 @@ def recall_context(
         references=references_norm,
         reference_prefix=reference_prefix,
     )
-    hits = []
-    for obs in hits_obs:
-        state_info = idx.inspect_by_id(obs.observation_id)
-        state = state_info['state'] if state_info else 'live'
-        hits.append({'obs': obs, 'state': state})
+    hits = _recall_hits(idx, hits_obs, query.split() if explain else None)
+    hidden = None
+    if explain:
+        hidden = _recall_hidden_counts(
+            idx,
+            query=query,
+            project=project_filter,
+            since_iso=since_iso,
+            search_mode=search_mode,
+            memory_types=memory_types_norm,
+            source_files=source_files_norm,
+            references=references_norm,
+            reference_prefix=reference_prefix,
+        )
     filter_parts = []
     if project:
         also_matched = [value for value in project_filter if value != project]
@@ -1009,8 +1105,10 @@ def recall_context(
         filter_parts.append(f'since={since_iso!r}')
     if query:
         filter_parts.append(f'query={query!r}')
+    if token_budget > 0:
+        filter_parts.append(f'token_budget={token_budget}')
     filters_summary = 'filters: ' + (', '.join(filter_parts) if filter_parts else 'none')
-    return _format_recall_markdown(hits, len(hits), filters_summary)
+    return _format_recall_markdown(hits, len(hits), filters_summary, _recall_budget_bytes(token_budget), hidden)
 
 
 @mcp.tool()

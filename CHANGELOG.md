@@ -29,6 +29,11 @@ ADR-0030.
 
 ### Added
 
+- `recall_context` に `token_budget` と `explain` を足した。`token_budget` を指定すると出力を
+  `token_budget × 3` バイト (既定の 20,000 バイトが上限) に収める。`explain=True` で各件に
+  `why: matched=[...]; importance=N; rank=K/M` を付け、末尾に `dropped: budget / superseded /
+  expired` の件数を出す。どちらも省略すれば出力は変わらない。使い方と比べ方は
+  `docs/recall-context.md` (#337)
 - `references` に型付きプレフィックスの規約 (`obs:<id>` / `squad:task:<project>/<task_id>` /
   `squad:report:<report_id>`) を定め、`recall_context(reference_prefix=...)` で前方一致の逆引きが
   できるようにした。`%` / `_` は文字どおりに一致する。既知のプレフィックスで形式が崩れている値は
