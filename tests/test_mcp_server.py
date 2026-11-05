@@ -2846,3 +2846,142 @@ def test_save_lint_malformed_typed_reference() -> None:
     assert codes(ok) == []
     bad = ['obs:123', 'squad:task:T-1', 'squad:task:pj/', 'squad:report:']
     assert codes(bad) == ['MALFORMED_REFERENCE'] * 4
+
+
+# Issue #337: token_budget / explain
+def _recall(args: dict) -> str:
+    async def _go() -> str:
+        async with Client(mcp) as client:
+            result = await client.call_tool('recall_context', args)
+            assert not result.is_error
+            return result.data
+
+    return _run(_go())
+
+
+def test_recall_context_defaults_unchanged_by_new_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Omitting token_budget / explain gives the same bytes as passing their defaults, with no new lines."""
+    backend = _mk_local_backend(monkeypatch)
+    backend.put_observation(_mk_obs_full('alpha budget note', project='rc337-default'))
+    plain = _recall({'project': 'rc337-default', 'query': 'alpha'})
+    explicit = _recall(
+        {'project': 'rc337-default', 'query': 'alpha', 'token_budget': 0, 'explain': False, 'summary_only': False}
+    )
+    assert plain == explicit
+    assert 'why:' not in plain
+    assert 'dropped:' not in plain
+    assert 'token_budget' not in plain
+    assert 'omitted' not in plain
+
+
+@pytest.mark.parametrize('extra', [0, 1])
+def test_recall_context_token_budget_caps_bytes(monkeypatch: pytest.MonkeyPatch, extra: int) -> None:
+    """token_budget × 3 is a hard byte cap, at the exact boundary and one byte past it."""
+    backend = _mk_local_backend(monkeypatch)
+    for i in range(6):
+        backend.put_observation(_mk_obs_full(f'budget row {i} ' + 'y' * 300, project='rc337-budget'))
+    full = _recall({'project': 'rc337-budget', 'token_budget': 100_000})
+    size = len(full.encode('utf-8'))
+    assert size <= mcp_server_module.RECALL_OUTPUT_MAX_BYTES
+    # Pick a budget whose byte cap is exactly ``size`` (extra=0) or just below it (extra=1).
+    budget_bytes = size - extra
+    tokens = budget_bytes // 3
+    text = _recall({'project': 'rc337-budget', 'token_budget': tokens})
+    assert len(text.encode('utf-8')) <= tokens * 3
+
+
+def test_recall_context_token_budget_smaller_than_first_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A budget smaller than the first observation still returns a capped partial, not an error."""
+    backend = _mk_local_backend(monkeypatch)
+    backend.put_observation(_mk_obs_full('z' * 2_000, project='rc337-tiny'))
+    text = _recall({'project': 'rc337-tiny', 'token_budget': 200})
+    assert 0 < len(text.encode('utf-8')) <= 600
+
+
+@pytest.mark.parametrize('budget', [-1, 1, 199])
+def test_recall_context_rejects_too_small_token_budget(monkeypatch: pytest.MonkeyPatch, budget: int) -> None:
+    _mk_local_backend(monkeypatch)
+    assert _recall({'token_budget': budget}).startswith('token_budget must be 0')
+
+
+@pytest.mark.parametrize('rows', [0, 1])
+def test_recall_context_explain_at_min_budget_keeps_dropped_line(monkeypatch: pytest.MonkeyPatch, rows: int) -> None:
+    """At the minimum budget the dropped line is complete and the byte cap still holds."""
+    backend = _mk_local_backend(monkeypatch)
+    for _ in range(rows):
+        backend.put_observation(_mk_obs_full('fig ' + 'f' * 2_000, project='rc337-min'))
+    text = _recall({'project': 'rc337-min', 'query': 'fig', 'explain': True, 'token_budget': 200})
+    assert len(text.encode('utf-8')) <= 600
+    assert text.endswith('dropped: budget=0, superseded=0, expired=0')
+    if rows:
+        assert '\nwhy: matched=[fig]; importance=3; rank=1/1' in text
+
+
+def test_recall_context_token_budget_never_exceeds_default_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _mk_local_backend(monkeypatch)
+    monkeypatch.setattr(mcp_server_module, 'RECALL_OUTPUT_MAX_BYTES', 3_000)
+    for _ in range(10):
+        backend.put_observation(_mk_obs_full('w' * 1_000, project='rc337-ceiling'))
+    text = _recall({'project': 'rc337-ceiling', 'token_budget': 1_000_000, 'limit': 10})
+    assert len(text.encode('utf-8')) <= 3_000
+
+
+def test_recall_context_explain_why_and_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """explain=True: every entry has a why line, and the tail breaks down what was left out."""
+    backend = _mk_local_backend(monkeypatch)
+    old = _mk_obs_full('kiwi old decision', project='rc337-explain', importance=2)
+    backend.put_observation(old)
+    new = _mk_obs_full('kiwi new decision', project='rc337-explain', importance=4)
+    new.supersedes = [old.observation_id]
+    backend.put_observation(new)
+    gone = _mk_obs_full('kiwi expired note', project='rc337-explain')
+    gone.expires_at = '2020-01-01T00:00:00Z'
+    backend.put_observation(gone)
+    live = _mk_obs_full('kiwi live note', project='rc337-explain')
+    backend.put_observation(live)
+
+    text = _recall({'project': 'rc337-explain', 'query': 'kiwi', 'explain': True})
+
+    whys = [ln for ln in text.splitlines() if ln.startswith('why: ')]
+    assert len(whys) == 2  # new + live
+    assert 'why: matched=[kiwi]; importance=4; rank=1/2' in whys
+    assert text.endswith('dropped: budget=0, superseded=1, expired=1')
+
+
+def test_recall_context_explain_counts_budget_drops(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _mk_local_backend(monkeypatch)
+    for i in range(8):
+        backend.put_observation(_mk_obs_full(f'plum row {i} ' + 'p' * 400, project='rc337-drop'))
+    text = _recall({'project': 'rc337-drop', 'query': 'plum', 'explain': True, 'token_budget': 500, 'limit': 8})
+    assert len(text.encode('utf-8')) <= 1_500
+    shown = text.count('\nwhy: ')
+    assert shown < 8
+    assert text.endswith(f'dropped: budget={8 - shown}, superseded=0, expired=0')
+
+
+def test_recall_context_summary_only_omits_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """summary_only drops the content body but keeps the id / subject / summary so get_memory can follow up."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('melon ' + 'm' * 1_500, project='rc337-summary')
+    obs.subject = 'melon subject'
+    obs.summary = 'melon summary line'
+    backend.put_observation(obs)
+    full = _recall({'project': 'rc337-summary', 'query': 'melon'})
+    short = _recall({'project': 'rc337-summary', 'query': 'melon', 'summary_only': True})
+    assert 'm' * 1_500 in full
+    assert 'm' * 100 not in short
+    assert f'id: {obs.observation_id}' in short
+    assert 'summary: melon summary line' in short
+    assert 'content: (omitted; get_memory <id> for the full text)' in short
+    assert len(short.encode('utf-8')) < len(full.encode('utf-8')) - 1_400
+
+
+def test_recall_context_summary_only_fits_more_entries_in_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _mk_local_backend(monkeypatch)
+    for i in range(10):
+        backend.put_observation(_mk_obs_full(f'pear {i} ' + 'q' * 1_500, project='rc337-more'))
+    args = {'project': 'rc337-more', 'query': 'pear', 'token_budget': 1_500, 'explain': True, 'limit': 10}
+    full = _recall(args)
+    short = _recall({**args, 'summary_only': True})
+    assert len(short.encode('utf-8')) <= 4_500
+    assert short.count('\nwhy: ') > full.count('\nwhy: ')
