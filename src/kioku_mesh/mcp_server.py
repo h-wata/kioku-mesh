@@ -865,7 +865,10 @@ def _clamp_recall_limit(limit: int) -> int:
 RECALL_OUTPUT_MAX_BYTES = SEARCH_OUTPUT_MAX_BYTES
 
 
-def _format_recall_entries(hits: list) -> list[str]:
+_RECALL_CONTENT_OMITTED = 'content: (omitted; get_memory <id> for the full text)'
+
+
+def _format_recall_entries(hits: list, summary_only: bool = False) -> list[str]:
     """Render one formatted block per observation, grouped by (project, memory_type).
 
     Groups are collected in first-hit order (same as the pre-cap
@@ -907,8 +910,13 @@ def _format_recall_entries(hits: list) -> list[str]:
             superseded_by = obs._extras.get('superseded_by') if hasattr(obs, '_extras') else None  # noqa: SLF001
             if superseded_by:
                 lines.append(f'superseded_by: {superseded_by}')
-            lines.append('content:')
-            lines.append(obs.content)
+            if summary_only:
+                # Issue #337: content is usually 1-2 KB per observation, so a small
+                # token_budget would hold only one or two full entries.
+                lines.append(_RECALL_CONTENT_OMITTED)
+            else:
+                lines.append('content:')
+                lines.append(obs.content)
             entries.append('\n'.join(lines))
     return entries
 
@@ -923,6 +931,7 @@ def _format_recall_markdown(
     filters_summary: str,
     max_bytes: int | None = None,
     hidden: dict[str, str] | None = None,
+    summary_only: bool = False,
 ) -> str:
     """Render recall hits under ``max_bytes``; with ``hidden`` (explain), append the dropped breakdown."""
     if max_bytes is None:
@@ -931,7 +940,7 @@ def _format_recall_markdown(
         text = 'No matching current context.'
         return text if hidden is None else _cut_utf8(text + _dropped_line(0, hidden), max_bytes)
     prefix = f'recall_context: {total} result(s)\n{filters_summary}'
-    entries = _format_recall_entries(hits)
+    entries = _format_recall_entries(hits, summary_only)
     if hidden is None:
         return _cap_search_output(entries, max_bytes, prefix=prefix)
     # The dropped line is part of the returned text, so reserve its longest form
@@ -997,6 +1006,45 @@ def _recall_budget_bytes(token_budget: int) -> int:
     return min(token_budget * 3, RECALL_OUTPUT_MAX_BYTES)
 
 
+def _recall_filters_summary(  # noqa: PLR0913 — one keyword per recall filter
+    *,
+    project: str,
+    project_filter: tuple[str, ...],
+    memory_types: list[str] | None,
+    source_files: list[str] | None,
+    references: list[str] | None,
+    reference_prefix: str,
+    since_iso: str,
+    query: str,
+    token_budget: int,
+    summary_only: bool,
+) -> str:
+    """Build the ``filters: ...`` header line of ``recall_context`` output."""
+    filter_parts = []
+    if project:
+        also_matched = [value for value in project_filter if value != project]
+        alias_note = f' (also matching {", ".join(repr(v) for v in also_matched)})' if also_matched else ''
+        filter_parts.append(f'project={project!r}{alias_note}')
+    if memory_types:
+        filter_parts.append(f'memory_types={memory_types}')
+    if source_files:
+        filter_parts.append(f'source_files={source_files}')
+    if references:
+        filter_parts.append(f'references={references}')
+    if reference_prefix:
+        filter_parts.append(f'reference_prefix={reference_prefix!r}')
+    if since_iso:
+        filter_parts.append(f'since={since_iso!r}')
+    if query:
+        filter_parts.append(f'query={query!r}')
+    if token_budget > 0:
+        filter_parts.append(f'token_budget={token_budget}')
+    if summary_only:
+        filter_parts.append('summary_only=True')
+    filters_summary = 'filters: ' + (', '.join(filter_parts) if filter_parts else 'none')
+    return filters_summary
+
+
 @mcp.tool()
 def recall_context(
     query: str = '',
@@ -1010,6 +1058,7 @@ def recall_context(
     reference_prefix: str = '',
     token_budget: int = 0,
     explain: bool = False,
+    summary_only: bool = False,
 ) -> str:
     """Recall current context with additive filters for memory_types, source_files, and references.
 
@@ -1037,6 +1086,9 @@ def recall_context(
             superseded=Y, expired=Z`` (observations left out for the byte budget,
             and hidden because superseded / expired; ``N+`` means at least N, as
             hidden rows are only counted up to 100).
+        summary_only: when True, each entry omits its ``content`` body (subject /
+            summary / metadata stay) so a small ``token_budget`` holds more entries;
+            call ``get_memory`` for the full text.
 
     The returned text is capped at ``RECALL_OUTPUT_MAX_BYTES`` (Issue #356/A1);
     if the cap is hit, whole observations are dropped from the tail, except
@@ -1099,27 +1151,21 @@ def recall_context(
             references=references_norm,
             reference_prefix=reference_prefix,
         )
-    filter_parts = []
-    if project:
-        also_matched = [value for value in project_filter if value != project]
-        alias_note = f' (also matching {", ".join(repr(v) for v in also_matched)})' if also_matched else ''
-        filter_parts.append(f'project={project!r}{alias_note}')
-    if memory_types_norm:
-        filter_parts.append(f'memory_types={memory_types_norm}')
-    if source_files_norm:
-        filter_parts.append(f'source_files={source_files_norm}')
-    if references_norm:
-        filter_parts.append(f'references={references_norm}')
-    if reference_prefix:
-        filter_parts.append(f'reference_prefix={reference_prefix!r}')
-    if since_iso:
-        filter_parts.append(f'since={since_iso!r}')
-    if query:
-        filter_parts.append(f'query={query!r}')
-    if token_budget > 0:
-        filter_parts.append(f'token_budget={token_budget}')
-    filters_summary = 'filters: ' + (', '.join(filter_parts) if filter_parts else 'none')
-    return _format_recall_markdown(hits, len(hits), filters_summary, _recall_budget_bytes(token_budget), hidden)
+    filters_summary = _recall_filters_summary(
+        project=project,
+        project_filter=project_filter,
+        memory_types=memory_types_norm,
+        source_files=source_files_norm,
+        references=references_norm,
+        reference_prefix=reference_prefix,
+        since_iso=since_iso,
+        query=query,
+        token_budget=token_budget,
+        summary_only=summary_only,
+    )
+    return _format_recall_markdown(
+        hits, len(hits), filters_summary, _recall_budget_bytes(token_budget), hidden, summary_only
+    )
 
 
 @mcp.tool()

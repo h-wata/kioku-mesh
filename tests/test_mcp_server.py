@@ -2869,6 +2869,7 @@ def test_recall_context_defaults_unchanged_by_new_args(monkeypatch: pytest.Monke
     assert 'why:' not in plain
     assert 'dropped:' not in plain
     assert 'token_budget' not in plain
+    assert 'omitted' not in plain
 
 
 @pytest.mark.parametrize('extra', [0, 1])
@@ -2954,3 +2955,31 @@ def test_recall_context_explain_counts_budget_drops(monkeypatch: pytest.MonkeyPa
     shown = text.count('\nwhy: ')
     assert shown < 8
     assert text.endswith(f'dropped: budget={8 - shown}, superseded=0, expired=0')
+
+
+def test_recall_context_summary_only_omits_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """summary_only drops the content body but keeps the id / subject / summary so get_memory can follow up."""
+    backend = _mk_local_backend(monkeypatch)
+    obs = _mk_obs_full('melon ' + 'm' * 1_500, project='rc337-summary')
+    obs.subject = 'melon subject'
+    obs.summary = 'melon summary line'
+    backend.put_observation(obs)
+    full = _recall({'project': 'rc337-summary', 'query': 'melon'})
+    short = _recall({'project': 'rc337-summary', 'query': 'melon', 'summary_only': True})
+    assert 'm' * 1_500 in full
+    assert 'm' * 100 not in short
+    assert f'id: {obs.observation_id}' in short
+    assert 'summary: melon summary line' in short
+    assert 'content: (omitted; get_memory <id> for the full text)' in short
+    assert len(short.encode('utf-8')) < len(full.encode('utf-8')) - 1_400
+
+
+def test_recall_context_summary_only_fits_more_entries_in_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    backend = _mk_local_backend(monkeypatch)
+    for i in range(10):
+        backend.put_observation(_mk_obs_full(f'pear {i} ' + 'q' * 1_500, project='rc337-more'))
+    args = {'project': 'rc337-more', 'query': 'pear', 'token_budget': 1_500, 'explain': True, 'limit': 10}
+    full = _recall(args)
+    short = _recall({**args, 'summary_only': True})
+    assert len(short.encode('utf-8')) <= 4_500
+    assert short.count('\nwhy: ') > full.count('\nwhy: ')
