@@ -231,6 +231,13 @@ kioku-mesh is designed to run inside a closed, trusted network — keep port
 the internet. By default it relies on network admission (Tailscale,
 WireGuard, firewall rules) rather than transport-level auth.
 
+Web and mobile clients that call MCP servers from the vendor's cloud (for
+example claude.ai custom connectors or ChatGPT on the web) are not supported.
+Reaching them would mean exposing the memory store to the internet, which this
+trust model rules out, so kioku-mesh neither ships nor documents a remote MCP
+gateway. To use your memories from a phone, drive a Claude Code session on a
+mesh host through Remote Control: the MCP server keeps running locally.
+
 When network admission alone is not enough, enable **mutual TLS**: every peer
 presents a certificate signed by your own private CA, and zenohd refuses any
 unverified link. Each peer's private key is generated locally and never leaves
